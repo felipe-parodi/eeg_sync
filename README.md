@@ -23,7 +23,7 @@
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Navigate to project
-cd asilver_eeg_sync
+cd eeg_sync
 
 # Create venv and install dependencies (takes ~5 seconds!)
 uv venv
@@ -558,7 +558,7 @@ If you use this tool in your research, please cite:
 
 ```
 EEG-Video Synchronization Tool
-https://github.com/[your-repo]/asilver_eeg_sync
+https://github.com/felipeparodi/eeg_sync
 ```
 
 ## License
