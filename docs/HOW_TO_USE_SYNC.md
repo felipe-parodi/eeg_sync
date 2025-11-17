@@ -1,6 +1,6 @@
 # How to Use Your Synchronized EEG and Video Data
 
-**For: Kitty (and anyone analyzing the data!)**
+**For: Anyone analyzing the data**
 **Written**: November 2025
 
 This guide shows you **exactly** how to use the sync results to analyze what was happening in the EEG when something occurred in the video.
