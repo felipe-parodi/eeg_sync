@@ -247,6 +247,44 @@ def ask_yes_no(prompt: str) -> bool:
             print(f"  ⚠ Invalid input '{response}'. Please enter 'y' or 'n'.")
 
 
+def _strip_quotes(filepath: str) -> str:
+    """
+    Strip surrounding quotes from file path and validate.
+
+    REQUIRES quotes around paths with spaces. This prevents common errors
+    from unquoted paths being interpreted incorrectly.
+
+    Args:
+        filepath: Raw file path string
+
+    Returns:
+        File path with quotes removed
+
+    Raises:
+        ValueError: If path contains spaces but is not quoted
+    """
+    original = filepath
+    filepath = filepath.strip()
+
+    # Check if path has quotes
+    has_quotes = False
+    if len(filepath) >= 2:
+        if (filepath[0] == '"' and filepath[-1] == '"') or \
+           (filepath[0] == "'" and filepath[-1] == "'"):
+            has_quotes = True
+            filepath = filepath[1:-1]
+
+    # Validate: if path has spaces, it MUST have been quoted
+    if ' ' in filepath and not has_quotes:
+        raise ValueError(
+            f"Path contains spaces and must be enclosed in quotes.\n"
+            f"  You entered: {original}\n"
+            f"  Please use:  \"{filepath}\""
+        )
+
+    return filepath
+
+
 def ask_file_path(prompt: str, must_exist: bool = True) -> str:
     """
     Ask for a file path with validation.
@@ -259,10 +297,29 @@ def ask_file_path(prompt: str, must_exist: bool = True) -> str:
         Valid file path as string
     """
     while True:
-        response = input(f"{prompt}: ").strip()
+        print(f"\n{prompt}")
+        print("(Paste path then press ENTER, or type manually)")
+        print("→ ", end="", flush=True)
+
+        response = input().strip()
 
         if not response:
             print("  ⚠ Please enter a file path.")
+            continue
+
+        # Clean up pasted text that might include the prompt
+        # This happens when terminals include prompt text in paste
+        if response.startswith(prompt):
+            response = response[len(prompt):].strip()
+            # Also remove leading colon if present
+            if response.startswith(":"):
+                response = response[1:].strip()
+
+        # Strip quotes and validate (requires quotes for paths with spaces)
+        try:
+            response = _strip_quotes(response)
+        except ValueError as e:
+            print(f"  ⚠ {e}")
             continue
 
         path = Path(response)
@@ -271,6 +328,7 @@ def ask_file_path(prompt: str, must_exist: bool = True) -> str:
             if not path.exists():
                 print(f"  ⚠ File not found: {response}")
                 print(f"    Please check the path and try again.")
+                print(f"    TIP: If path has spaces, wrap it in quotes")
                 continue
             if not path.is_file():
                 print(f"  ⚠ Path is not a file: {response}")
@@ -1916,6 +1974,8 @@ def collect_all_files() -> Dict[str, Optional[str]]:
     print("  - Drag and drop files into the terminal")
     print("  - Type/paste the full file path")
     print("  - Press ENTER to skip optional files")
+    print("\n⚠️  IMPORTANT: If your path contains spaces, enclose it in quotes")
+    print("   Example: \"/Users/name/my folder/data.csv\"")
 
     files = {}
 
@@ -1928,6 +1988,7 @@ def collect_all_files() -> Dict[str, Optional[str]]:
     response = input("EEG File B (.csv) - OPTIONAL (press ENTER to skip): ").strip()
     if response:
         try:
+            response = _strip_quotes(response)
             files["eeg_file_b"] = str(_validate_file_exists(response))
         except (FileNotFoundError, ValueError) as e:
             print(f"  ⚠ Warning: {e}")
@@ -1949,6 +2010,7 @@ def collect_all_files() -> Dict[str, Optional[str]]:
     ).strip()
     if response:
         try:
+            response = _strip_quotes(response)
             files["video_b"] = str(_validate_file_exists(response))
         except (FileNotFoundError, ValueError) as e:
             print(f"  ⚠ Warning: {e}")
