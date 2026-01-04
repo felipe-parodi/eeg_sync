@@ -558,7 +558,7 @@ If you use this tool in your research, please cite:
 
 ```
 EEG-Video Synchronization Tool
-https://github.com/felipeparodi/eeg_sync
+https://github.com/felipe-parodi/eeg_sync
 ```
 
 ## License
@@ -568,3 +568,4 @@ MIT License - feel free to use and modify for your research.
 ## Support
 
 For issues or questions, please open an issue on GitHub.
+
