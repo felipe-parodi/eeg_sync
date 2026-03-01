@@ -16,8 +16,12 @@ from typing import Optional, Dict, Any, List, Tuple, Union
 import sys
 
 import pandas as pd
-import cv2
 import numpy as np
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 # Note: 10s startup is unavoidable - pandas/cv2/numpy are heavy libraries
 # The tradeoff is worth it for the functionality they provide
@@ -60,6 +64,7 @@ STEP_ONE_MINUTE = 60.0
 # Display settings
 MAX_DISPLAY_WIDTH = 1920
 KEYBOARD_POLL_MS = 1
+DEBUG_KEY_EVENTS = False
 
 
 # ============================================================================
@@ -75,6 +80,15 @@ def _validate_file_exists(filepath: Union[str, Path]) -> Path:
     if not path.is_file():
         raise ValueError(f"Not a file: {filepath}")
     return path
+
+
+def _require_cv2() -> None:
+    """Require OpenCV for interactive video operations."""
+    if cv2 is None:
+        raise ImportError(
+            "OpenCV is required for video synchronization features. "
+            "Install with: pip install opencv-python"
+        )
 
 
 def _read_eeg_sample_rate(filepath: Path) -> int:
@@ -170,6 +184,27 @@ def _make_unique_column_names(names: List[str]) -> List[str]:
             unique_names.append(name)
 
     return unique_names
+
+
+def _find_non_baseline_mask(values: pd.Series, baseline_value: float) -> pd.Series:
+    """
+    Return a mask for valid (non-NaN) values that differ from baseline.
+
+    Uses a small absolute tolerance to avoid floating-point edge cases.
+    """
+    numeric_values = pd.to_numeric(values, errors="coerce")
+    valid_values = numeric_values.notna()
+    is_baseline = pd.Series(
+        np.isclose(
+            numeric_values.to_numpy(),
+            baseline_value,
+            rtol=0.0,
+            atol=1e-6,
+            equal_nan=False,
+        ),
+        index=numeric_values.index,
+    )
+    return valid_values & ~is_baseline
 
 
 def parse_timestamp(timestamp: Union[str, float, int]) -> float:
@@ -384,7 +419,7 @@ def find_sync_from_raw_eeg(
 
     # Find first non-baseline value
     ir_values = pd.to_numeric(data[ir_blaster_column], errors="coerce")
-    sync_event_rows = data[ir_values != baseline_value]
+    sync_event_rows = data[_find_non_baseline_mask(ir_values, baseline_value)]
 
     if sync_event_rows.empty:
         raise ValueError("No sync pulse found in file")
@@ -440,10 +475,12 @@ def find_sync_from_csv(
         # Find first non-baseline value
         # Convert to numeric to handle both int and float
         values = pd.to_numeric(data["Value"], errors="coerce")
-        non_baseline = values != baseline_value
+        non_baseline = _find_non_baseline_mask(values, baseline_value)
 
         if not non_baseline.any():
-            raise ValueError(f"No IR pulse found (all values are {baseline_value})")
+            raise ValueError(
+                f"No IR pulse found (all valid values are {baseline_value})"
+            )
 
         # Get first pulse timestamp
         first_pulse_idx = non_baseline.idxmax()
@@ -476,38 +513,86 @@ def find_sync_pulse(
         FileNotFoundError: If no valid file found
         ValueError: If sync pulse not found
     """
-    path = Path(filepath)
+    path = _validate_file_exists(filepath)
+    suffix = path.suffix.lower()
+    csv_errors = []
+    txt_errors = []
 
-    # Try CSV first if preferred
+    def _unique_paths(paths: List[Path]) -> List[Path]:
+        unique = []
+        seen = set()
+        for p in paths:
+            p_str = str(p)
+            if p_str in seen:
+                continue
+            seen.add(p_str)
+            unique.append(p)
+        return unique
+
+    def _derive_txt_candidates_from_csv(csv_path: Path) -> List[Path]:
+        candidates = [csv_path.with_suffix(".txt")]
+        stem = csv_path.stem
+
+        # Remove common CSV suffix patterns to recover the raw TXT stem.
+        for token in ["fixed_irBlaster", "irBlaster"]:
+            token_idx = stem.find(token)
+            if token_idx != -1:
+                raw_stem = stem[:token_idx].rstrip(" _-")
+                if raw_stem:
+                    candidates.append(csv_path.with_name(f"{raw_stem}.txt"))
+                    candidates.extend(sorted(csv_path.parent.glob(f"{raw_stem}*.txt")))
+        return _unique_paths(candidates)
+
+    # Try CSV first when requested.
+    csv_candidates: List[Path] = []
     if prefer_csv:
-        # Look for CSV file
-        if path.suffix.lower() == ".csv":
-            csv_path = path
-        else:
-            # Try to find matching CSV file
-            # Pattern: TEp_OpenBCI-RAW-*.txt → TEp_OpenBCI-RAW-*fixed_irBlaster.csv
-            base_name = path.stem  # e.g., "TEp_OpenBCI-RAW-2025-11-14_10-40-38"
-            csv_pattern = f"{base_name}*irBlaster.csv"
-            csv_files = list(path.parent.glob(csv_pattern))
+        if suffix == ".csv":
+            csv_candidates = [path]
+        elif suffix in [".txt", ""]:
+            base_name = path.stem
+            csv_candidates = sorted(path.parent.glob(f"{base_name}*irBlaster.csv"))
 
-            csv_path = csv_files[0] if csv_files else None
-
-        if csv_path and csv_path.exists():
+        for csv_path in _unique_paths(csv_candidates):
+            if not csv_path.exists():
+                continue
             try:
                 sync_time = find_sync_from_csv(csv_path)
                 return sync_time, f"CSV: {csv_path.name}"
             except (FileNotFoundError, ValueError) as e:
+                csv_errors.append(f"{csv_path.name}: {e}")
                 print(f"  ⚠ CSV read failed: {e}")
-                print(f"  → Falling back to TXT file...")
+                print("  → Falling back to TXT file...")
 
-    # Fall back to TXT file
-    if path.suffix.lower() in [".txt", ""]:
-        txt_path = path
+    # Fall back to TXT candidates.
+    txt_candidates: List[Path] = []
+    if suffix in [".txt", ""]:
+        txt_candidates = [path]
+    elif suffix == ".csv":
+        txt_candidates = _derive_txt_candidates_from_csv(path)
     else:
-        raise FileNotFoundError(f"No valid EEG file found. Tried: {filepath}")
+        raise FileNotFoundError(
+            f"Unsupported EEG file extension '{path.suffix}'. Use .txt or .csv."
+        )
 
-    sync_time = find_sync_from_raw_eeg(txt_path)
-    return sync_time, f"TXT: {txt_path.name}"
+    for txt_path in _unique_paths(txt_candidates):
+        if not txt_path.exists():
+            continue
+        try:
+            sync_time = find_sync_from_raw_eeg(txt_path)
+            return sync_time, f"TXT: {txt_path.name}"
+        except (FileNotFoundError, ValueError) as e:
+            txt_errors.append(f"{txt_path.name}: {e}")
+
+    # Report why sync extraction failed.
+    error_lines = csv_errors + txt_errors
+    if error_lines:
+        joined = "\n  - ".join(error_lines)
+        raise ValueError(f"Could not find sync pulse. Details:\n  - {joined}")
+
+    raise FileNotFoundError(
+        "No valid EEG file found for sync extraction. "
+        f"Started from: {filepath}"
+    )
 
 
 # ============================================================================
@@ -537,6 +622,7 @@ class VideoFrameViewer:
             FileNotFoundError: If video file doesn't exist
             ValueError: If video can't be opened or has invalid properties
         """
+        _require_cv2()
         self.video_path = _validate_file_exists(video_path)
         self.max_display_width = max_display_width
 
@@ -570,6 +656,8 @@ class VideoFrameViewer:
 
     def __del__(self):
         """Ensure video capture is released."""
+        if cv2 is None:
+            return
         if hasattr(self, "cap"):
             self.cap.release()
             cv2.destroyAllWindows()
@@ -830,9 +918,10 @@ class VideoFrameViewer:
         Returns:
             Result dict if user marked frame or cancelled, None to continue
         """
-        # Debug: Print key code and action (use spaces to clear previous line)
-        key_name = self._get_key_name(key)
-        print(f"[DEBUG] Key: {key} ({key_name})                    ", end="\r")
+        if DEBUG_KEY_EVENTS:
+            # Debug: Print key code and action (use spaces to clear previous line)
+            key_name = self._get_key_name(key)
+            print(f"[DEBUG] Key: {key} ({key_name})                    ", end="\r")
 
         # Quit
         if key == ord("q") or key == KEY_ESC:
@@ -1045,9 +1134,10 @@ class VideoFrameViewer:
                 # Wait for key press
                 key = cv2.waitKey(0) & 0xFF
 
-                # Debug key code
-                key_name = self._get_key_name(key)
-                print(f"[DEBUG] Key: {key} ({key_name})                    ", end="\r")
+                if DEBUG_KEY_EVENTS:
+                    # Debug key code
+                    key_name = self._get_key_name(key)
+                    print(f"[DEBUG] Key: {key} ({key_name})                    ", end="\r")
 
                 # Handle clap marking keys
                 if key == ord("c"):
@@ -1091,11 +1181,8 @@ class VideoFrameViewer:
                         print(
                             f"\n⚠ Expected {expected_count} claps, "
                             f"but you marked {len(marked_claps)}. "
-                            f"Continue anyway? (y/n): ",
-                            end="",
+                            "Saving with mismatched counts.",
                         )
-                        # This is tricky in the video window - just accept it
-                        pass
 
                     print(f"\n✓ Saved {len(marked_claps)} claps!")
                     return marked_claps
@@ -1915,6 +2002,11 @@ def extract_eeg_segment(
     """
     filepath = _validate_file_exists(eeg_filepath)
 
+    if video_end <= video_start:
+        raise ValueError(
+            "Invalid video time range: video_end must be greater than video_start."
+        )
+
     # Convert video time to EEG time
     # video_time = eeg_time + offset -> eeg_time = video_time - offset
     eeg_start = video_start - eeg_video_offset
@@ -1981,11 +2073,15 @@ def collect_all_files() -> Dict[str, Optional[str]]:
 
     # EEG File A
     print("\n" + "-" * 60)
-    files["eeg_file_a"] = ask_file_path("EEG File A (.csv) - REQUIRED", must_exist=True)
+    files["eeg_file_a"] = ask_file_path(
+        "EEG File A (.csv/.txt) - REQUIRED", must_exist=True
+    )
 
     # EEG File B (optional)
     print("\n" + "-" * 60)
-    response = input("EEG File B (.csv) - OPTIONAL (press ENTER to skip): ").strip()
+    response = input(
+        "EEG File B (.csv/.txt) - OPTIONAL (press ENTER to skip): "
+    ).strip()
     if response:
         try:
             response = _strip_quotes(response)
@@ -2054,7 +2150,7 @@ def validate_file_paths(files: Dict[str, Optional[str]]) -> Tuple[bool, List[str
                 )
 
     # Validate extensions
-    eeg_exts = [".csv"]
+    eeg_exts = [".csv", ".txt"]
     video_exts = [".mp4", ".mov", ".avi"]
 
     for key, filepath in files.items():
@@ -2062,7 +2158,9 @@ def validate_file_paths(files: Dict[str, Optional[str]]) -> Tuple[bool, List[str
             path = Path(filepath)
             if "eeg" in key.lower():
                 if path.suffix.lower() not in eeg_exts:
-                    errors.append(f"⚠️ {key}: Expected .csv file, got {path.suffix}")
+                    errors.append(
+                        f"⚠️ {key}: Expected EEG file (.csv/.txt), got {path.suffix}"
+                    )
             elif "video" in key.lower():
                 if path.suffix.lower() not in video_exts:
                     errors.append(
@@ -2334,7 +2432,7 @@ To use the synchronization offsets in your analysis:
 
    # Get EEG data for video segment 1:30 to 2:00
    eeg_data = extract_eeg_segment(
-       eeg_filepath='path/to/eeg.csv',
+       eeg_filepath='path/to/eeg.txt',
        video_start=90,   # 1:30 in seconds
        video_end=120,    # 2:00 in seconds
        eeg_video_offset=sync['eeg_to_video_a']['offset']
