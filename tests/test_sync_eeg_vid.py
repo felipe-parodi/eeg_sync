@@ -1,8 +1,9 @@
 import sys
 from pathlib import Path
-import tomllib
 
 import pytest
+
+tomllib = pytest.importorskip("tomllib", reason="requires Python 3.11+")
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
