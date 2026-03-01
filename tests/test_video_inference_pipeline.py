@@ -131,7 +131,7 @@ def test_run_pipeline_supports_two_cameras_with_mocks(tmp_path: Path):
             source_video=source_video,
             compressed_video=str(camera_dir / "intermediate" / "compressed.mp4"),
             frames_dir=str(camera_dir / "frames"),
-            raw_output_json=str(camera_dir / "intermediate" / "sam3d_raw.json"),
+            raw_output_json=str(camera_dir / "intermediate" / "inference_raw.json"),
             schema_valid=True,
             frame_count=2,
             errors=[],
@@ -201,3 +201,66 @@ def test_run_camera_pipeline_can_skip_compression(tmp_path: Path):
     )
 
     assert summary.schema_valid
+
+
+def test_run_camera_pipeline_uses_ultralytics_backend_config(tmp_path: Path):
+    source_video = tmp_path / "input.mp4"
+    source_video.write_text("fake", encoding="utf-8")
+
+    config = PipelineConfig(
+        video_a=str(source_video),
+        video_b=None,
+        output_dir=str(tmp_path / "out"),
+        checkpoint_path="",
+        mhr_path="",
+        inference_backend="ultralytics",
+        ultralytics_model_path="yolo11n-pose.pt",
+        tracker_backend="internal",
+        tracker_name="bytetrack",
+        dry_run=True,
+    )
+
+    def fake_extract_fn(**kwargs):
+        frames_dir = Path(kwargs["frames_dir"])
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(2):
+            (frames_dir / f"frame_{idx:06d}.jpg").write_text("x", encoding="utf-8")
+        return FrameExtractionResult(
+            video_path=Path(kwargs["video_path"]),
+            frames_dir=frames_dir,
+            frame_rate=float(kwargs["frame_rate"]),
+            frame_paths=sorted(frames_dir.glob("frame_*.jpg")),
+            command=[],
+            executed=False,
+        )
+
+    seen = {}
+
+    def fake_infer_fn(runner_config):
+        seen["runner_class"] = runner_config.__class__.__name__
+        seen["model_path"] = runner_config.model_path
+        payload = _fake_payload(frame_count=2)
+        Path(runner_config.output_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(runner_config.output_json).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        return payload
+
+    summary = run_camera_pipeline(
+        camera_id="camera_a",
+        source_video=str(source_video),
+        session_dir=tmp_path / "session",
+        config=config,
+        compress_fn=lambda **kwargs: CompressionResult(
+            input_path=Path(kwargs["input_path"]),
+            output_path=Path(kwargs["output_path"]),
+            command=[],
+            executed=False,
+        ),
+        extract_fn=fake_extract_fn,
+        infer_fn=fake_infer_fn,
+    )
+
+    assert summary.schema_valid
+    assert seen["runner_class"] == "UltraRunnerConfig"
+    assert seen["model_path"] == "yolo11n-pose.pt"

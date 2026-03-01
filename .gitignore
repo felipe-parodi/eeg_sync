@@ -3,6 +3,8 @@
 *.json
 data/
 video_inference/data/
+video_inference/compressed/
+video_inference/output/
 !tests/fixtures/**/*.json
 
 # Claude Code

@@ -15,6 +15,7 @@ from .compress import CompressionResult, compress_video
 from .frames import FrameExtractionResult, extract_frames_ffmpeg
 from .sam3d_runner import RunnerConfig, run_sam3d_on_images
 from .schema import ValidationResult, validate_session_output
+from .ultralytics_runner import UltraRunnerConfig, run_ultralytics_pose_on_images
 
 
 @dataclass
@@ -38,12 +39,16 @@ class PipelineConfig:
     video_a: str
     video_b: Optional[str]
     output_dir: str
-    checkpoint_path: str
-    mhr_path: str
+    checkpoint_path: str = ""
+    mhr_path: str = ""
     session_id: Optional[str] = None
     device: str = "auto"
+    inference_backend: str = "sam3d"
     inference_mode: str = "auto"
     detector_name: str = "sam3"
+    ultralytics_model_path: str = "yolo11n-pose.pt"
+    tracker_backend: str = "internal"
+    tracker_name: str = "bytetrack"
     bbox_thresh: float = 0.5
     max_images: Optional[int] = None
     use_mask: bool = False
@@ -173,13 +178,13 @@ def run_camera_pipeline(
     config: PipelineConfig,
     compress_fn: Callable[..., CompressionResult] = compress_video,
     extract_fn: Callable[..., FrameExtractionResult] = extract_frames_ffmpeg,
-    infer_fn: Callable[[RunnerConfig], Dict[str, Any]] = run_sam3d_on_images,
+    infer_fn: Optional[Callable[[Any], Dict[str, Any]]] = None,
 ) -> CameraPipelineSummary:
     camera_dir = session_dir / camera_id
     intermediate_dir = camera_dir / "intermediate"
     frames_dir = camera_dir / "frames"
     compressed_video_path = intermediate_dir / "compressed.mp4"
-    raw_output_json = intermediate_dir / "sam3d_raw.json"
+    raw_output_json = intermediate_dir / "inference_raw.json"
 
     camera_dir.mkdir(parents=True, exist_ok=True)
     intermediate_dir.mkdir(parents=True, exist_ok=True)
@@ -235,23 +240,42 @@ def run_camera_pipeline(
             dry_run=config.dry_run,
         )
 
-    runner_config = RunnerConfig(
-        checkpoint_path=config.checkpoint_path,
-        mhr_path=config.mhr_path,
-        image_folder=str(extraction_result.frames_dir),
-        output_json=str(raw_output_json),
-        device=config.device,
-        inference_mode=config.inference_mode,
-        detector_name=config.detector_name,
-        bbox_thresh=config.bbox_thresh,
-        max_images=config.max_images,
-        use_mask=config.use_mask,
-    )
+    if config.inference_backend == "sam3d":
+        runner_config: Any = RunnerConfig(
+            checkpoint_path=config.checkpoint_path,
+            mhr_path=config.mhr_path,
+            image_folder=str(extraction_result.frames_dir),
+            output_json=str(raw_output_json),
+            device=config.device,
+            inference_mode=config.inference_mode,
+            detector_name=config.detector_name,
+            bbox_thresh=config.bbox_thresh,
+            max_images=config.max_images,
+            use_mask=config.use_mask,
+        )
+        selected_infer_fn = infer_fn or run_sam3d_on_images
+    elif config.inference_backend == "ultralytics":
+        runner_config = UltraRunnerConfig(
+            model_path=config.ultralytics_model_path,
+            image_folder=str(extraction_result.frames_dir),
+            output_json=str(raw_output_json),
+            device=config.device,
+            conf=config.bbox_thresh,
+            max_images=config.max_images,
+            tracker_backend=config.tracker_backend,
+            tracker_name=config.tracker_name,
+        )
+        selected_infer_fn = infer_fn or run_ultralytics_pose_on_images
+    else:
+        raise ValueError(
+            f"Unsupported inference_backend '{config.inference_backend}'. "
+            "Expected 'sam3d' or 'ultralytics'."
+        )
 
     if config.reuse_existing and raw_output_json.exists():
         payload = json.loads(raw_output_json.read_text(encoding="utf-8"))
     else:
-        payload = infer_fn(runner_config)
+        payload = selected_infer_fn(runner_config)
 
     validation = _write_schema_outputs(
         payload=payload,
@@ -305,7 +329,7 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="video-infer",
-        description="Video inference pipeline (compress -> frames -> sam3d -> export).",
+        description="Video inference pipeline (compress -> frames -> backend -> export).",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -314,15 +338,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--video-b", default=None, type=str)
     run_parser.add_argument("--output-dir", default="video_inference/output", type=str)
     run_parser.add_argument("--session-id", default=None, type=str)
-    run_parser.add_argument("--checkpoint-path", required=True, type=str)
-    run_parser.add_argument("--mhr-path", required=True, type=str)
+    run_parser.add_argument("--checkpoint-path", default="", type=str)
+    run_parser.add_argument("--mhr-path", default="", type=str)
     run_parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    run_parser.add_argument(
+        "--inference-backend",
+        default="sam3d",
+        choices=["sam3d", "ultralytics"],
+    )
     run_parser.add_argument(
         "--inference-mode",
         default="auto",
         choices=["auto", "full", "body"],
     )
     run_parser.add_argument("--detector-name", default="sam3", type=str)
+    run_parser.add_argument(
+        "--ultralytics-model-path",
+        default="yolo11n-pose.pt",
+        type=str,
+    )
+    run_parser.add_argument(
+        "--tracker-backend",
+        default="internal",
+        choices=["internal", "roboflow"],
+    )
+    run_parser.add_argument("--tracker-name", default="bytetrack", type=str)
     run_parser.add_argument("--bbox-thresh", default=0.5, type=float)
     run_parser.add_argument("--max-images", default=None, type=int)
     run_parser.add_argument("--use-mask", action="store_true", default=False)
@@ -351,8 +391,12 @@ def main() -> None:
             mhr_path=args.mhr_path,
             session_id=args.session_id,
             device=args.device,
+            inference_backend=args.inference_backend,
             inference_mode=args.inference_mode,
             detector_name=args.detector_name,
+            ultralytics_model_path=args.ultralytics_model_path,
+            tracker_backend=args.tracker_backend,
+            tracker_name=args.tracker_name,
             bbox_thresh=args.bbox_thresh,
             max_images=args.max_images,
             use_mask=args.use_mask,

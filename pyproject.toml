@@ -22,10 +22,15 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
 ]
+video = [
+    "ultralytics>=8.3.0",
+    "supervision>=0.21.0",
+]
 
 [project.scripts]
 eeg-sync = "sync_eeg_vid:main"
 video-infer-sam3d = "video_inference.sam3d_runner:main"
+video-infer-ultralytics = "video_inference.ultralytics_runner:main"
 video-infer = "video_inference.pipeline:main"
 video-compress-rapid = "video_inference.rapid_compress:main"
 
