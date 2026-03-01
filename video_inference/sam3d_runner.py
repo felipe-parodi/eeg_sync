@@ -84,6 +84,29 @@ def _patch_cpu_device_paths(model: Any) -> None:
     model.get_ray_condition = types.MethodType(_get_ray_condition_cpu_safe, model)
 
 
+def _patch_estimator_device_transfers(
+    resolved_device: str,
+    estimator_module: Any | None = None,
+) -> None:
+    """
+    Patch estimator-level device transfers for CPU compatibility.
+
+    Upstream estimator calls `recursive_to(batch, "cuda")` unconditionally.
+    We remap that transfer target to the configured runtime device.
+    """
+    if estimator_module is None:
+        import sam_3d_body.sam_3d_body_estimator as estimator_module  # type: ignore
+
+    original_recursive_to = estimator_module.recursive_to
+
+    def _recursive_to_runtime_device(batch, target_device):  # noqa: ANN001
+        if isinstance(target_device, str) and target_device == "cuda":
+            target_device = resolved_device
+        return original_recursive_to(batch, target_device)
+
+    estimator_module.recursive_to = _recursive_to_runtime_device
+
+
 def _build_estimator(config: RunnerConfig) -> tuple[Any, str, str]:
     _ensure_submodule_importable()
 
@@ -93,6 +116,7 @@ def _build_estimator(config: RunnerConfig) -> tuple[Any, str, str]:
 
     device = resolve_device(config.device)
     inference_mode = resolve_inference_mode(device, config.inference_mode)
+    _patch_estimator_device_transfers(device)
 
     torch_device = torch.device(device)
     model, model_cfg = load_sam_3d_body(
