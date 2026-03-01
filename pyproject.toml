@@ -26,6 +26,7 @@ dev = [
 [project.scripts]
 eeg-sync = "sync_eeg_vid:main"
 video-infer-sam3d = "video_inference.sam3d_runner:main"
+video-infer = "video_inference.pipeline:main"
 
 [build-system]
 requires = ["hatchling"]

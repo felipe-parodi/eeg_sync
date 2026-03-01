@@ -8,7 +8,6 @@ from .tracking import (
     assign_two_person_tracks,
     bbox_iou,
 )
-
 __all__ = [
     "ValidationResult",
     "validate_session_output",
