@@ -1,0 +1,14 @@
+name: eeg-sync
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - ffmpeg
+  - pip:
+      - -r requirements.txt
+      - pytest>=7.0.0
+      - black>=23.0.0
+      - ruff>=0.1.0
+      - ultralytics>=8.3.0
+      - supervision>=0.21.0

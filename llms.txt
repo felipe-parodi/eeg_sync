@@ -15,8 +15,9 @@ Current layout
 - video_inference/: SAM3 integration scaffolding (schema, device routing, two-person tracking).
 - video_inference/pipeline.py: end-to-end CLI (`video-infer run`) for compress->extract->infer->export.
 - video_inference/rapid_compress.py: standalone fast compressor (`video-compress-rapid`).
-- video_inference/ultralytics_runner.py: optional Ultralytics 2D pose backend.
-- video_analysis/: Planned module (not yet created).
+- video_inference/ultralytics_runner.py: Ultralytics 2D pose backend with configurable multi-person tracking.
+- video_analysis/interpolate.py: interpolate low-FPS outputs to higher FPS (`video-interpolate`).
+- video_analysis/visualize_pose_tracks.py: overlay track IDs + poses on frames (`video-visualize`).
 - third_party/sam-3d-body/: Upstream SAM-3D-Body git submodule.
 
 Core timing conventions
@@ -48,22 +49,22 @@ How to explore this codebase quickly
    - `extract_eeg_segment`, `main`
 3. Read `tests/test_sync_eeg_vid.py` to understand protected behavior.
 
-Planned architecture (Phase 2+)
--------------------------------
+Architecture (Phase 2+)
+-----------------------
 - `video_inference/`
   - compress: video preprocessing profiles.
   - track: SAM3/SAM3D-based two-instance tracking with persistent IDs.
   - pose: 2D/3D pose export with per-frame confidence and metadata.
 - `video_analysis/`
-  - feature extraction from inference outputs.
+  - interpolation and feature extraction from inference outputs.
   - scientific visualizations for social/movement metrics.
   - report-ready summaries.
 
-ID policy for parent-child tracking
------------------------------------
-- Always enforce exactly two tracked identities.
-- Preferred heuristic: larger person => parent, smaller => child.
-- Add swap detection/correction and track confidence in outputs.
+ID policy
+---------
+- Two-person internal mode: parent/child heuristic with temporal continuity.
+- Multi-person mode: tracker-stable IDs (`person_00`, `person_01`, ...).
+- `max_persons` and `enforce_exact_person_count` are configured per run.
 
 Notes for future agents
 -----------------------

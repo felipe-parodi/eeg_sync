@@ -38,6 +38,19 @@ pip install -e .
 pip install -r requirements.txt
 ```
 
+**Option 3: conda (project env, recommended for video inference)**
+```bash
+conda env create -f environment.yml
+conda activate eeg-sync
+```
+
+This installs:
+- base package
+- dev tools (`pytest`, `ruff`, `black`)
+- video stack (`ultralytics`, `supervision`)
+
+Note: current packaging metadata is still being hardened, so this env installs dependencies directly (via `requirements.txt` + explicit dev/video deps) rather than editable package install.
+
 ### Basic Usage
 
 **Quick Start:**
@@ -57,6 +70,40 @@ The script will guide you through:
 - Can provide either `.txt` (raw) or `.csv` (cleaned IR data) files
 - Script **automatically prefers CSV** files (cleaner, no noise)
 - Falls back to TXT if CSV not found
+
+## Video Inference Workflow (Ultralytics)
+
+For parent-child / multi-person video tracking workflows in `video_inference/`:
+
+1. Rapid compress source videos:
+```bash
+video-compress-rapid \
+  --video video_inference/data/camera_a_raw.mov \
+  --video video_inference/data/camera_b_raw.mov \
+  --output-dir video_inference/compressed
+```
+
+2. Run Ultralytics inference (example: 4 tracked people, 1 fps, two cameras):
+```bash
+video-infer run \
+  --video-a video_inference/compressed/camera_a_raw_rapid.mp4 \
+  --video-b video_inference/compressed/camera_b_raw_rapid.mp4 \
+  --inference-backend ultralytics \
+  --ultralytics-model-path video_inference/output/models/yolo11n-pose.pt \
+  --tracker-backend roboflow \
+  --tracker-name bytetrack \
+  --max-persons 4 \
+  --frame-rate 1 \
+  --device cpu \
+  --skip-compress
+```
+
+3. Optional interpolation to higher FPS outputs:
+```bash
+video-interpolate \
+  --camera-dir video_inference/output/<session_id>/camera_a \
+  --target-fps 8
+```
 
 ## How It Works
 

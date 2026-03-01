@@ -33,6 +33,8 @@ video-infer-sam3d = "video_inference.sam3d_runner:main"
 video-infer-ultralytics = "video_inference.ultralytics_runner:main"
 video-infer = "video_inference.pipeline:main"
 video-compress-rapid = "video_inference.rapid_compress:main"
+video-interpolate = "video_analysis.interpolate:main"
+video-visualize = "video_analysis.visualize_pose_tracks:main"
 
 [build-system]
 requires = ["hatchling"]

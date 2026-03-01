@@ -6,8 +6,8 @@ This document defines the minimal output contract for `video_inference/`.
 Goals
 -----
 - Keep outputs deterministic and machine-parseable.
-- Enforce exactly two tracked identities for this project.
-- Preserve a stable parent/child mapping across frames.
+- Support configurable multi-person tracking via `assumptions.max_persons`.
+- Preserve stable identity mapping across frames.
 
 Required files per session
 --------------------------
@@ -20,7 +20,8 @@ Required files per session
 - `schema_version`
 - `session_id`
 - `source_videos`
-- `assumptions.max_persons` (must be `2`)
+- `assumptions.max_persons` (integer >= 1)
+- `assumptions.enforce_exact_person_count` (boolean)
 - `outputs.tracks_2d`
 - `outputs.pose_3d`
 
@@ -28,13 +29,14 @@ Required files per session
 --------------------------------
 - `frame_idx`
 - `timestamp_s`
-- `track_id` (`0` and `1`)
-- `track_label` (`parent` and `child`)
+- `track_id` (`0..max_persons-1`)
+- `track_label` (stable per `track_id`)
 - `bbox_x1`, `bbox_y1`, `bbox_x2`, `bbox_y2`
 - `track_confidence` (`0..1`)
 
 Rules:
-- each frame must have exactly 2 rows (one per track)
+- if `enforce_exact_person_count=true`, each frame must have exactly `max_persons` rows
+- otherwise each frame must have `1..max_persons` rows
 - no duplicate `(frame_idx, track_id)`
 - `track_id` -> `track_label` mapping must remain consistent
 
@@ -51,7 +53,7 @@ Rules:
 Rules:
 - no duplicate `(frame_idx, track_id, keypoint_name)`
 - finite 3D coordinates
-- same `track_id` set as `tracks_2d.csv`
+- `track_id` values must stay within `0..max_persons-1`
 
 Synthetic fixture
 -----------------

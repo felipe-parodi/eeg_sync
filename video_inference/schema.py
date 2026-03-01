@@ -3,8 +3,8 @@ Schema contract and validators for video inference outputs.
 
 This module defines the minimal public-facing contract for Phase 2 outputs:
 - session manifest metadata
-- 2D tracking rows for exactly two people
-- 3D pose rows for those two people
+- 2D tracking rows for up to N people (N from manifest assumptions.max_persons)
+- 3D pose rows for those tracked identities
 """
 
 from __future__ import annotations
@@ -12,13 +12,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
-
-EXPECTED_TRACK_IDS = {0, 1}
-EXPECTED_TRACK_LABELS = {"parent", "child"}
 
 REQUIRED_MANIFEST_KEYS = {
     "schema_version",
@@ -105,14 +102,23 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
 
     assumptions = manifest.get("assumptions", {})
     max_persons = assumptions.get("max_persons")
-    if max_persons != 2:
-        errors.append("manifest: assumptions.max_persons must be 2")
+    if not isinstance(max_persons, int) or max_persons < 1:
+        errors.append("manifest: assumptions.max_persons must be an integer >= 1")
+
+    enforce_exact = assumptions.get("enforce_exact_person_count", False)
+    if not isinstance(enforce_exact, bool):
+        errors.append("manifest: assumptions.enforce_exact_person_count must be boolean")
 
     return errors
 
 
-def validate_tracks_2d(tracks_df: pd.DataFrame) -> List[str]:
-    """Validate two-person 2D tracking table."""
+def validate_tracks_2d(
+    tracks_df: pd.DataFrame,
+    max_persons: int = 2,
+    enforce_exact_person_count: bool = True,
+    expected_track_labels: Optional[Set[str]] = None,
+) -> List[str]:
+    """Validate 2D tracking table."""
     errors: List[str] = []
     context = "tracks_2d"
 
@@ -163,30 +169,51 @@ def validate_tracks_2d(tracks_df: pd.DataFrame) -> List[str]:
     if ((bbox_x2 - bbox_x1) <= 0).any() or ((bbox_y2 - bbox_y1) <= 0).any():
         errors.append(f"{context}: bbox_x2/y2 must be greater than bbox_x1/y1")
 
+    expected_track_ids = set(range(int(max_persons)))
     unique_ids = set(track_id.unique().tolist())
-    if unique_ids != EXPECTED_TRACK_IDS:
+    if not unique_ids:
+        errors.append(f"{context}: track_id set cannot be empty")
+    if not unique_ids.issubset(expected_track_ids):
         errors.append(
-            f"{context}: expected track_id set {sorted(EXPECTED_TRACK_IDS)}, "
+            f"{context}: track_id values must be within {sorted(expected_track_ids)}, "
+            f"found {sorted(unique_ids)}"
+        )
+    if enforce_exact_person_count and unique_ids != expected_track_ids:
+        errors.append(
+            f"{context}: expected full track_id set {sorted(expected_track_ids)}, "
             f"found {sorted(unique_ids)}"
         )
 
-    unique_labels = set(labels.unique().tolist())
-    if unique_labels != EXPECTED_TRACK_LABELS:
-        errors.append(
-            f"{context}: expected track_label set {sorted(EXPECTED_TRACK_LABELS)}, "
-            f"found {sorted(unique_labels)}"
-        )
+    if expected_track_labels is not None:
+        unique_labels = set(labels.unique().tolist())
+        if unique_labels != expected_track_labels:
+            errors.append(
+                f"{context}: expected track_label set {sorted(expected_track_labels)}, "
+                f"found {sorted(unique_labels)}"
+            )
 
     duplicate_rows = tracks_df.duplicated(subset=["frame_idx", "track_id"])
     if duplicate_rows.any():
         errors.append(f"{context}: duplicate rows for (frame_idx, track_id)")
 
     per_frame_counts = track_id.groupby(frame_idx).count()
-    if (per_frame_counts != 2).any():
-        bad_frames = sorted(per_frame_counts[per_frame_counts != 2].index.astype(int).tolist())
-        errors.append(
-            f"{context}: each frame must contain exactly 2 tracks; bad frame_idx: {bad_frames}"
-        )
+    if enforce_exact_person_count:
+        if (per_frame_counts != max_persons).any():
+            bad_frames = sorted(
+                per_frame_counts[per_frame_counts != max_persons].index.astype(int).tolist()
+            )
+            errors.append(
+                f"{context}: each frame must contain exactly {max_persons} tracks; "
+                f"bad frame_idx: {bad_frames}"
+            )
+    else:
+        out_of_range = (per_frame_counts < 1) | (per_frame_counts > max_persons)
+        if out_of_range.any():
+            bad_frames = sorted(per_frame_counts[out_of_range].index.astype(int).tolist())
+            errors.append(
+                f"{context}: each frame must contain between 1 and {max_persons} tracks; "
+                f"bad frame_idx: {bad_frames}"
+            )
 
     timestamp_by_frame = timestamp_s.groupby(frame_idx)
     timestamp_nunique = timestamp_by_frame.nunique(dropna=False)
@@ -203,8 +230,13 @@ def validate_tracks_2d(tracks_df: pd.DataFrame) -> List[str]:
     return errors
 
 
-def validate_pose_3d(pose_df: pd.DataFrame) -> List[str]:
-    """Validate two-person 3D pose table."""
+def validate_pose_3d(
+    pose_df: pd.DataFrame,
+    max_persons: int = 2,
+    enforce_exact_person_count: bool = True,
+    expected_track_labels: Optional[Set[str]] = None,
+) -> List[str]:
+    """Validate 3D pose table."""
     errors: List[str] = []
     context = "pose_3d"
 
@@ -250,27 +282,57 @@ def validate_pose_3d(pose_df: pd.DataFrame) -> List[str]:
     if not finite_xyz.all():
         errors.append(f"{context}: x_m/y_m/z_m must be finite")
 
+    expected_track_ids = set(range(int(max_persons)))
     unique_ids = set(track_id.unique().tolist())
-    if unique_ids != EXPECTED_TRACK_IDS:
+    if not unique_ids:
+        errors.append(f"{context}: track_id set cannot be empty")
+    if not unique_ids.issubset(expected_track_ids):
         errors.append(
-            f"{context}: expected track_id set {sorted(EXPECTED_TRACK_IDS)}, "
+            f"{context}: track_id values must be within {sorted(expected_track_ids)}, "
+            f"found {sorted(unique_ids)}"
+        )
+    if enforce_exact_person_count and unique_ids != expected_track_ids:
+        errors.append(
+            f"{context}: expected full track_id set {sorted(expected_track_ids)}, "
             f"found {sorted(unique_ids)}"
         )
 
-    unique_labels = set(labels.unique().tolist())
-    if unique_labels != EXPECTED_TRACK_LABELS:
-        errors.append(
-            f"{context}: expected track_label set {sorted(EXPECTED_TRACK_LABELS)}, "
-            f"found {sorted(unique_labels)}"
-        )
+    if expected_track_labels is not None:
+        unique_labels = set(labels.unique().tolist())
+        if unique_labels != expected_track_labels:
+            errors.append(
+                f"{context}: expected track_label set {sorted(expected_track_labels)}, "
+                f"found {sorted(unique_labels)}"
+            )
 
     duplicate_rows = pose_df.duplicated(subset=["frame_idx", "track_id", "keypoint_name"])
     if duplicate_rows.any():
         errors.append(f"{context}: duplicate rows for (frame_idx, track_id, keypoint_name)")
 
-    rows_per_frame_track = track_id.groupby([frame_idx, track_id]).count()
+    rows_per_frame_track = pose_df.groupby(["frame_idx", "track_id"]).size()
     if (rows_per_frame_track < 1).any():
         errors.append(f"{context}: each (frame_idx, track_id) must have >=1 keypoint row")
+
+    per_frame_track_count = pose_df.groupby("frame_idx")["track_id"].nunique()
+    if enforce_exact_person_count:
+        if (per_frame_track_count != max_persons).any():
+            bad_frames = sorted(
+                per_frame_track_count[
+                    per_frame_track_count != max_persons
+                ].index.astype(int).tolist()
+            )
+            errors.append(
+                f"{context}: each frame must contain exactly {max_persons} distinct track_id; "
+                f"bad frame_idx: {bad_frames}"
+            )
+    else:
+        out_of_range = (per_frame_track_count < 1) | (per_frame_track_count > max_persons)
+        if out_of_range.any():
+            bad_frames = sorted(per_frame_track_count[out_of_range].index.astype(int).tolist())
+            errors.append(
+                f"{context}: each frame must contain between 1 and {max_persons} distinct "
+                f"track_id; bad frame_idx: {bad_frames}"
+            )
 
     pose_for_mapping = pd.DataFrame({"track_id": track_id, "track_label": labels})
     errors.extend(_validate_track_id_label_mapping(pose_for_mapping, context))
@@ -304,6 +366,18 @@ def validate_session_output(session_dir: Path | str) -> ValidationResult:
     outputs = manifest.get("outputs", {})
     tracks_path = session_path / str(outputs.get("tracks_2d", ""))
     pose_path = session_path / str(outputs.get("pose_3d", ""))
+    assumptions = manifest.get("assumptions", {})
+    max_persons_raw = assumptions.get("max_persons", 2)
+    max_persons = int(max_persons_raw) if isinstance(max_persons_raw, int) else 2
+    enforce_exact = assumptions.get("enforce_exact_person_count", False)
+    enforce_exact = bool(enforce_exact) if isinstance(enforce_exact, bool) else False
+    id_policy = str(assumptions.get("id_policy", ""))
+    expected_labels = (
+        {"parent", "child"}
+        if max_persons == 2
+        and "parent_larger_child_smaller_with_temporal_consistency" in id_policy
+        else None
+    )
 
     if not tracks_path.exists():
         errors.append(f"tracks_2d: file not found '{tracks_path.name}'")
@@ -314,10 +388,24 @@ def validate_session_output(session_dir: Path | str) -> ValidationResult:
     pose_df = None
     if tracks_path.exists():
         tracks_df = pd.read_csv(tracks_path)
-        errors.extend(validate_tracks_2d(tracks_df))
+        errors.extend(
+            validate_tracks_2d(
+                tracks_df,
+                max_persons=max_persons,
+                enforce_exact_person_count=enforce_exact,
+                expected_track_labels=expected_labels,
+            )
+        )
     if pose_path.exists():
         pose_df = pd.read_csv(pose_path)
-        errors.extend(validate_pose_3d(pose_df))
+        errors.extend(
+            validate_pose_3d(
+                pose_df,
+                max_persons=max_persons,
+                enforce_exact_person_count=enforce_exact,
+                expected_track_labels=expected_labels,
+            )
+        )
 
     if tracks_df is not None and pose_df is not None:
         track_ids_tracks = set(pd.to_numeric(tracks_df["track_id"], errors="coerce").dropna().astype(int).unique().tolist())

@@ -49,6 +49,10 @@ class PipelineConfig:
     ultralytics_model_path: str = "yolo11n-pose.pt"
     tracker_backend: str = "internal"
     tracker_name: str = "bytetrack"
+    max_persons: int = 2
+    enforce_exact_person_count: bool = False
+    keep_empty_frames: bool = True
+    person_class_id: int = 0
     bbox_thresh: float = 0.5
     max_images: Optional[int] = None
     use_mask: bool = False
@@ -137,6 +141,9 @@ def _write_schema_outputs(
     camera_id: str,
     source_video: str,
     frame_rate: float,
+    max_persons: int,
+    enforce_exact_person_count: bool,
+    id_policy: str,
 ) -> ValidationResult:
     tracks_df, pose_df = _payload_to_tracks_and_pose(payload, frame_rate=frame_rate)
 
@@ -158,8 +165,9 @@ def _write_schema_outputs(
             }
         ],
         "assumptions": {
-            "max_persons": 2,
-            "id_policy": "parent_larger_child_smaller_with_temporal_consistency",
+            "max_persons": int(max_persons),
+            "enforce_exact_person_count": bool(enforce_exact_person_count),
+            "id_policy": id_policy,
         },
         "outputs": {
             "tracks_2d": tracks_path.name,
@@ -241,6 +249,11 @@ def run_camera_pipeline(
         )
 
     if config.inference_backend == "sam3d":
+        if config.max_persons != 2:
+            raise ValueError("sam3d backend currently supports max_persons=2 only")
+        if config.tracker_backend != "internal":
+            raise ValueError("sam3d backend currently supports tracker_backend=internal only")
+
         runner_config: Any = RunnerConfig(
             checkpoint_path=config.checkpoint_path,
             mhr_path=config.mhr_path,
@@ -254,6 +267,7 @@ def run_camera_pipeline(
             use_mask=config.use_mask,
         )
         selected_infer_fn = infer_fn or run_sam3d_on_images
+        id_policy = "parent_larger_child_smaller_with_temporal_consistency"
     elif config.inference_backend == "ultralytics":
         runner_config = UltraRunnerConfig(
             model_path=config.ultralytics_model_path,
@@ -264,8 +278,16 @@ def run_camera_pipeline(
             max_images=config.max_images,
             tracker_backend=config.tracker_backend,
             tracker_name=config.tracker_name,
+            max_persons=config.max_persons,
+            enforce_exact_person_count=config.enforce_exact_person_count,
+            keep_empty_frames=config.keep_empty_frames,
+            person_class_id=config.person_class_id,
         )
         selected_infer_fn = infer_fn or run_ultralytics_pose_on_images
+        if config.max_persons == 2 and config.tracker_backend == "internal":
+            id_policy = "parent_larger_child_smaller_with_temporal_consistency"
+        else:
+            id_policy = f"{config.tracker_backend}_stable_ids_top_{config.max_persons}"
     else:
         raise ValueError(
             f"Unsupported inference_backend '{config.inference_backend}'. "
@@ -283,6 +305,9 @@ def run_camera_pipeline(
         camera_id=camera_id,
         source_video=source_video,
         frame_rate=extraction_result.frame_rate,
+        max_persons=config.max_persons,
+        enforce_exact_person_count=config.enforce_exact_person_count,
+        id_policy=id_policy,
     )
 
     return CameraPipelineSummary(
@@ -363,6 +388,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["internal", "roboflow"],
     )
     run_parser.add_argument("--tracker-name", default="bytetrack", type=str)
+    run_parser.add_argument("--max-persons", default=2, type=int)
+    run_parser.add_argument(
+        "--enforce-exact-person-count",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    run_parser.add_argument(
+        "--keep-empty-frames",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    run_parser.add_argument("--person-class-id", default=0, type=int)
     run_parser.add_argument("--bbox-thresh", default=0.5, type=float)
     run_parser.add_argument("--max-images", default=None, type=int)
     run_parser.add_argument("--use-mask", action="store_true", default=False)
@@ -397,6 +434,10 @@ def main() -> None:
             ultralytics_model_path=args.ultralytics_model_path,
             tracker_backend=args.tracker_backend,
             tracker_name=args.tracker_name,
+            max_persons=args.max_persons,
+            enforce_exact_person_count=args.enforce_exact_person_count,
+            keep_empty_frames=args.keep_empty_frames,
+            person_class_id=args.person_class_id,
             bbox_thresh=args.bbox_thresh,
             max_images=args.max_images,
             use_mask=args.use_mask,
@@ -410,3 +451,7 @@ def main() -> None:
             dry_run=args.dry_run,
         )
         run_pipeline(cfg)
+
+
+if __name__ == "__main__":
+    main()
