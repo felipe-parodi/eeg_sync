@@ -14,6 +14,7 @@ Current layout
 - docs/: User-facing analysis tutorials and workflows.
 - video_inference/: SAM3 integration scaffolding (schema, device routing, two-person tracking).
 - video_inference/pipeline.py: end-to-end CLI (`video-infer run`) for compress->extract->infer->export.
+- video_inference/rapid_compress.py: standalone fast compressor (`video-compress-rapid`).
 - video_analysis/: Planned module (not yet created).
 - third_party/sam-3d-body/: Upstream SAM-3D-Body git submodule.
 

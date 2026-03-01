@@ -53,6 +53,7 @@ class PipelineConfig:
     preset: str = "medium"
     ffmpeg_bin: str = "ffmpeg"
     reuse_existing: bool = False
+    skip_compress: bool = False
     dry_run: bool = False
 
 
@@ -183,7 +184,18 @@ def run_camera_pipeline(
     camera_dir.mkdir(parents=True, exist_ok=True)
     intermediate_dir.mkdir(parents=True, exist_ok=True)
 
-    if config.reuse_existing and compressed_video_path.exists():
+    source_video_path = Path(source_video)
+    if not source_video_path.exists():
+        raise FileNotFoundError(f"Source video not found: {source_video_path}")
+
+    if config.skip_compress:
+        compression_result = CompressionResult(
+            input_path=source_video_path,
+            output_path=source_video_path,
+            command=[],
+            executed=False,
+        )
+    elif config.reuse_existing and compressed_video_path.exists():
         compression_result = CompressionResult(
             input_path=Path(source_video),
             output_path=compressed_video_path,
@@ -320,6 +332,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--preset", default="medium", type=str)
     run_parser.add_argument("--ffmpeg-bin", default="ffmpeg", type=str)
     run_parser.add_argument("--reuse-existing", action="store_true", default=False)
+    run_parser.add_argument("--skip-compress", action="store_true", default=False)
     run_parser.add_argument("--dry-run", action="store_true", default=False)
 
     return parser
@@ -349,6 +362,7 @@ def main() -> None:
             preset=args.preset,
             ffmpeg_bin=args.ffmpeg_bin,
             reuse_existing=args.reuse_existing,
+            skip_compress=args.skip_compress,
             dry_run=args.dry_run,
         )
         run_pipeline(cfg)

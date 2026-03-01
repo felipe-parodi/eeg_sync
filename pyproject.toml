@@ -27,6 +27,7 @@ dev = [
 eeg-sync = "sync_eeg_vid:main"
 video-infer-sam3d = "video_inference.sam3d_runner:main"
 video-infer = "video_inference.pipeline:main"
+video-compress-rapid = "video_inference.rapid_compress:main"
 
 [build-system]
 requires = ["hatchling"]

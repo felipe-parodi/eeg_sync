@@ -149,3 +149,55 @@ def test_run_pipeline_supports_two_cameras_with_mocks(tmp_path: Path):
         "camera_a",
         "camera_b",
     }
+
+
+def test_run_camera_pipeline_can_skip_compression(tmp_path: Path):
+    source_video = tmp_path / "already_compressed.mp4"
+    source_video.write_text("fake", encoding="utf-8")
+
+    config = PipelineConfig(
+        video_a=str(source_video),
+        video_b=None,
+        output_dir=str(tmp_path / "out"),
+        checkpoint_path="fake.ckpt",
+        mhr_path="fake_mhr.pt",
+        skip_compress=True,
+        dry_run=True,
+    )
+
+    def fake_extract_fn(**kwargs):
+        assert Path(kwargs["video_path"]) == source_video
+        frames_dir = Path(kwargs["frames_dir"])
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(2):
+            (frames_dir / f"frame_{idx:06d}.jpg").write_text("x", encoding="utf-8")
+        return FrameExtractionResult(
+            video_path=Path(kwargs["video_path"]),
+            frames_dir=frames_dir,
+            frame_rate=float(kwargs["frame_rate"]),
+            frame_paths=sorted(frames_dir.glob("frame_*.jpg")),
+            command=[],
+            executed=False,
+        )
+
+    def fake_infer_fn(runner_config):
+        payload = _fake_payload(frame_count=2)
+        Path(runner_config.output_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(runner_config.output_json).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        return payload
+
+    summary = run_camera_pipeline(
+        camera_id="camera_a",
+        source_video=str(source_video),
+        session_dir=tmp_path / "session",
+        config=config,
+        compress_fn=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("compress_fn should not be called when skip_compress=True")
+        ),
+        extract_fn=fake_extract_fn,
+        infer_fn=fake_infer_fn,
+    )
+
+    assert summary.schema_valid
