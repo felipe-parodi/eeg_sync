@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import types
 from dataclasses import asdict, dataclass
@@ -16,7 +17,12 @@ from .device import resolve_device, resolve_inference_mode
 from .tracking import TwoPersonTrackerState, assign_two_person_tracks
 
 
-SUBMODULE_ROOT = Path(__file__).resolve().parents[1] / "third_party" / "sam-3d-body"
+SUBMODULE_ROOT = Path(
+    os.environ.get(
+        "EEG_SYNC_SAM3D_ROOT",
+        str(Path(__file__).resolve().parents[1] / "third_party" / "sam-3d-body"),
+    )
+)
 
 
 @dataclass
@@ -36,21 +42,50 @@ class RunnerConfig:
 
 
 def _ensure_submodule_importable() -> None:
+    """Verify SAM-3D submodule is present and add it to sys.path.
+
+    The submodule must be initialized via:
+        git submodule update --init third_party/sam-3d-body
+
+    Override the default path by setting the EEG_SYNC_SAM3D_ROOT env var.
+
+    Raises:
+        FileNotFoundError: If the submodule directory does not exist.
+    """
     if not SUBMODULE_ROOT.exists():
         raise FileNotFoundError(
-            f"SAM-3D submodule not found at {SUBMODULE_ROOT}. "
-            "Initialize submodules before running inference."
+            f"SAM-3D submodule not found at {SUBMODULE_ROOT}.\n"
+            "Run: git submodule update --init third_party/sam-3d-body\n"
+            "Or set EEG_SYNC_SAM3D_ROOT to point to an alternative location."
         )
     submodule_str = str(SUBMODULE_ROOT)
     if submodule_str not in sys.path:
         sys.path.insert(0, submodule_str)
 
 
-def _patch_cpu_device_paths(model: Any) -> None:
-    """
-    Patch CUDA-hardcoded method paths for CPU compatibility.
+# ---------------------------------------------------------------------------
+# Upstream CUDA Hardcoding Patches
+#
+# SAM-3D-Body (facebook/sam-3d-body) hardcodes .cuda() in two places:
+#   1. get_ray_condition() in sam3d_body.py:1034 — uses .cuda() on meshgrid
+#   2. recursive_to() in sam_3d_body_estimator.py:160 — hardcodes "cuda"
+#
+# These patches replace the hardcoded device targets with the runtime-resolved
+# device. They are applied at _build_estimator() time.
+#
+# Hand-pose .cuda() calls (sam3d_body.py:1289,1292,1508,1512) are only
+# reachable in "full" inference mode, which auto-downgrades to "body" on CPU.
+#
+# If upstream fixes these issues, the patches become safe no-ops.
+#   https://github.com/facebookresearch/sam-3d-body
+# ---------------------------------------------------------------------------
 
-    Upstream currently hardcodes `.cuda()` in get_ray_condition.
+
+def _patch_cpu_device_paths(model: Any) -> None:
+    """Patch CUDA-hardcoded method paths for CPU compatibility.
+
+    Upstream currently hardcodes ``.cuda()`` in ``get_ray_condition``.
+    This replaces the method with a device-aware version.
     """
 
     def _get_ray_condition_cpu_safe(self, batch):  # noqa: ANN001
