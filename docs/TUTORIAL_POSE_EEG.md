@@ -55,8 +55,8 @@ start_frame,end_frame,start_time,end_time,behavior
 ### EEG Data (from your sync)
 
 You have **two** EEG files already synced:
-- `TEc_OpenBCI-RAW-2025-11-14_10-40-39.txt` (EEG A)
-- `TEp_OpenBCI-RAW-2025-11-14_10-40-38.txt` (EEG B)
+- `EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt` (EEG A)
+- `EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt` (EEG B)
 
 Each sampled at **250 Hz** with **8 channels** per headband.
 
@@ -118,7 +118,7 @@ Output:
 
 ```python
 # Load EEG data
-eeg_data = pd.read_csv('TEc_OpenBCI-RAW-2025-11-14_10-40-39.txt',
+eeg_data = pd.read_csv('EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt',
                        skiprows=5,  # Skip header
                        comment='%')
 
@@ -358,7 +358,7 @@ plt.show()
 # You have TWO EEG files - analyze both!
 
 # Load EEG B
-eeg_b_data = pd.read_csv('TEp_OpenBCI-RAW-2025-11-14_10-40-38.txt',
+eeg_b_data = pd.read_csv('EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt',
                          skiprows=5, comment='%')
 eeg_b_data['time'] = np.arange(len(eeg_b_data)) / 250.0
 
@@ -452,8 +452,8 @@ import matplotlib.pyplot as plt
 # ============== CONFIGURATION ==============
 POSE_FILE = 'pose_tracking_results.csv'
 BEHAVIOR_FILE = 'behavioral_states.csv'
-EEG_A_FILE = 'TEc_OpenBCI-RAW-2025-11-14_10-40-39.txt'
-EEG_B_FILE = 'TEp_OpenBCI-RAW-2025-11-14_10-40-38.txt'
+EEG_A_FILE = 'EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt'
+EEG_B_FILE = 'EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt'
 SYNC_FILE = 'sync_results.json'
 SAMPLE_RATE = 250  # Hz
 

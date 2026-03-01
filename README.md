@@ -133,10 +133,10 @@ You can:
   - Press ENTER to skip optional files
 
 ------------------------------------------------------------
-EEG File A (.csv) - REQUIRED: TEp_OpenBCI-RAW-2025-11-14_10-40-38.csv
+EEG File A (.csv) - REQUIRED: EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.csv
 
 ------------------------------------------------------------
-EEG File B (.csv) - OPTIONAL (press ENTER to skip): TEc_OpenBCI-RAW-2025-11-14_10-40-39.csv
+EEG File B (.csv) - OPTIONAL (press ENTER to skip): EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.csv
 
 ------------------------------------------------------------
 Video A (.mp4/.mov/.avi) - REQUIRED (with red light sync): gopro_main.mp4
@@ -171,11 +171,11 @@ STEP 1: Synchronizing Two EEG Recordings
 ============================================================
 
 [1/2] Analyzing EEG file A for IR blaster pulse...
-  Using: CSV: TEp_OpenBCI-RAW-2025-11-14_10-40-38fixed_irBlaster.csv
+  Using: CSV: EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SSfixed_irBlaster.csv
 ✓ IR blaster pulse found at 81.3480 seconds in EEG file A
 
 [2/2] Analyzing EEG file B for IR blaster pulse...
-  Using: CSV: TEc_OpenBCI-RAW-2025-11-14_10-40-39fixed_irBlaster.csv
+  Using: CSV: EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SSfixed_irBlaster.csv
 ✓ IR blaster pulse found at 1.3320 seconds in EEG file B
 
 ✓ EEG synchronization complete!
@@ -198,7 +198,7 @@ STEP 1: Synchronizing EEG to Video
 ============================================================
 
 [1/3] Analyzing EEG data for IR blaster pulse...
-  Using: CSV: TEp_OpenBCI-RAW-2025-11-14_10-40-38fixed_irBlaster.csv
+  Using: CSV: EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SSfixed_irBlaster.csv
 ✓ IR blaster pulse found at 81.3480 seconds in EEG data
 
 [2/3] Finding exact frame of red light in video...
@@ -283,8 +283,8 @@ Controls:
 SYNCHRONIZATION SUMMARY
 ============================================================
 
-EEG File A: TEp_OpenBCI-RAW-2025-11-14_10-40-38.csv
-EEG File B: TEc_OpenBCI-RAW-2025-11-14_10-40-39.csv
+EEG File A: EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.csv
+EEG File B: EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.csv
 
 EEG A ↔ EEG B:
   Offset: 80.0160 seconds
@@ -364,7 +364,7 @@ from sync_eeg_vid import extract_eeg_segment
 
 # Extract EEG data for video segment from 2:00 to 2:30
 eeg_data = extract_eeg_segment(
-    eeg_filepath='TEp_OpenBCI-RAW-2025-11-14_10-40-38.txt',
+    eeg_filepath='EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt',
     video_start=120.0,  # 2:00 in video
     video_end=150.0,    # 2:30 in video
     eeg_video_offset=eeg_to_video_offset
@@ -401,7 +401,7 @@ import matplotlib.pyplot as plt
 sync_time = sync['eeg_to_video_a']['eeg_sync_time']
 
 fig = plot_eeg_data(
-    'TEp_OpenBCI-RAW-2025-11-14_10-40-38.txt',
+    'EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt',
     start_time=sync_time - 2,  # 2 seconds before
     duration=10,               # 10 seconds total
     channels=[0, 1, 2, 3],     # First 4 channels
@@ -452,15 +452,15 @@ Two formats supported:
 ```json
 {
   "eeg_a_to_eeg_b": {
-    "eeg_file_a": "TEp_OpenBCI-RAW-2025-11-14_10-40-38.txt",
-    "eeg_file_b": "TEc_OpenBCI-RAW-2025-11-14_10-40-39.txt",
+    "eeg_file_a": "EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt",
+    "eeg_file_b": "EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt",
     "eeg_sync_time_a": 81.348,
     "eeg_sync_time_b": 1.332,
     "offset": 80.016,
     "note": "To convert EEG B time to EEG A time: time_a = time_b + 80.016"
   },
   "eeg_to_video_a": {
-    "eeg_file": "TEp_OpenBCI-RAW-2025-11-14_10-40-38.txt",
+    "eeg_file": "EEG_A_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt",
     "video_file": "gopro_main.mp4",
     "eeg_sync_time": 81.348,
     "video_sync_time": 83.123,

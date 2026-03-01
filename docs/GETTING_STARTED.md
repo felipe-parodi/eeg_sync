@@ -151,7 +151,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Load EEG data
-eeg_data = pd.read_csv('TEc_OpenBCI-RAW-2025-11-14_10-40-39.txt',
+eeg_data = pd.read_csv('EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt',
                        skiprows=5, comment='%')
 
 # EEG is sampled at 250 Hz (250 samples per second)

@@ -2067,7 +2067,7 @@ def collect_all_files() -> Dict[str, Optional[str]]:
     print("  - Type/paste the full file path")
     print("  - Press ENTER to skip optional files")
     print("\n⚠️  IMPORTANT: If your path contains spaces, enclose it in quotes")
-    print("   Example: \"/Users/name/my folder/data.csv\"")
+    print("   Example: \"path/to/my folder/data.csv\"")
 
     files = {}
 
