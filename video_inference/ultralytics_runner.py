@@ -6,7 +6,7 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -100,6 +100,59 @@ def _assign_from_role_indices(
     ]
 
 
+def _assign_output_track_slot(
+    source_track_id: int,
+    frame_idx: int,
+    max_persons: int,
+    source_to_output: Dict[int, int],
+    output_to_source: Dict[int, int],
+    last_seen_by_output: Dict[int, int],
+    active_output_slots: Set[int],
+) -> int:
+    """
+    Map external tracker IDs into a bounded set of output slots.
+
+    Roboflow trackers (e.g., ByteTrack) can emit new IDs over time for the
+    same physical person. To avoid permanently dropping detections once we've
+    seen `max_persons` unique source IDs, we recycle the oldest inactive slot.
+    """
+    existing_output = source_to_output.get(source_track_id)
+    if existing_output is not None:
+        last_seen_by_output[existing_output] = frame_idx
+        active_output_slots.add(existing_output)
+        return existing_output
+
+    for output_slot in range(max_persons):
+        if output_slot not in output_to_source:
+            source_to_output[source_track_id] = output_slot
+            output_to_source[output_slot] = source_track_id
+            last_seen_by_output[output_slot] = frame_idx
+            active_output_slots.add(output_slot)
+            return output_slot
+
+    recyclable_slots = [
+        output_slot
+        for output_slot in range(max_persons)
+        if output_slot not in active_output_slots
+    ]
+    if not recyclable_slots:
+        recyclable_slots = list(range(max_persons))
+
+    recycled_slot = min(
+        recyclable_slots,
+        key=lambda output_slot: last_seen_by_output.get(output_slot, -1),
+    )
+    old_source_id = output_to_source.get(recycled_slot)
+    if old_source_id is not None:
+        source_to_output.pop(old_source_id, None)
+
+    source_to_output[source_track_id] = recycled_slot
+    output_to_source[recycled_slot] = source_track_id
+    last_seen_by_output[recycled_slot] = frame_idx
+    active_output_slots.add(recycled_slot)
+    return recycled_slot
+
+
 def _resolve_role_indices_from_tracker_ids(
     detections: List[Dict[str, Any]],
     tracker_ids: List[int],
@@ -176,7 +229,8 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
     state: Optional[TwoPersonTrackerState] = None
     frame_outputs: List[Dict[str, Any]] = []
     output_id_by_source_tracker_id: Dict[int, int] = {}
-    next_output_track_id = 0
+    source_tracker_id_by_output_id: Dict[int, int] = {}
+    last_seen_frame_by_output_id: Dict[int, int] = {}
 
     rf_tracker = None
     sv = None
@@ -269,17 +323,23 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
             tracked = rf_tracker.update_with_detections(rf_detections)
             tracked_ids = getattr(tracked, "tracker_id", None)
             if tracked_ids is not None:
-                for detection_index, source_track_id in enumerate(tracked_ids):
+                tracked_ids_list = np.asarray(tracked_ids).tolist()
+                active_output_slots: Set[int] = set()
+                for detection_index, source_track_id in enumerate(tracked_ids_list):
+                    if detection_index >= len(detections):
+                        break
                     if source_track_id is None:
                         continue
                     source_track_id = int(source_track_id)
-                    output_track_id = output_id_by_source_tracker_id.get(source_track_id)
-                    if output_track_id is None:
-                        if next_output_track_id >= config.max_persons:
-                            continue
-                        output_track_id = next_output_track_id
-                        output_id_by_source_tracker_id[source_track_id] = output_track_id
-                        next_output_track_id += 1
+                    output_track_id = _assign_output_track_slot(
+                        source_track_id=source_track_id,
+                        frame_idx=frame_idx,
+                        max_persons=config.max_persons,
+                        source_to_output=output_id_by_source_tracker_id,
+                        output_to_source=source_tracker_id_by_output_id,
+                        last_seen_by_output=last_seen_frame_by_output_id,
+                        active_output_slots=active_output_slots,
+                    )
 
                     det = detections[detection_index]
                     persons.append(
