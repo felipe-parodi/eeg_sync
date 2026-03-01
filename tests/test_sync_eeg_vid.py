@@ -34,7 +34,7 @@ def _write_raw_eeg_txt(path: Path) -> None:
 def test_pyproject_entrypoint_points_to_existing_module():
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    assert data["project"]["scripts"]["eeg-sync"] == "sync_eeg_vid:main"
+    assert data["project"]["scripts"]["eeg-sync"] == "sync_eeg_vid.cli:main"
 
 
 def test_validate_file_paths_accepts_txt_eeg_extension():

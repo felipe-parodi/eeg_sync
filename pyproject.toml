@@ -27,7 +27,7 @@ video = [
 ]
 
 [project.scripts]
-eeg-sync = "sync_eeg_vid:main"
+eeg-sync = "sync_eeg_vid.cli:main"
 video-infer-sam3d = "video_inference.sam3d_runner:main"
 video-infer-ultralytics = "video_inference.ultralytics_runner:main"
 video-infer = "video_inference.pipeline:main"

@@ -56,7 +56,7 @@ Note: current packaging metadata is still being hardened, so this env installs d
 **Quick Start:**
 
 ```bash
-python sync_eeg_vid.py
+eeg-sync
 ```
 
 The script will guide you through:
@@ -160,7 +160,7 @@ The video viewer is optimized for SPEED with long videos:
 ## Workflow Example
 
 ```bash
-$ python sync_eeg_vid.py
+$ eeg-sync
 
 ============================================================
 EEG-VIDEO SYNCHRONIZATION TOOL

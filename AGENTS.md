@@ -41,14 +41,17 @@ eeg_a_time = eeg_b_time + eeg_a_to_eeg_b_offset
 ```
 Offsets are always stored in `sync_results.json` with a human-readable `note` field explaining direction.
 
-### Core Sync Module (`sync_eeg_vid.py`)
+### Core Sync Package (`sync_eeg_vid/`)
 
-Single-file module (~2450 lines) containing the entire Phase 1 pipeline:
-- **EEG I/O:** Parses OpenBCI TXT (raw) and CSV (cleaned IR) files. Auto-prefers CSV when available. IR blaster on `Analog Channel 0`, baseline value = 257, sample rate = 250 Hz.
-- **Interactive video viewer:** OpenCV window with 1ms keyboard polling, frame-perfect navigation, auto-downscaling for >1920px videos. Two modes: red-light (single mark) and multi-clap (mark/undo/save).
-- **Sync pipeline:** `sync_two_eeg_files` -> `sync_eeg_to_video` -> `sync_videos` -> JSON + PNG export.
+Split into focused modules with a backward-compatible `__init__.py`:
+- **`util.py`:** File validation, timestamp parsing, interactive prompts. No internal deps.
+- **`eeg_io.py`:** EEG file parsing, IR pulse detection, segment extraction. IR blaster on `Analog Channel 0`, baseline = 257, sample rate = 250 Hz.
+- **`viewer.py`:** `VideoFrameViewer` class -- OpenCV window with 1ms polling, frame-perfect navigation, auto-downscaling. Two modes: red-light (single mark) and multi-clap (mark/undo/save).
+- **`plotting.py`:** `plot_sync_timeline`, `plot_eeg_data` (matplotlib, lazy-imported).
+- **`sync_pipeline.py`:** `sync_two_eeg_files`, `sync_eeg_to_video`, `sync_videos`.
+- **`cli.py`:** File collection, workflow orchestration, `main()` entry point.
 
-Key entry functions: `find_sync_pulse`, `find_sync_from_raw_eeg`, `find_sync_from_csv`, `extract_eeg_segment`, `main`.
+All public symbols are re-exported from `sync_eeg_vid.__init__`, so `from sync_eeg_vid import find_sync_pulse` still works.
 
 ### Video Inference (`video_inference/`)
 

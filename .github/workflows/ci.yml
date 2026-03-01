@@ -38,4 +38,4 @@ jobs:
         run: pytest tests/ -v --tb=short
 
       - name: Type check (advisory)
-        run: mypy sync_eeg_vid.py video_inference/ video_analysis/ || true
+        run: mypy sync_eeg_vid/ video_inference/ video_analysis/ || true

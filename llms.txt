@@ -12,7 +12,7 @@
 
 ## Source Code
 
-- [sync_eeg_vid.py](sync_eeg_vid.py): Core sync module (EEG parsing, video viewer, offset computation)
+- [sync_eeg_vid/](sync_eeg_vid/): Core sync package (EEG parsing, video viewer, offset computation)
 - [video_inference/pipeline.py](video_inference/pipeline.py): End-to-end video inference orchestrator
 - [video_inference/sam3d_runner.py](video_inference/sam3d_runner.py): SAM-3D-Body 3D pose backend
 - [video_inference/ultralytics_runner.py](video_inference/ultralytics_runner.py): YOLOv11 2D pose backend
