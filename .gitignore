@@ -2,6 +2,7 @@
 *.png
 *.json
 data/
+video_inference/data/
 
 # Claude Code
 .claude
