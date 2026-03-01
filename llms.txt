@@ -1,73 +1,32 @@
-EEG Sync Project Guide for LLM Agents
-=====================================
+# EEG-Video Sync
 
-Project purpose
----------------
-- Synchronize OpenBCI EEG streams with one or two GoPro videos.
-- Produce reproducible timing offsets for downstream multimodal analysis.
-- Next phase: add video inference and analysis modules for parent-child interaction.
+> Synchronize OpenBCI EEG recordings with GoPro videos for parent-child interaction studies. Includes a video pose inference pipeline with 2D (Ultralytics) and 3D (SAM-3D-Body) backends.
 
-Current layout
---------------
-- sync_eeg_vid.py: Main sync logic (EEG pulse detection, video frame marking, clap alignment, plotting, CLI).
-- tests/test_sync_eeg_vid.py: Regression tests for sync edge cases and packaging wiring.
-- docs/: User-facing analysis tutorials and workflows.
-- video_inference/: SAM3 integration scaffolding (schema, device routing, two-person tracking).
-- video_inference/pipeline.py: end-to-end CLI (`video-infer run`) for compress->extract->infer->export.
-- video_inference/rapid_compress.py: standalone fast compressor (`video-compress-rapid`).
-- video_inference/ultralytics_runner.py: Ultralytics 2D pose backend with configurable multi-person tracking.
-- video_analysis/interpolate.py: interpolate low-FPS outputs to higher FPS (`video-interpolate`).
-- video_analysis/visualize_pose_tracks.py: overlay track IDs + poses on frames (`video-visualize`).
-- third_party/sam-3d-body/: Upstream SAM-3D-Body git submodule.
+## Documentation
 
-Core timing conventions
------------------------
-- EEG->Video: video_time = eeg_time + offset
-- Video->EEG: eeg_time = video_time - offset
-- EEG B->EEG A: eeg_a_time = eeg_b_time + eeg_a_to_eeg_b_offset
+- [README](README.md): Installation, quick start, and usage guide
+- [Getting Started](docs/GETTING_STARTED.md): First-time setup walkthrough
+- [Sync Tutorial](docs/HOW_TO_USE_SYNC.md): Step-by-step EEG-video synchronization
+- [Pose + EEG Tutorial](docs/TUTORIAL_POSE_EEG.md): Combined pose inference and EEG analysis
+- [Clock Drift](docs/CLOCK_DRIFT.md): Handling clock drift between devices
 
-Safe/public data policy
------------------------
-- DO NOT commit raw participant videos or identifiable recordings.
-- `video_inference/data/` is intentionally gitignored for local-only media.
-- Keep generated run artifacts local (e.g., sync_results.json, plots).
-- Use synthetic or anonymized mock files for tests and examples.
+## Source Code
 
-Testing and validation
-----------------------
-- Run tests: `pytest -q`
-- Lint config lives in `pyproject.toml`.
-- Keep changes covered by targeted regression tests where possible.
-- Validate inference outputs with `video_inference.schema.validate_session_output`.
+- [sync_eeg_vid.py](sync_eeg_vid.py): Core sync module (EEG parsing, video viewer, offset computation)
+- [video_inference/pipeline.py](video_inference/pipeline.py): End-to-end video inference orchestrator
+- [video_inference/sam3d_runner.py](video_inference/sam3d_runner.py): SAM-3D-Body 3D pose backend
+- [video_inference/ultralytics_runner.py](video_inference/ultralytics_runner.py): YOLOv11 2D pose backend
+- [video_inference/device.py](video_inference/device.py): GPU/CPU device resolution
+- [video_inference/schema.py](video_inference/schema.py): Output CSV schema validation
+- [video_inference/tracking.py](video_inference/tracking.py): Two-person IoU-based tracking
+- [video_analysis/interpolate.py](video_analysis/interpolate.py): Temporal interpolation of pose data
+- [video_analysis/visualize_pose_tracks.py](video_analysis/visualize_pose_tracks.py): Pose overlay visualization
 
-How to explore this codebase quickly
-------------------------------------
-1. Read `README.md` for user workflow and expected outputs.
-2. Read `sync_eeg_vid.py` high-level functions:
-   - `find_sync_from_raw_eeg`, `find_sync_from_csv`, `find_sync_pulse`
-   - `sync_two_eeg_files`, `sync_eeg_to_video`, `sync_videos`
-   - `extract_eeg_segment`, `main`
-3. Read `tests/test_sync_eeg_vid.py` to understand protected behavior.
+## Configuration
 
-Architecture (Phase 2+)
------------------------
-- `video_inference/`
-  - compress: video preprocessing profiles.
-  - track: SAM3/SAM3D-based two-instance tracking with persistent IDs.
-  - pose: 2D/3D pose export with per-frame confidence and metadata.
-- `video_analysis/`
-  - interpolation and feature extraction from inference outputs.
-  - scientific visualizations for social/movement metrics.
-  - report-ready summaries.
+- [pyproject.toml](pyproject.toml): Project metadata, dependencies, and tool configuration
+- [environment.yml](environment.yml): Conda environment with ffmpeg
 
-ID policy
----------
-- Two-person internal mode: parent/child heuristic with temporal continuity.
-- Multi-person mode: tracker-stable IDs (`person_00`, `person_01`, ...).
-- `max_persons` and `enforce_exact_person_count` are configured per run.
+## AI Guidance
 
-Notes for future agents
------------------------
-- Favor CPU fallback paths by default unless GPU is explicitly available.
-- Keep examples anonymized and avoid hardcoded personal paths.
-- If introducing new outputs, define a stable schema and version it.
+- [AGENTS.md](AGENTS.md): Detailed AI assistant guide with architecture and conventions
