@@ -3,6 +3,7 @@
 *.json
 data/
 video_inference/data/
+!tests/fixtures/**/*.json
 
 # Claude Code
 .claude
