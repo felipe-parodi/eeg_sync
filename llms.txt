@@ -12,8 +12,9 @@ Current layout
 - sync_eeg_vid.py: Main sync logic (EEG pulse detection, video frame marking, clap alignment, plotting, CLI).
 - tests/test_sync_eeg_vid.py: Regression tests for sync edge cases and packaging wiring.
 - docs/: User-facing analysis tutorials and workflows.
-- video_inference/: Reserved for upcoming SAM3 inference pipeline.
+- video_inference/: SAM3 integration scaffolding (schema, device routing, two-person tracking).
 - video_analysis/: Planned module (not yet created).
+- third_party/sam-3d-body/: Upstream SAM-3D-Body git submodule.
 
 Core timing conventions
 -----------------------
@@ -46,7 +47,7 @@ How to explore this codebase quickly
 Planned architecture (Phase 2+)
 -------------------------------
 - `video_inference/`
-  - compress: CPU-friendly video preprocessing profiles.
+  - compress: video preprocessing profiles.
   - track: SAM3/SAM3D-based two-instance tracking with persistent IDs.
   - pose: 2D/3D pose export with per-frame confidence and metadata.
 - `video_analysis/`
