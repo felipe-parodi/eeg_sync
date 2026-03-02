@@ -104,12 +104,23 @@ def _interpolate_group(
         max_fill = None
 
     expanded = indexed.reindex(target_timestamps)
-    expanded[numeric_columns] = expanded[numeric_columns].interpolate(
-        method="linear",
-        limit_direction="both",
-        limit_area="inside",
-        limit=max_fill,
-    )
+    # On some pandas/numpy version combinations (notably Python 3.11 with
+    # pandas >=2.1), limit_area="inside" triggers an internal
+    # sliding_window_view call that raises ValueError when the array has
+    # fewer than 4 elements.  Fall back to plain linear interpolation for
+    # small arrays — the result is identical for interior NaN values.
+    if len(expanded) < 4:
+        expanded[numeric_columns] = expanded[numeric_columns].interpolate(
+            method="linear",
+            limit=max_fill,
+        )
+    else:
+        expanded[numeric_columns] = expanded[numeric_columns].interpolate(
+            method="linear",
+            limit_direction="both",
+            limit_area="inside",
+            limit=max_fill,
+        )
     expanded["timestamp_s"] = expanded.index.astype(float)
     return expanded.reset_index(drop=True)
 
