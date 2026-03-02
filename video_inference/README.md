@@ -123,6 +123,28 @@ Session-level summary:
 
 - `session_summary.json`
 
+## Session Timestamps (P001c)
+
+Analysis blocks within the session (all times relative to video start):
+
+| Block | Start | End | Seconds | Color |
+|-------|-------|-----|---------|-------|
+| Grocery free play | 13:26 | 23:40 | 806–1420 | green |
+| Synchrony intervention | 27:56 | 28:45 | 1676–1725 | orange |
+| Storybook reading | 29:22 | 37:06 | 1762–2226 | blue |
+
+Use `--start-s` / `--end-s` or `--time-block` to limit gaze and synchrony analysis to a specific block:
+
+```bash
+# Analyze only the storybook block
+gaze-synchrony --camera-dir ... --session-config session_config.json --time-block storybook_reading
+
+# Analyze from minute 10 onward
+gaze-synchrony --camera-dir ... --session-config session_config.json --start-s 600
+```
+
+These timestamps are also defined in `session_config.json` and used for dashboard plot shading.
+
 ## Notes
 
 - `--device auto` prefers CUDA, then MPS (Apple Silicon), then CPU.
