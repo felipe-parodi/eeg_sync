@@ -12,8 +12,8 @@ This guide shows you **exactly** how to use the sync results to analyze what was
 After running the sync script, you have **4 synchronized data streams**:
 1. **EEG A** (TEc headband)
 2. **EEG B** (TEp headband)
-3. **Video A** (main GoPro - GOPR0290.MP4)
-4. **Video B** (angle 2 GoPro - GX010825.MP4)
+3. **Video A** (main GoPro - video_a_main.MP4)
+4. **Video B** (angle 2 GoPro - video_b_angle2.MP4)
 
 They're all synced to a **common timeline**, so you can find what was happening in ALL streams at any moment!
 
@@ -50,7 +50,7 @@ print(f"Video time {video_time}s = EEG time {eeg_time}s")
 import pandas as pd
 
 # Load EEG data
-eeg_data = pd.read_csv('TEc_OpenBCI-RAW-2025-11-14_10-40-39.txt',
+eeg_data = pd.read_csv('EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt',
                        skiprows=5,  # Skip header lines
                        comment='%')
 
@@ -190,7 +190,7 @@ with open('sync_results.json') as f:
 
 # Extract EEG for video segment
 eeg_data = extract_eeg_segment(
-    eeg_filepath='TEc_OpenBCI-RAW-2025-11-14_10-40-39.txt',
+    eeg_filepath='EEG_B_OpenBCI-RAW-YYYY-MM-DD_HH-MM-SS.txt',
     video_start=120.0,  # 2:00 in seconds
     video_end=150.0,    # 2:30 in seconds
     eeg_video_offset=sync['eeg_to_video_a']['offset']

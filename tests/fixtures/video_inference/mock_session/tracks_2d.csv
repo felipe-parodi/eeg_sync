@@ -1,0 +1,7 @@
+frame_idx,timestamp_s,track_id,track_label,bbox_x1,bbox_y1,bbox_x2,bbox_y2,track_confidence
+0,0.000,0,parent,100,120,320,640,0.98
+0,0.000,1,child,380,160,520,520,0.96
+1,0.033,0,parent,102,120,322,640,0.99
+1,0.033,1,child,382,161,522,521,0.95
+2,0.067,0,parent,104,121,324,641,0.98
+2,0.067,1,child,384,162,524,522,0.94

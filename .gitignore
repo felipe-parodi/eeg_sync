@@ -1,7 +1,13 @@
 # Project outputs
 *.png
 *.json
+*.pt
 data/
+video_inference/data/
+video_inference/compressed/
+video_inference/output/
+!tests/fixtures/**/*.json
+!session_config.json
 
 # Claude Code
 .claude
@@ -17,6 +23,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.cache/
 
 # Distribution / packaging
 build/

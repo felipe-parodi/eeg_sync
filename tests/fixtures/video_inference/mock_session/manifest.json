@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1.0",
+  "session_id": "mock_session_001",
+  "source_videos": [
+    {
+      "camera_id": "cam_short",
+      "relative_path": "video_inference/data/mock_short.mov",
+      "fps": 29.97
+    },
+    {
+      "camera_id": "cam_tall",
+      "relative_path": "video_inference/data/mock_tall.mov",
+      "fps": 29.97
+    }
+  ],
+  "assumptions": {
+    "max_persons": 2,
+    "id_policy": "parent_larger_child_smaller"
+  },
+  "outputs": {
+    "tracks_2d": "tracks_2d.csv",
+    "pose_3d": "pose_3d.csv"
+  }
+}

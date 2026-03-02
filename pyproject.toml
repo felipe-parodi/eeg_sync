@@ -2,9 +2,6 @@
 name = "eeg-video-sync"
 version = "1.0.0"
 description = "ULTRA-FAST EEG-video synchronization tool for OpenBCI and GoPro recordings"
-authors = [
-    {name = "Your Name", email = "your.email@example.com"}
-]
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -19,25 +16,68 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+video = [
+    "ultralytics>=8.3.0",
+    "supervision>=0.21.0",
+]
+gaze = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "timm>=0.9.0",
+    "Pillow>=9.0.0",
+]
+pose3d = [
+    "rtmlib",
 ]
 
 [project.scripts]
-eeg-sync = "sync_eeg_vid_refactored:main"
+eeg-sync = "sync_eeg_vid.cli:main"
+video-infer-sam3d = "video_inference.sam3d_runner:main"
+video-infer-ultralytics = "video_inference.ultralytics_runner:main"
+video-infer = "video_inference.pipeline:main"
+video-compress-rapid = "video_inference.rapid_compress:main"
+video-interpolate = "video_analysis.interpolate:main"
+video-visualize = "video_analysis.visualize_pose_tracks:main"
+video-smooth = "video_analysis.temporal_smooth:main"
+gaze-infer = "gaze_analysis.gazelle_runner:main"
+gaze-synchrony = "gaze_analysis.synchrony:main"
+gaze-plot = "gaze_analysis.plotting:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[project.urls]
+Repository = "https://github.com/felipeparodi/eeg_sync"
+
 [tool.ruff]
 line-length = 88
 target-version = "py310"
-
-[tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]  # Line too long (handled by formatter)
 
 [tool.black]
 line-length = 88
 target-version = ["py310"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --tb=short"
+
+[tool.coverage.run]
+source = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 0
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+ignore_missing_imports = true

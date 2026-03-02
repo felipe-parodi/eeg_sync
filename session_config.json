@@ -1,0 +1,24 @@
+{
+    "session_id": "P001c",
+    "output_dir": "video_inference/output/enhanced_5fps",
+    "image_width": 854,
+    "image_height": 480,
+    "frame_rate": 5.0,
+    "camera_mappings": [
+        {
+            "camera_id": "camera_a",
+            "parent_track_id": 0,
+            "child_track_id": 1
+        },
+        {
+            "camera_id": "camera_b",
+            "parent_track_id": 0,
+            "child_track_id": 1
+        }
+    ],
+    "session_blocks": [
+        {"name": "grocery_free_play", "start_s": 806, "end_s": 1420, "color": "green"},
+        {"name": "synchrony_intervention", "start_s": 1676, "end_s": 1725, "color": "orange"},
+        {"name": "storybook_reading", "start_s": 1762, "end_s": 2226, "color": "blue"}
+    ]
+}

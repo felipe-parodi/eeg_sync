@@ -1,0 +1,32 @@
+# EEG-Video Sync
+
+> Synchronize OpenBCI EEG recordings with GoPro videos for parent-child interaction studies. Includes a video pose inference pipeline with 2D (Ultralytics) and 3D (SAM-3D-Body) backends.
+
+## Documentation
+
+- [README](README.md): Installation, quick start, and usage guide
+- [Getting Started](docs/GETTING_STARTED.md): First-time setup walkthrough
+- [Sync Tutorial](docs/HOW_TO_USE_SYNC.md): Step-by-step EEG-video synchronization
+- [Pose + EEG Tutorial](docs/TUTORIAL_POSE_EEG.md): Combined pose inference and EEG analysis
+- [Clock Drift](docs/CLOCK_DRIFT.md): Handling clock drift between devices
+
+## Source Code
+
+- [sync_eeg_vid/](sync_eeg_vid/): Core sync package (EEG parsing, video viewer, offset computation)
+- [video_inference/pipeline.py](video_inference/pipeline.py): End-to-end video inference orchestrator
+- [video_inference/sam3d_runner.py](video_inference/sam3d_runner.py): SAM-3D-Body 3D pose backend
+- [video_inference/ultralytics_runner.py](video_inference/ultralytics_runner.py): YOLOv11 2D pose backend
+- [video_inference/device.py](video_inference/device.py): GPU/CPU device resolution
+- [video_inference/schema.py](video_inference/schema.py): Output CSV schema validation
+- [video_inference/tracking.py](video_inference/tracking.py): Two-person IoU-based tracking
+- [video_analysis/interpolate.py](video_analysis/interpolate.py): Temporal interpolation of pose data
+- [video_analysis/visualize_pose_tracks.py](video_analysis/visualize_pose_tracks.py): Pose overlay visualization
+
+## Configuration
+
+- [pyproject.toml](pyproject.toml): Project metadata, dependencies, and tool configuration
+- [environment.yml](environment.yml): Conda environment with ffmpeg
+
+## AI Guidance
+
+- [AGENTS.md](AGENTS.md): Detailed AI assistant guide with architecture and conventions

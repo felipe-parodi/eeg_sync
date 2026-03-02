@@ -1,0 +1,536 @@
+"""Ultralytics 2D pose inference runner with configurable multi-person tracking."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import numpy as np
+
+from .device import resolve_device
+from .tracking import (
+    AssignedDetection,
+    TwoPersonTrackerState,
+    assign_two_person_tracks,
+)
+
+
+@dataclass
+class UltraRunnerConfig:
+    """Configuration for Ultralytics frame inference."""
+
+    model_path: str
+    image_folder: str
+    output_json: str
+    device: str = "auto"
+    conf: float = 0.3
+    iou: float = 0.7
+    imgsz: int = 640
+    nms_iou_thresh: float = 0.45
+    batch_size: int = 8
+    max_images: Optional[int] = None
+    tracker_backend: str = "internal"
+    tracker_name: str = "bytetrack"
+    max_persons: int = 2
+    enforce_exact_person_count: bool = False
+    keep_empty_frames: bool = True
+    person_class_id: int = 0
+
+
+def _greedy_nms(
+    indices: np.ndarray,
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    iou_thresh: float,
+) -> np.ndarray:
+    """Greedy NMS on a pre-sorted array of detection indices.
+
+    Args:
+        indices: Detection indices sorted by descending confidence.
+        boxes: Full xyxy box array (all detections, not just selected).
+        scores: Full confidence array.
+        iou_thresh: Suppress boxes with IoU above this threshold.
+
+    Returns:
+        Filtered subset of indices with overlaps removed.
+    """
+    keep: List[int] = []
+    suppressed = set()
+    for i in indices:
+        if i in suppressed:
+            continue
+        keep.append(i)
+        for j in indices:
+            if j in suppressed or j == i:
+                continue
+            iou = _box_iou(boxes[i], boxes[j])
+            if iou > iou_thresh:
+                suppressed.add(j)
+    return np.asarray(keep, dtype=int)
+
+
+def _box_iou(a: np.ndarray, b: np.ndarray) -> float:
+    """IoU between two xyxy boxes."""
+    ix1 = max(a[0], b[0])
+    iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2])
+    iy2 = min(a[3], b[3])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def _iter_image_paths(image_folder: Path, max_images: Optional[int]) -> List[Path]:
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+    images = sorted(
+        [
+            path
+            for path in image_folder.iterdir()
+            if path.is_file() and path.suffix.lower() in image_exts
+        ]
+    )
+    if max_images is not None:
+        images = images[:max_images]
+    return images
+
+
+def _resolve_ultralytics_device(device_preference: str) -> str:
+    resolved = resolve_device(device_preference)
+    if resolved == "cuda":
+        return "0"
+    if resolved == "mps":
+        return "mps"
+    return "cpu"
+
+
+def _track_label_for_id(track_id: int, max_persons: int, tracker_backend: str) -> str:
+    if max_persons == 2 and tracker_backend == "internal":
+        return "parent" if track_id == 0 else "child"
+    return f"person_{track_id:02d}"
+
+
+def _build_pseudo_3d_keypoints(
+    keypoints_xy: np.ndarray,
+    keypoints_conf: np.ndarray,
+) -> np.ndarray:
+    return np.asarray(
+        [
+            [float(x), float(y), 0.0, float(conf)]
+            for (x, y), conf in zip(keypoints_xy, keypoints_conf)
+        ],
+        dtype=float,
+    )
+
+
+def _assign_from_role_indices(
+    detections: List[Dict[str, Any]],
+    parent_idx: int,
+    child_idx: int,
+) -> List[AssignedDetection]:
+    parent_det = detections[parent_idx]
+    child_det = detections[child_idx]
+    return [
+        AssignedDetection(
+            track_id=0,
+            track_label="parent",
+            bbox=np.asarray(parent_det["bbox"], dtype=float),
+            confidence=float(parent_det.get("confidence", 1.0)),
+            detection_index=parent_idx,
+        ),
+        AssignedDetection(
+            track_id=1,
+            track_label="child",
+            bbox=np.asarray(child_det["bbox"], dtype=float),
+            confidence=float(child_det.get("confidence", 1.0)),
+            detection_index=child_idx,
+        ),
+    ]
+
+
+def _assign_output_track_slot(
+    source_track_id: int,
+    frame_idx: int,
+    max_persons: int,
+    source_to_output: Dict[int, int],
+    output_to_source: Dict[int, int],
+    last_seen_by_output: Dict[int, int],
+    active_output_slots: Set[int],
+) -> int:
+    """
+    Map external tracker IDs into a bounded set of output slots.
+
+    Roboflow trackers (e.g., ByteTrack) can emit new IDs over time for the
+    same physical person. To avoid permanently dropping detections once we've
+    seen `max_persons` unique source IDs, we recycle the oldest inactive slot.
+    """
+    existing_output = source_to_output.get(source_track_id)
+    if existing_output is not None:
+        last_seen_by_output[existing_output] = frame_idx
+        active_output_slots.add(existing_output)
+        return existing_output
+
+    for output_slot in range(max_persons):
+        if output_slot not in output_to_source:
+            source_to_output[source_track_id] = output_slot
+            output_to_source[output_slot] = source_track_id
+            last_seen_by_output[output_slot] = frame_idx
+            active_output_slots.add(output_slot)
+            return output_slot
+
+    recyclable_slots = [
+        output_slot
+        for output_slot in range(max_persons)
+        if output_slot not in active_output_slots
+    ]
+    if not recyclable_slots:
+        recyclable_slots = list(range(max_persons))
+
+    recycled_slot = min(
+        recyclable_slots,
+        key=lambda output_slot: last_seen_by_output.get(output_slot, -1),
+    )
+    old_source_id = output_to_source.get(recycled_slot)
+    if old_source_id is not None:
+        source_to_output.pop(old_source_id, None)
+
+    source_to_output[source_track_id] = recycled_slot
+    output_to_source[recycled_slot] = source_track_id
+    last_seen_by_output[recycled_slot] = frame_idx
+    active_output_slots.add(recycled_slot)
+    return recycled_slot
+
+
+def _resolve_role_indices_from_tracker_ids(
+    detections: List[Dict[str, Any]],
+    tracker_ids: List[int],
+    role_by_tracker_id: Dict[int, int],
+) -> Tuple[int, int]:
+    """
+    Resolve (parent_idx, child_idx) from external tracker IDs.
+
+    We keep a persistent map `tracker_id -> role_id` where role_id:
+    - 0 => parent
+    - 1 => child
+    """
+    if len(detections) != 2 or len(tracker_ids) != 2:
+        raise ValueError("Expected exactly 2 detections and 2 tracker IDs.")
+
+    known_roles = [role_by_tracker_id.get(track_id) for track_id in tracker_ids]
+
+    if known_roles[0] is not None and known_roles[1] is not None:
+        parent_idx = 0 if known_roles[0] == 0 else 1
+    elif known_roles[0] is not None:
+        parent_idx = 0 if known_roles[0] == 0 else 1
+    elif known_roles[1] is not None:
+        parent_idx = 1 if known_roles[1] == 0 else 0
+    else:
+        areas = [
+            float((det["bbox"][2] - det["bbox"][0]) * (det["bbox"][3] - det["bbox"][1]))
+            for det in detections
+        ]
+        parent_idx = int(np.argmax(areas))
+
+    child_idx = 1 - parent_idx
+    role_by_tracker_id[tracker_ids[parent_idx]] = 0
+    role_by_tracker_id[tracker_ids[child_idx]] = 1
+    return parent_idx, child_idx
+
+
+def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
+    """
+    Run Ultralytics pose model on frames and export parent/child-assigned outputs.
+
+    Notes:
+    - We export 2D keypoints as pseudo-3D `[x, y, 0, conf]` to keep
+      compatibility with the current downstream export contract.
+    """
+    image_folder = Path(config.image_folder)
+    if not image_folder.exists():
+        raise FileNotFoundError(f"Image folder not found: {image_folder}")
+
+    try:
+        from ultralytics import YOLO
+    except ImportError as error:
+        raise ImportError(
+            "Ultralytics is required for this backend. Install with: pip install ultralytics"
+        ) from error
+
+    if config.max_persons < 1:
+        raise ValueError("max_persons must be >= 1")
+
+    if config.tracker_backend not in {"internal", "roboflow"}:
+        raise ValueError(
+            f"Invalid tracker_backend '{config.tracker_backend}'. "
+            "Expected 'internal' or 'roboflow'."
+        )
+    if config.tracker_backend == "internal" and config.max_persons != 2:
+        raise ValueError(
+            "tracker_backend=internal currently supports max_persons=2 only. "
+            "Use tracker_backend=roboflow for 3+ people."
+        )
+
+    ultra_device = _resolve_ultralytics_device(config.device)
+    model = YOLO(config.model_path)
+    images = _iter_image_paths(image_folder, config.max_images)
+
+    state: Optional[TwoPersonTrackerState] = None
+    frame_outputs: List[Dict[str, Any]] = []
+    output_id_by_source_tracker_id: Dict[int, int] = {}
+    source_tracker_id_by_output_id: Dict[int, int] = {}
+    last_seen_frame_by_output_id: Dict[int, int] = {}
+
+    rf_tracker = None
+    sv = None
+    if config.tracker_backend == "roboflow":
+        try:
+            import supervision as sv  # type: ignore
+        except ImportError as error:
+            raise ImportError(
+                "tracker_backend=roboflow requires `supervision`. "
+                "Install with: pip install supervision"
+            ) from error
+
+        tracker_name = config.tracker_name.lower()
+        if tracker_name == "bytetrack":
+            rf_tracker = sv.ByteTrack()
+        else:
+            raise ValueError(
+                f"Unsupported tracker_name '{config.tracker_name}' for roboflow backend. "
+                "Currently supported: bytetrack"
+            )
+
+    image_list = list(images)
+    batch_size = max(1, config.batch_size)
+
+    for batch_start in range(0, len(image_list), batch_size):
+        batch_paths = image_list[batch_start : batch_start + batch_size]
+        batch_results = model(
+            [str(p) for p in batch_paths],
+            conf=config.conf,
+            iou=config.iou,
+            imgsz=config.imgsz,
+            device=ultra_device,
+            verbose=False,
+        )
+
+        for batch_offset, result in enumerate(batch_results):
+            frame_idx = batch_start + batch_offset
+            image_path = batch_paths[batch_offset]
+
+            frame_output: Dict[str, Any] = {
+                "frame_idx": frame_idx,
+                "image_name": image_path.name,
+                "persons": [],
+            }
+
+            if result.boxes is None or result.keypoints is None:
+                if config.keep_empty_frames and not config.enforce_exact_person_count:
+                    frame_outputs.append(frame_output)
+                continue
+
+            boxes_xyxy = result.boxes.xyxy.cpu().numpy()
+            boxes_conf = result.boxes.conf.cpu().numpy()
+            keypoints_xy = result.keypoints.xy.cpu().numpy()
+            keypoints_conf = (
+                result.keypoints.conf.cpu().numpy()
+                if result.keypoints.conf is not None
+                else np.ones(keypoints_xy.shape[:2], dtype=float)
+            )
+            class_ids = (
+                result.boxes.cls.cpu().numpy().astype(int)
+                if getattr(result.boxes, "cls", None) is not None
+                else np.zeros(boxes_xyxy.shape[0], dtype=int)
+            )
+
+            valid_person_indices = np.where(class_ids == config.person_class_id)[0]
+            if valid_person_indices.size == 0:
+                if config.keep_empty_frames and not config.enforce_exact_person_count:
+                    frame_outputs.append(frame_output)
+                continue
+
+            # NMS among person detections, then keep top-K by confidence.
+            ranked_indices = valid_person_indices[
+                np.argsort(boxes_conf[valid_person_indices])[::-1]
+            ]
+            nms_indices = _greedy_nms(
+                ranked_indices, boxes_xyxy, boxes_conf, config.nms_iou_thresh
+            )
+            top_indices = nms_indices[: config.max_persons]
+
+            detections = []
+            for idx in top_indices:
+                detections.append(
+                    {
+                        "bbox": boxes_xyxy[idx].astype(float),
+                        "confidence": float(boxes_conf[idx]),
+                        "pred_keypoints_3d": _build_pseudo_3d_keypoints(
+                            keypoints_xy[idx],
+                            keypoints_conf[idx],
+                        ),
+                    }
+                )
+
+            persons = []
+            if rf_tracker is not None and sv is not None:
+                rf_detections = sv.Detections(
+                    xyxy=np.asarray([det["bbox"] for det in detections], dtype=float),
+                    confidence=np.asarray(
+                        [float(det["confidence"]) for det in detections], dtype=float
+                    ),
+                    class_id=np.zeros(len(detections), dtype=int),
+                )
+                tracked = rf_tracker.update_with_detections(rf_detections)
+                tracked_ids = getattr(tracked, "tracker_id", None)
+                if tracked_ids is not None:
+                    tracked_ids_list = np.asarray(tracked_ids).tolist()
+                    active_output_slots: Set[int] = set()
+                    for detection_index, source_track_id in enumerate(tracked_ids_list):
+                        if detection_index >= len(detections):
+                            break
+                        if source_track_id is None:
+                            continue
+                        source_track_id = int(source_track_id)
+                        output_track_id = _assign_output_track_slot(
+                            source_track_id=source_track_id,
+                            frame_idx=frame_idx,
+                            max_persons=config.max_persons,
+                            source_to_output=output_id_by_source_tracker_id,
+                            output_to_source=source_tracker_id_by_output_id,
+                            last_seen_by_output=last_seen_frame_by_output_id,
+                            active_output_slots=active_output_slots,
+                        )
+
+                        det = detections[detection_index]
+                        persons.append(
+                            {
+                                "track_id": output_track_id,
+                                "track_label": _track_label_for_id(
+                                    output_track_id,
+                                    config.max_persons,
+                                    config.tracker_backend,
+                                ),
+                                "bbox_xyxy": np.asarray(det["bbox"], dtype=float).tolist(),
+                                "confidence": float(det.get("confidence", 1.0)),
+                                "keypoints_3d": np.asarray(
+                                    det["pred_keypoints_3d"], dtype=float
+                                ).tolist(),
+                                "source_tracker_id": source_track_id,
+                            }
+                        )
+            else:
+                if len(detections) >= 2:
+                    # Internal policy is intentionally specialized for parent/child.
+                    top2_by_area = sorted(
+                        detections,
+                        key=lambda det: float(
+                            (det["bbox"][2] - det["bbox"][0]) * (det["bbox"][3] - det["bbox"][1])
+                        ),
+                        reverse=True,
+                    )[:2]
+                    assigned, state = assign_two_person_tracks(top2_by_area, state=state)
+                    for assignment in assigned:
+                        det = top2_by_area[assignment.detection_index]
+                        persons.append(
+                            {
+                                "track_id": assignment.track_id,
+                                "track_label": assignment.track_label,
+                                "bbox_xyxy": assignment.bbox.tolist(),
+                                "confidence": assignment.confidence,
+                                "keypoints_3d": np.asarray(
+                                    det["pred_keypoints_3d"], dtype=float
+                                ).tolist(),
+                            }
+                        )
+
+            persons = sorted(persons, key=lambda person: int(person["track_id"]))
+            frame_output["persons"] = persons
+            frame_output["num_persons_detected"] = len(persons)
+
+            if config.enforce_exact_person_count and len(persons) != config.max_persons:
+                if config.keep_empty_frames:
+                    frame_output["persons"] = []
+                    frame_output["num_persons_detected"] = 0
+                    frame_outputs.append(frame_output)
+                continue
+
+            if persons or config.keep_empty_frames:
+                frame_outputs.append(frame_output)
+
+    payload = {
+        "runner_config": asdict(config),
+        "resolved_device": ultra_device,
+        "backend": "ultralytics_pose",
+        "frames": frame_outputs,
+    }
+    output_path = Path(config.output_json)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run Ultralytics 2D pose backend on image frames."
+    )
+    parser.add_argument("--model-path", required=True, type=str)
+    parser.add_argument("--image-folder", required=True, type=str)
+    parser.add_argument("--output-json", required=True, type=str)
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
+    parser.add_argument("--conf", default=0.25, type=float)
+    parser.add_argument("--iou", default=0.7, type=float)
+    parser.add_argument("--imgsz", default=640, type=int)
+    parser.add_argument("--nms-iou-thresh", default=0.45, type=float)
+    parser.add_argument("--batch-size", default=8, type=int)
+    parser.add_argument("--max-images", default=None, type=int)
+    parser.add_argument(
+        "--tracker-backend", default="internal", choices=["internal", "roboflow"]
+    )
+    parser.add_argument("--tracker-name", default="bytetrack", type=str)
+    parser.add_argument("--max-persons", default=2, type=int)
+    parser.add_argument(
+        "--enforce-exact-person-count",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--keep-empty-frames",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--person-class-id", default=0, type=int)
+    return parser
+
+
+def main() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    cfg = UltraRunnerConfig(
+        model_path=args.model_path,
+        image_folder=args.image_folder,
+        output_json=args.output_json,
+        device=args.device,
+        conf=args.conf,
+        iou=args.iou,
+        imgsz=args.imgsz,
+        nms_iou_thresh=args.nms_iou_thresh,
+        batch_size=args.batch_size,
+        max_images=args.max_images,
+        tracker_backend=args.tracker_backend,
+        tracker_name=args.tracker_name,
+        max_persons=args.max_persons,
+        enforce_exact_person_count=args.enforce_exact_person_count,
+        keep_empty_frames=args.keep_empty_frames,
+        person_class_id=args.person_class_id,
+    )
+    run_ultralytics_pose_on_images(cfg)
+
+
+if __name__ == "__main__":
+    main()
