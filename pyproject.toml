@@ -48,6 +48,9 @@ gaze-infer = "gaze_analysis.gazelle_runner:main"
 gaze-synchrony = "gaze_analysis.synchrony:main"
 gaze-plot = "gaze_analysis.plotting:main"
 
+[tool.hatch.build.targets.wheel]
+packages = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
