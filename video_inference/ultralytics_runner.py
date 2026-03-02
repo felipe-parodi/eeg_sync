@@ -316,7 +316,6 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
             conf=config.conf,
             iou=config.iou,
             imgsz=config.imgsz,
-            max_det=config.max_persons * 3,
             device=ultra_device,
             verbose=False,
         )
