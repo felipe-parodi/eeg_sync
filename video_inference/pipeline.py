@@ -46,17 +46,20 @@ class PipelineConfig:
     inference_backend: str = "sam3d"
     inference_mode: str = "auto"
     detector_name: str = "sam3"
-    ultralytics_model_path: str = "yolo11n-pose.pt"
+    ultralytics_model_path: str = "yolo11m-pose.pt"
     tracker_backend: str = "internal"
     tracker_name: str = "bytetrack"
     max_persons: int = 2
     enforce_exact_person_count: bool = False
     keep_empty_frames: bool = True
     person_class_id: int = 0
-    bbox_thresh: float = 0.5
+    bbox_thresh: float = 0.3
+    imgsz: int = 640
+    nms_iou_thresh: float = 0.45
+    batch_size: int = 8
     max_images: Optional[int] = None
     use_mask: bool = False
-    frame_rate: float = 15.0
+    frame_rate: float = 5.0
     max_width: int = 1280
     crf: int = 23
     preset: str = "medium"
@@ -201,6 +204,17 @@ def run_camera_pipeline(
     if not source_video_path.exists():
         raise FileNotFoundError(f"Source video not found: {source_video_path}")
 
+    # Warn if the video is suspiciously large (likely uncompressed).
+    _MAX_RECOMMENDED_MB = 50
+    video_size_mb = source_video_path.stat().st_size / (1024 * 1024)
+    if video_size_mb > _MAX_RECOMMENDED_MB and config.skip_compress:
+        print(
+            f"WARNING: {source_video_path.name} is {video_size_mb:.0f} MB "
+            f"(recommended < {_MAX_RECOMMENDED_MB} MB). "
+            "Running inference on large/uncompressed video will be very slow. "
+            "Consider compressing first with video-compress-rapid."
+        )
+
     if config.skip_compress:
         compression_result = CompressionResult(
             input_path=source_video_path,
@@ -275,6 +289,9 @@ def run_camera_pipeline(
             output_json=str(raw_output_json),
             device=config.device,
             conf=config.bbox_thresh,
+            imgsz=config.imgsz,
+            nms_iou_thresh=config.nms_iou_thresh,
+            batch_size=config.batch_size,
             max_images=config.max_images,
             tracker_backend=config.tracker_backend,
             tracker_name=config.tracker_name,
@@ -365,7 +382,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--session-id", default=None, type=str)
     run_parser.add_argument("--checkpoint-path", default="", type=str)
     run_parser.add_argument("--mhr-path", default="", type=str)
-    run_parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    run_parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     run_parser.add_argument(
         "--inference-backend",
         default="sam3d",
@@ -379,7 +396,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--detector-name", default="sam3", type=str)
     run_parser.add_argument(
         "--ultralytics-model-path",
-        default="yolo11n-pose.pt",
+        default="yolo11m-pose.pt",
         type=str,
     )
     run_parser.add_argument(
@@ -400,10 +417,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
     )
     run_parser.add_argument("--person-class-id", default=0, type=int)
-    run_parser.add_argument("--bbox-thresh", default=0.5, type=float)
+    run_parser.add_argument("--bbox-thresh", default=0.3, type=float)
+    run_parser.add_argument("--imgsz", default=640, type=int)
+    run_parser.add_argument("--nms-iou-thresh", default=0.45, type=float)
+    run_parser.add_argument("--batch-size", default=8, type=int)
     run_parser.add_argument("--max-images", default=None, type=int)
     run_parser.add_argument("--use-mask", action="store_true", default=False)
-    run_parser.add_argument("--frame-rate", default=15.0, type=float)
+    run_parser.add_argument("--frame-rate", default=5.0, type=float)
     run_parser.add_argument("--max-width", default=1280, type=int)
     run_parser.add_argument("--crf", default=23, type=int)
     run_parser.add_argument("--preset", default="medium", type=str)
@@ -439,6 +459,9 @@ def main() -> None:
             keep_empty_frames=args.keep_empty_frames,
             person_class_id=args.person_class_id,
             bbox_thresh=args.bbox_thresh,
+            imgsz=args.imgsz,
+            nms_iou_thresh=args.nms_iou_thresh,
+            batch_size=args.batch_size,
             max_images=args.max_images,
             use_mask=args.use_mask,
             frame_rate=args.frame_rate,

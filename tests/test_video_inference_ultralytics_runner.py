@@ -159,12 +159,16 @@ class _FakeYOLO:
     def __init__(self, _model_path: str):
         pass
 
-    def __call__(self, *_args, **_kwargs):
-        result = types.SimpleNamespace(
-            boxes=_FakeBoxes(),
-            keypoints=_FakeKeypoints(),
-        )
-        return [result]
+    def __call__(self, source, *_args, **_kwargs):
+        # Support both single-image and batch calls.
+        n = len(source) if isinstance(source, list) else 1
+        return [
+            types.SimpleNamespace(
+                boxes=_FakeBoxes(),
+                keypoints=_FakeKeypoints(),
+            )
+            for _ in range(n)
+        ]
 
 
 class _FakeDetections:

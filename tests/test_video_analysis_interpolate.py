@@ -2,6 +2,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -11,6 +12,7 @@ if str(ROOT_DIR) not in sys.path:
 from video_analysis.interpolate import (  # noqa: E402
     InterpolationConfig,
     interpolate_camera_outputs,
+    interpolate_tracks_2d,
 )
 
 
@@ -134,3 +136,37 @@ def test_interpolate_camera_outputs_generates_interpolated_files(tmp_path: Path)
     ].iloc[0]
     assert pose_mid["x_m"] == 11.0
     assert pose_mid["keypoint_confidence"] == 0.7
+
+
+def test_interpolation_does_not_fill_large_gaps():
+    """Tracks with a large temporal gap should NOT have the gap filled."""
+    # Track observed at t=0, t=1, then disappears, reappears at t=10, t=11.
+    # Median step = 1s, so max_gap = 3s. The 9s gap should not be filled.
+    tracks_df = pd.DataFrame(
+        {
+            "frame_idx": [0, 1, 10, 11],
+            "timestamp_s": [0.0, 1.0, 10.0, 11.0],
+            "track_id": [0, 0, 0, 0],
+            "track_label": ["parent"] * 4,
+            "bbox_x1": [10.0, 12.0, 100.0, 102.0],
+            "bbox_y1": [10.0] * 4,
+            "bbox_x2": [50.0] * 4,
+            "bbox_y2": [100.0] * 4,
+            "track_confidence": [0.9] * 4,
+        }
+    )
+    # Target timestamps at 1 FPS: 0, 1, 2, 3, ..., 11
+    target_ts = np.arange(0.0, 11.5, 1.0)
+    result = interpolate_tracks_2d(tracks_df, target_ts, target_fps=1.0)
+
+    # Frames at t=0 and t=1 should exist (original data).
+    # Frames at t=10 and t=11 should exist (original data).
+    # The gap middle (t=5, t=6) should be dropped — limit=3 allows filling
+    # 3 NaN from each side, but not the centre of a 9s gap.
+    result_ts = sorted(result["timestamp_s"].unique())
+    for t in [0.0, 1.0, 10.0, 11.0]:
+        assert t in result_ts, f"Expected t={t} in result, got {result_ts}"
+    for t in [5.0, 6.0]:
+        assert t not in result_ts, f"t={t} should NOT be in result (gap centre)"
+    # Total output rows should be fewer than the full 12 target timestamps.
+    assert len(result) < 12, f"Gap should reduce output, got {len(result)} rows"

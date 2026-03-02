@@ -62,12 +62,13 @@ Pipeline stages run in sequence: **compress -> extract frames -> infer -> track 
 - **`sam3d_runner.py`:** SAM-3D-Body 3D pose backend. Patches upstream CUDA hardcoding for CPU fallback. Imports from `third_party/sam-3d-body/` submodule. Override path via `EEG_SYNC_SAM3D_ROOT` env var.
 - **`tracking.py`:** `TwoPersonTrackerState` with IoU-based temporal continuity. Frame 0 uses area prior (parent = largest bbox), subsequent frames use IoU matching.
 - **`schema.py`:** Validates output CSVs (manifest, `tracks_2d.csv`, `pose_3d.csv`). Returns `ValidationResult` with error list, not exceptions.
-- **`device.py`:** `resolve_device("auto")` returns `"cpu"` or `"cuda"`. `resolve_inference_mode` selects `"full"` vs `"body"` based on hardware.
+- **`device.py`:** `resolve_device("auto")` returns `"cpu"`, `"mps"`, or `"cuda"`. Auto-detection order: CUDA > MPS > CPU. `resolve_inference_mode` selects `"full"` vs `"body"` based on hardware.
 
 ### Video Analysis (`video_analysis/`)
 
-- **`interpolate.py`:** Cubic spline upsampling of low-FPS track/pose data (e.g., 1 FPS -> 8 FPS).
-- **`visualize_pose_tracks.py`:** Renders COCO17 skeletons + bounding boxes + track IDs onto video frames.
+- **`interpolate.py`:** Linear upsampling of low-FPS track/pose data (e.g., 1 FPS -> 8 FPS). Gap-aware: won't interpolate across large timestamp gaps. **Optional** — 5 FPS native is usually sufficient.
+- **`temporal_smooth.py`:** Confidence-gated bidirectional EMA smoothing. High-confidence keypoints pass through raw; only low-confidence ones get smoothed. Default `tau=0.15`, `conf_gate=0.3`.
+- **`visualize_pose_tracks.py`:** Renders COCO17 skeletons + bounding boxes + track IDs onto video frames. Supports both JSON and CSV input modes.
 
 ### CLI Entry Points (all in `pyproject.toml`)
 
@@ -78,7 +79,8 @@ Pipeline stages run in sequence: **compress -> extract frames -> infer -> track 
 | `video-infer-sam3d` | SAM-3D 3D pose (standalone) |
 | `video-infer-ultralytics` | Ultralytics 2D pose (standalone) |
 | `video-compress-rapid` | Batch video compression |
-| `video-interpolate` | Upsample low-FPS outputs |
+| `video-interpolate` | Upsample low-FPS outputs (optional) |
+| `video-smooth` | Confidence-gated EMA smoothing |
 | `video-visualize` | Pose overlay visualization |
 
 ## How to Explore This Codebase
@@ -97,6 +99,16 @@ Pipeline stages run in sequence: **compress -> extract frames -> infer -> track 
 - `video_inference/data/` is gitignored for local-only media.
 - Keep generated artifacts local (`sync_results.json`, plots, output CSVs).
 - Tests use synthetic fixtures in `tests/fixtures/`.
+
+### IMPORTANT: Video Compression Requirement
+
+**NEVER run video inference on raw/uncompressed video files.** Raw GoPro recordings are typically 2-10 GB each and will cause extremely slow frame extraction and excessive disk usage.
+
+Always compress videos first. Target file size: **under 50 MB**. Use one of:
+1. `video-compress-rapid` CLI to batch-compress raw videos.
+2. The pipeline's built-in compression (the default -- do NOT pass `--skip-compress` on raw files).
+
+Pre-compressed videos in `video_inference/compressed/` are safe to use with `--skip-compress`.
 
 ## Testing Patterns
 

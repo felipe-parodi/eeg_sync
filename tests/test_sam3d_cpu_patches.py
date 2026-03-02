@@ -50,7 +50,9 @@ def test_patch_cpu_device_paths_replaces_method_on_model() -> None:
 
 def test_full_cpu_patch_pipeline_is_coherent() -> None:
     """End-to-end: resolve_device -> resolve_inference_mode -> patches remap cuda."""
-    device = resolve_device("auto", cuda_available_fn=lambda: False)
+    device = resolve_device(
+        "auto", cuda_available_fn=lambda: False, mps_available_fn=lambda: False
+    )
     assert device == "cpu"
 
     mode = resolve_inference_mode(device, "auto")

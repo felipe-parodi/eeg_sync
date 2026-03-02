@@ -90,7 +90,18 @@ video-infer run \
   --skip-compress
 ```
 
-Then interpolate outputs to higher FPS:
+Then apply confidence-gated smoothing (recommended):
+
+```bash
+video-smooth \
+  --camera-dir video_inference/output/<session_id>/camera_a \
+  --pose-input pose_3d.csv \
+  --tracks-input tracks_2d.csv \
+  --tau 0.15 \
+  --conf-gate 0.3
+```
+
+Optionally interpolate to higher FPS (usually not needed at 5 FPS):
 
 ```bash
 video-interpolate \
@@ -114,7 +125,7 @@ Session-level summary:
 
 ## Notes
 
-- `--device auto` prefers CUDA and falls back to CPU.
+- `--device auto` prefers CUDA, then MPS (Apple Silicon), then CPU.
 - For pre-compressed inputs, add `--skip-compress` to avoid recompression.
 - `--frame-rate` controls inference sampling rate; use `1` for lightweight runs.
 - `--max-persons` sets expected number of tracked individuals.

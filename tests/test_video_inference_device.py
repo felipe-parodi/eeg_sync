@@ -12,18 +12,48 @@ from video_inference.sam3d_runner import _patch_estimator_device_transfers  # no
 
 
 def test_resolve_device_auto_prefers_cuda_when_available():
-    device = resolve_device("auto", cuda_available_fn=lambda: True)
+    device = resolve_device(
+        "auto",
+        cuda_available_fn=lambda: True,
+        mps_available_fn=lambda: True,
+    )
     assert device == "cuda"
 
 
-def test_resolve_device_auto_falls_back_to_cpu_when_cuda_unavailable():
-    device = resolve_device("auto", cuda_available_fn=lambda: False)
+def test_resolve_device_auto_falls_back_to_mps_when_cuda_unavailable():
+    device = resolve_device(
+        "auto",
+        cuda_available_fn=lambda: False,
+        mps_available_fn=lambda: True,
+    )
+    assert device == "mps"
+
+
+def test_resolve_device_auto_falls_back_to_cpu_when_no_accelerator():
+    device = resolve_device(
+        "auto",
+        cuda_available_fn=lambda: False,
+        mps_available_fn=lambda: False,
+    )
     assert device == "cpu"
 
 
 def test_resolve_device_cuda_raises_when_unavailable():
     with pytest.raises(RuntimeError, match="CUDA requested"):
-        resolve_device("cuda", cuda_available_fn=lambda: False)
+        resolve_device(
+            "cuda",
+            cuda_available_fn=lambda: False,
+            mps_available_fn=lambda: False,
+        )
+
+
+def test_resolve_device_mps_raises_when_unavailable():
+    with pytest.raises(RuntimeError, match="MPS requested"):
+        resolve_device(
+            "mps",
+            cuda_available_fn=lambda: False,
+            mps_available_fn=lambda: False,
+        )
 
 
 def test_resolve_inference_mode_auto_uses_body_on_cpu():

@@ -34,6 +34,7 @@ video-infer = "video_inference.pipeline:main"
 video-compress-rapid = "video_inference.rapid_compress:main"
 video-interpolate = "video_analysis.interpolate:main"
 video-visualize = "video_analysis.visualize_pose_tracks:main"
+video-smooth = "video_analysis.temporal_smooth:main"
 
 [build-system]
 requires = ["hatchling"]

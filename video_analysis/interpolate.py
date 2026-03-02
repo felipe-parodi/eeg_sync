@@ -87,20 +87,41 @@ def _interpolate_group(
     group_df: pd.DataFrame,
     target_timestamps: np.ndarray,
     numeric_columns: List[str],
+    max_gap_seconds: float = 0.0,
 ) -> pd.DataFrame:
     indexed = (
         group_df.sort_values("timestamp_s")
         .drop_duplicates(subset=["timestamp_s"], keep="last")
         .set_index("timestamp_s")
     )
+    # Compute max consecutive NaN fill limit from max_gap_seconds.
+    if max_gap_seconds > 0 and len(target_timestamps) >= 2:
+        step = float(np.median(np.diff(target_timestamps)))
+        max_fill = max(1, int(max_gap_seconds / step)) if step > 0 else None
+    else:
+        max_fill = None
+
     expanded = indexed.reindex(target_timestamps)
     expanded[numeric_columns] = expanded[numeric_columns].interpolate(
         method="linear",
         limit_direction="both",
         limit_area="inside",
+        limit=max_fill,
     )
     expanded["timestamp_s"] = expanded.index.astype(float)
     return expanded.reset_index(drop=True)
+
+
+def _compute_max_gap(df: pd.DataFrame, gap_factor: float = 3.0) -> float:
+    """Compute max interpolation gap as gap_factor * median observation step."""
+    unique_ts = np.sort(df["timestamp_s"].astype(float).unique())
+    if unique_ts.size < 2:
+        return 0.0
+    diffs = np.diff(unique_ts)
+    diffs = diffs[diffs > 1e-9]
+    if diffs.size == 0:
+        return 0.0
+    return float(np.median(diffs) * gap_factor)
 
 
 def interpolate_tracks_2d(
@@ -122,10 +143,13 @@ def interpolate_tracks_2d(
     if tracks_df.empty or target_timestamps.size == 0:
         return tracks_df.copy()
 
+    max_gap = _compute_max_gap(tracks_df)
     rows: List[pd.DataFrame] = []
     for track_id, group in tracks_df.groupby("track_id", dropna=False):
         group = group.copy()
-        out = _interpolate_group(group, target_timestamps, TRACK_NUMERIC_COLUMNS)
+        out = _interpolate_group(
+            group, target_timestamps, TRACK_NUMERIC_COLUMNS, max_gap
+        )
         out["track_id"] = int(track_id)
         out["track_label"] = _mode_or_default(group["track_label"], "unknown")
         out["frame_idx"] = np.rint(out["timestamp_s"] * target_fps).astype(int)
@@ -168,11 +192,14 @@ def interpolate_pose_3d(
     if pose_df.empty or target_timestamps.size == 0:
         return pose_df.copy()
 
+    max_gap = _compute_max_gap(pose_df)
     rows: List[pd.DataFrame] = []
     grouped = pose_df.groupby(["track_id", "keypoint_name"], dropna=False)
     for (track_id, keypoint_name), group in grouped:
         group = group.copy()
-        out = _interpolate_group(group, target_timestamps, POSE_NUMERIC_COLUMNS)
+        out = _interpolate_group(
+            group, target_timestamps, POSE_NUMERIC_COLUMNS, max_gap
+        )
         out["track_id"] = int(track_id)
         out["track_label"] = _mode_or_default(group["track_label"], "unknown")
         out["keypoint_name"] = str(keypoint_name)
