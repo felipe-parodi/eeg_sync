@@ -25,6 +25,12 @@ video = [
     "ultralytics>=8.3.0",
     "supervision>=0.21.0",
 ]
+gaze = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "timm>=0.9.0",
+    "Pillow>=9.0.0",
+]
 
 [project.scripts]
 eeg-sync = "sync_eeg_vid.cli:main"
@@ -35,6 +41,9 @@ video-compress-rapid = "video_inference.rapid_compress:main"
 video-interpolate = "video_analysis.interpolate:main"
 video-visualize = "video_analysis.visualize_pose_tracks:main"
 video-smooth = "video_analysis.temporal_smooth:main"
+gaze-infer = "gaze_analysis.gazelle_runner:main"
+gaze-synchrony = "gaze_analysis.synchrony:main"
+gaze-plot = "gaze_analysis.plotting:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -58,7 +67,7 @@ testpaths = ["tests"]
 addopts = "-q --tb=short"
 
 [tool.coverage.run]
-source = ["sync_eeg_vid", "video_inference", "video_analysis"]
+source = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis"]
 omit = ["tests/*"]
 
 [tool.coverage.report]

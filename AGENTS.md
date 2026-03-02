@@ -70,6 +70,17 @@ Pipeline stages run in sequence: **compress -> extract frames -> infer -> track 
 - **`temporal_smooth.py`:** Confidence-gated bidirectional EMA smoothing. High-confidence keypoints pass through raw; only low-confidence ones get smoothed. Default `tau=0.15`, `conf_gate=0.3`.
 - **`visualize_pose_tracks.py`:** Renders COCO17 skeletons + bounding boxes + track IDs onto video frames. Supports both JSON and CSV input modes.
 
+### Gaze Analysis (`gaze_analysis/`)
+
+Parent-child gaze estimation and synchrony analysis using Gazelle (CVPR 2025). Requires a `session_config.json` with manual parent/child track ID mapping per camera and session block definitions.
+
+- **`config.py`:** Session configuration — loads JSON with camera-person mappings and session block timestamps.
+- **`head_bbox.py`:** Derives normalized head bounding boxes from COCO keypoints (kp_000-kp_004). Falls back to top 30% of body bbox when head keypoints are low confidence.
+- **`gazelle_runner.py`:** Batch Gazelle inference. Loads frames + head bboxes, runs model, outputs `gaze_heatmap.csv` (scalar summaries) + `gaze_heatmaps.npz` (64x64 heatmaps).
+- **`synchrony.py`:** Four metrics — torso proximity (2D Euclidean distance), movement cross-correlation (windowed xcorr of velocity), gaze categories (mutual/joint/watching/independent), gaze convergence (cosine similarity of heatmaps).
+- **`plotting.py`:** 4-panel dashboard with session block coloring (grocery=green, synchrony=orange, storybook=blue).
+- **`gaze_schema.py`:** Column definitions for gaze output CSVs.
+
 ### CLI Entry Points (all in `pyproject.toml`)
 
 | Command | Purpose |
@@ -82,6 +93,9 @@ Pipeline stages run in sequence: **compress -> extract frames -> infer -> track 
 | `video-interpolate` | Upsample low-FPS outputs (optional) |
 | `video-smooth` | Confidence-gated EMA smoothing |
 | `video-visualize` | Pose overlay visualization |
+| `gaze-infer` | Gazelle gaze estimation on video frames |
+| `gaze-synchrony` | Compute parent-child synchrony metrics |
+| `gaze-plot` | Plot synchrony dashboard |
 
 ## How to Explore This Codebase
 
