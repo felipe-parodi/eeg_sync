@@ -9,6 +9,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+
 def test_render_pose_track_video_writes_output(tmp_path: Path):
     cv2 = pytest.importorskip("cv2")
     from video_analysis.visualize_pose_tracks import (  # noqa: E402

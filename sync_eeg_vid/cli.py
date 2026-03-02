@@ -31,7 +31,7 @@ def collect_all_files() -> Dict[str, Optional[str]]:
     print("  - Type/paste the full file path")
     print("  - Press ENTER to skip optional files")
     print("\n⚠️  IMPORTANT: If your path contains spaces, enclose it in quotes")
-    print("   Example: \"path/to/my folder/data.csv\"")
+    print('   Example: "path/to/my folder/data.csv"')
 
     files = {}
 
@@ -375,8 +375,7 @@ def main():
     print("\n" + "=" * 60)
     print("HOW TO USE THIS DATA")
     print("=" * 60)
-    print(
-        """
+    print("""
 To use the synchronization offsets in your analysis:
 
 1. Load the sync results:
@@ -404,8 +403,7 @@ To use the synchronization offsets in your analysis:
    # Returns DataFrame with Time_EEG and Time_Video columns
 
 See README.md for more examples!
-"""
-    )
+""")
 
     print("\nDone!")
 

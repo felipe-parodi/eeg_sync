@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
@@ -30,9 +30,7 @@ from gaze_analysis.config import (
 _TORSO_KEYPOINTS = ["kp_005", "kp_006", "kp_011", "kp_012"]
 
 
-def _torso_centroid(
-    pose_df: pd.DataFrame, track_id: int
-) -> pd.DataFrame:
+def _torso_centroid(pose_df: pd.DataFrame, track_id: int) -> pd.DataFrame:
     """Compute per-frame torso centroid for one person.
 
     Args:
@@ -47,11 +45,15 @@ def _torso_centroid(
         & (pose_df["keypoint_name"].isin(_TORSO_KEYPOINTS))
     ].copy()
 
-    grouped = subset.groupby("frame_idx", sort=True).agg(
-        timestamp_s=("timestamp_s", "first"),
-        cx=("x_m", "mean"),
-        cy=("y_m", "mean"),
-    ).reset_index()
+    grouped = (
+        subset.groupby("frame_idx", sort=True)
+        .agg(
+            timestamp_s=("timestamp_s", "first"),
+            cx=("x_m", "mean"),
+            cy=("y_m", "mean"),
+        )
+        .reset_index()
+    )
 
     return grouped
 
@@ -79,13 +81,10 @@ def compute_torso_proximity(
     parent = _torso_centroid(pose_df, parent_track_id)
     child = _torso_centroid(pose_df, child_track_id)
 
-    merged = parent.merge(
-        child, on="frame_idx", suffixes=("_p", "_c")
-    )
+    merged = parent.merge(child, on="frame_idx", suffixes=("_p", "_c"))
 
     merged["torso_distance_px"] = np.sqrt(
-        (merged["cx_p"] - merged["cx_c"]) ** 2
-        + (merged["cy_p"] - merged["cy_c"]) ** 2
+        (merged["cx_p"] - merged["cx_c"]) ** 2 + (merged["cy_p"] - merged["cy_c"]) ** 2
     )
 
     return merged[["frame_idx", "timestamp_s_p", "torso_distance_px"]].rename(
@@ -174,11 +173,16 @@ def compute_movement_xcorr(
     child_v = _compute_velocity(child_c)
 
     # Merge on frame_idx to align
-    merged = parent_v[["frame_idx", "timestamp_s", "speed"]].merge(
-        child_v[["frame_idx", "speed"]],
-        on="frame_idx",
-        suffixes=("_p", "_c"),
-    ).sort_values("timestamp_s").reset_index(drop=True)
+    merged = (
+        parent_v[["frame_idx", "timestamp_s", "speed"]]
+        .merge(
+            child_v[["frame_idx", "speed"]],
+            on="frame_idx",
+            suffixes=("_p", "_c"),
+        )
+        .sort_values("timestamp_s")
+        .reset_index(drop=True)
+    )
 
     timestamps = merged["timestamp_s"].values.astype(float)
     speed_p = merged["speed_p"].values.astype(float)
@@ -291,19 +295,28 @@ def compute_gaze_categories(
     Returns:
         DataFrame with frame_idx, timestamp_s, gaze_category columns.
     """
-    parent_gaze = gaze_df[gaze_df["track_id"] == parent_track_id].sort_values(
-        "frame_idx"
-    ).reset_index(drop=True)
-    child_gaze = gaze_df[gaze_df["track_id"] == child_track_id].sort_values(
-        "frame_idx"
-    ).reset_index(drop=True)
+    parent_gaze = (
+        gaze_df[gaze_df["track_id"] == parent_track_id]
+        .sort_values("frame_idx")
+        .reset_index(drop=True)
+    )
+    child_gaze = (
+        gaze_df[gaze_df["track_id"] == child_track_id]
+        .sort_values("frame_idx")
+        .reset_index(drop=True)
+    )
 
     # Align by frame_idx
-    merged = parent_gaze[["frame_idx", "timestamp_s", "gaze_peak_x", "gaze_peak_y"]].merge(
-        child_gaze[["frame_idx", "gaze_peak_x", "gaze_peak_y"]],
-        on="frame_idx",
-        suffixes=("_p", "_c"),
-    ).sort_values("frame_idx").reset_index(drop=True)
+    merged = (
+        parent_gaze[["frame_idx", "timestamp_s", "gaze_peak_x", "gaze_peak_y"]]
+        .merge(
+            child_gaze[["frame_idx", "gaze_peak_x", "gaze_peak_y"]],
+            on="frame_idx",
+            suffixes=("_p", "_c"),
+        )
+        .sort_values("frame_idx")
+        .reset_index(drop=True)
+    )
 
     n = len(merged)
     categories = []
@@ -326,11 +339,17 @@ def compute_gaze_categories(
             c_hx, c_hy = 0.0, 0.0
 
         # Distance from parent's gaze to child's head
-        p_looks_at_child = np.sqrt((p_gx - c_hx) ** 2 + (p_gy - c_hy) ** 2) < proximity_threshold
+        p_looks_at_child = (
+            np.sqrt((p_gx - c_hx) ** 2 + (p_gy - c_hy) ** 2) < proximity_threshold
+        )
         # Distance from child's gaze to parent's head
-        c_looks_at_parent = np.sqrt((c_gx - p_hx) ** 2 + (c_gy - p_hy) ** 2) < proximity_threshold
+        c_looks_at_parent = (
+            np.sqrt((c_gx - p_hx) ** 2 + (c_gy - p_hy) ** 2) < proximity_threshold
+        )
         # Distance between gaze peaks
-        gaze_close = np.sqrt((p_gx - c_gx) ** 2 + (p_gy - c_gy) ** 2) < proximity_threshold
+        gaze_close = (
+            np.sqrt((p_gx - c_gx) ** 2 + (p_gy - c_gy) ** 2) < proximity_threshold
+        )
 
         if p_looks_at_child and c_looks_at_parent:
             cat = "mutual_gaze"
@@ -553,7 +572,9 @@ def main() -> None:
         child_head_centers = None
 
     gaze_cat_df = compute_gaze_categories(
-        gaze_df, pid, cid,
+        gaze_df,
+        pid,
+        cid,
         parent_head_centers=parent_head_centers,
         child_head_centers=child_head_centers,
     )

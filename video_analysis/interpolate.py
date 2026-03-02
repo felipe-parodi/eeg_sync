@@ -34,7 +34,9 @@ class InterpolationConfig:
     summary_output: str = "interpolation_summary.json"
 
 
-def _validate_required_columns(df: pd.DataFrame, required: Iterable[str], name: str) -> None:
+def _validate_required_columns(
+    df: pd.DataFrame, required: Iterable[str], name: str
+) -> None:
     missing = [column for column in required if column not in df.columns]
     if missing:
         raise ValueError(f"{name} is missing required columns: {missing}")

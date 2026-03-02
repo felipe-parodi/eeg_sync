@@ -416,7 +416,9 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
                                     config.max_persons,
                                     config.tracker_backend,
                                 ),
-                                "bbox_xyxy": np.asarray(det["bbox"], dtype=float).tolist(),
+                                "bbox_xyxy": np.asarray(
+                                    det["bbox"], dtype=float
+                                ).tolist(),
                                 "confidence": float(det.get("confidence", 1.0)),
                                 "keypoints_3d": np.asarray(
                                     det["pred_keypoints_3d"], dtype=float
@@ -430,11 +432,14 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
                     top2_by_area = sorted(
                         detections,
                         key=lambda det: float(
-                            (det["bbox"][2] - det["bbox"][0]) * (det["bbox"][3] - det["bbox"][1])
+                            (det["bbox"][2] - det["bbox"][0])
+                            * (det["bbox"][3] - det["bbox"][1])
                         ),
                         reverse=True,
                     )[:2]
-                    assigned, state = assign_two_person_tracks(top2_by_area, state=state)
+                    assigned, state = assign_two_person_tracks(
+                        top2_by_area, state=state
+                    )
                     for assignment in assigned:
                         det = top2_by_area[assignment.detection_index]
                         persons.append(
@@ -482,7 +487,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", required=True, type=str)
     parser.add_argument("--image-folder", required=True, type=str)
     parser.add_argument("--output-json", required=True, type=str)
-    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
+    parser.add_argument(
+        "--device", default="auto", choices=["auto", "cpu", "cuda", "mps"]
+    )
     parser.add_argument("--conf", default=0.25, type=float)
     parser.add_argument("--iou", default=0.7, type=float)
     parser.add_argument("--imgsz", default=640, type=int)

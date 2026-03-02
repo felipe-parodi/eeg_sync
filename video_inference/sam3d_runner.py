@@ -16,7 +16,6 @@ import numpy as np
 from .device import resolve_device, resolve_inference_mode
 from .tracking import TwoPersonTrackerState, assign_two_person_tracks
 
-
 SUBMODULE_ROOT = Path(
     os.environ.get(
         "EEG_SYNC_SAM3D_ROOT",

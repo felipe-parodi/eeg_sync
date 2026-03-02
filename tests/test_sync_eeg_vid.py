@@ -52,11 +52,7 @@ def test_validate_file_paths_accepts_txt_eeg_extension():
 def test_find_sync_from_csv_ignores_nan_values(tmp_path: Path):
     csv_path = tmp_path / "ir_cleaned.csv"
     csv_path.write_text(
-        "Time (sec),Value\n"
-        "0.000,257\n"
-        "0.004,\n"
-        "0.008,257\n"
-        "0.012,1\n",
+        "Time (sec),Value\n" "0.000,257\n" "0.004,\n" "0.008,257\n" "0.012,1\n",
         encoding="utf-8",
     )
 
@@ -64,7 +60,9 @@ def test_find_sync_from_csv_ignores_nan_values(tmp_path: Path):
     assert sync_time == pytest.approx(0.012)
 
 
-def test_find_sync_pulse_falls_back_to_txt_when_preferred_csv_is_invalid(tmp_path: Path):
+def test_find_sync_pulse_falls_back_to_txt_when_preferred_csv_is_invalid(
+    tmp_path: Path,
+):
     txt_path = tmp_path / "session.txt"
     _write_raw_eeg_txt(txt_path)
 

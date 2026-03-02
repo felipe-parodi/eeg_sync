@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -13,7 +12,6 @@ import numpy as np
 import pandas as pd
 
 from gaze_analysis.config import (
-    SessionConfig,
     add_time_range_args,
     filter_by_time_range,
     load_session_config,
@@ -43,9 +41,7 @@ class GazelleConfig:
     output_npz: str = "gaze_heatmaps.npz"
 
 
-def _load_gazelle_model(
-    model_name: str, device: str
-) -> Tuple[Any, Any]:
+def _load_gazelle_model(model_name: str, device: str) -> Tuple[Any, Any]:
     """Load a Gazelle model via torch.hub.
 
     Args:
@@ -131,7 +127,7 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
 
     camera_dir = Path(config.camera_dir)
     session_config = load_session_config(config.session_config_path)
-    mapping = session_config.get_camera_mapping(config.camera_id)
+    session_config.get_camera_mapping(config.camera_id)
 
     # Load existing pipeline outputs
     pose_df = pd.read_csv(camera_dir / config.pose_input)
@@ -159,7 +155,9 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
     head_bboxes_df = filter_by_time_range(head_bboxes_df, t_start, t_end)
 
     if config.max_frames > 0:
-        unique_frames = sorted(head_bboxes_df["frame_idx"].unique())[:config.max_frames]
+        unique_frames = sorted(head_bboxes_df["frame_idx"].unique())[
+            : config.max_frames
+        ]
         head_bboxes_df = head_bboxes_df[
             head_bboxes_df["frame_idx"].isin(unique_frames)
         ].copy()
@@ -256,7 +254,9 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
                 all_heatmaps.append(heatmap_2d)
                 heatmap_keys.append(key)
 
-        if (batch_start // batch_size + 1) % 10 == 0 or batch_start + batch_size >= total_frames:
+        if (
+            batch_start // batch_size + 1
+        ) % 10 == 0 or batch_start + batch_size >= total_frames:
             processed = min(batch_start + batch_size, total_frames)
             print(f"  Processed {processed}/{total_frames} frames")
 

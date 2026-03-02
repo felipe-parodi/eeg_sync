@@ -5,15 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 import numpy as np
 import pandas as pd
+import pytest
 
 from gaze_analysis.config import (
-    CameraPersonMapping,
-    SessionBlock,
-    SessionConfig,
     filter_by_time_range,
     filter_heatmaps_by_time_range,
     load_session_config,
@@ -42,9 +38,24 @@ def _write_config(tmp_path: Path, overrides: dict | None = None) -> Path:
             },
         ],
         "session_blocks": [
-            {"name": "grocery_free_play", "start_s": 806, "end_s": 1420, "color": "green"},
-            {"name": "synchrony_intervention", "start_s": 1676, "end_s": 1725, "color": "orange"},
-            {"name": "storybook_reading", "start_s": 1762, "end_s": 2226, "color": "blue"},
+            {
+                "name": "grocery_free_play",
+                "start_s": 806,
+                "end_s": 1420,
+                "color": "green",
+            },
+            {
+                "name": "synchrony_intervention",
+                "start_s": 1676,
+                "end_s": 1725,
+                "color": "orange",
+            },
+            {
+                "name": "storybook_reading",
+                "start_s": 1762,
+                "end_s": 2226,
+                "color": "blue",
+            },
         ],
     }
     if overrides:

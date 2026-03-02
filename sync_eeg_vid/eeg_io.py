@@ -345,8 +345,7 @@ def find_sync_pulse(
         raise ValueError(f"Could not find sync pulse. Details:\n  - {joined}")
 
     raise FileNotFoundError(
-        "No valid EEG file found for sync extraction. "
-        f"Started from: {filepath}"
+        "No valid EEG file found for sync extraction. " f"Started from: {filepath}"
     )
 
 

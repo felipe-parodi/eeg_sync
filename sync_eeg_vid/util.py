@@ -125,17 +125,18 @@ def _strip_quotes(filepath: str) -> str:
     # Check if path has quotes
     has_quotes = False
     if len(filepath) >= 2:
-        if (filepath[0] == '"' and filepath[-1] == '"') or \
-           (filepath[0] == "'" and filepath[-1] == "'"):
+        if (filepath[0] == '"' and filepath[-1] == '"') or (
+            filepath[0] == "'" and filepath[-1] == "'"
+        ):
             has_quotes = True
             filepath = filepath[1:-1]
 
     # Validate: if path has spaces, it MUST have been quoted
-    if ' ' in filepath and not has_quotes:
+    if " " in filepath and not has_quotes:
         raise ValueError(
             f"Path contains spaces and must be enclosed in quotes.\n"
             f"  You entered: {original}\n"
-            f"  Please use:  \"{filepath}\""
+            f'  Please use:  "{filepath}"'
         )
 
     return filepath
@@ -166,7 +167,7 @@ def ask_file_path(prompt: str, must_exist: bool = True) -> str:
         # Clean up pasted text that might include the prompt
         # This happens when terminals include prompt text in paste
         if response.startswith(prompt):
-            response = response[len(prompt):].strip()
+            response = response[len(prompt) :].strip()
             # Also remove leading colon if present
             if response.startswith(":"):
                 response = response[1:].strip()

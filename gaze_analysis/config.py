@@ -69,9 +69,7 @@ class SessionConfig:
             if block.name == name:
                 return block
         available = [b.name for b in self.session_blocks]
-        raise KeyError(
-            f"No session block named '{name}'. Available: {available}"
-        )
+        raise KeyError(f"No session block named '{name}'. Available: {available}")
 
     def get_camera_mapping(self, camera_id: str) -> CameraPersonMapping:
         """Return the mapping for a given camera_id.
@@ -202,8 +200,10 @@ def resolve_time_range(
         block = session_config.get_session_block(time_block)
         return (block.start_s, block.end_s)
 
-    return (start_s if start_s is not None else 0.0,
-            end_s if end_s is not None else float("inf"))
+    return (
+        start_s if start_s is not None else 0.0,
+        end_s if end_s is not None else float("inf"),
+    )
 
 
 def filter_by_time_range(

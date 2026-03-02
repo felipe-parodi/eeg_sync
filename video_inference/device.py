@@ -43,9 +43,7 @@ def resolve_device(
         cuda_available = bool(cuda_available_fn())
 
     if mps_available_fn is None:
-        mps_available = (
-            bool(torch.backends.mps.is_available()) if torch else False
-        )
+        mps_available = bool(torch.backends.mps.is_available()) if torch else False
     else:
         mps_available = bool(mps_available_fn())
 

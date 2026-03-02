@@ -12,7 +12,6 @@ import pandas as pd
 
 from gaze_analysis.config import (
     SessionBlock,
-    SessionConfig,
     add_time_range_args,
     filter_by_time_range,
     load_session_config,
@@ -253,12 +252,19 @@ def plot_dashboard(
     if not convergence_df.empty:
         plot_gaze_convergence(convergence_df, blocks, ax=axes[4])
     else:
-        axes[4].text(0.5, 0.5, "No gaze convergence data", ha="center", va="center",
-                     transform=axes[4].transAxes)
+        axes[4].text(
+            0.5,
+            0.5,
+            "No gaze convergence data",
+            ha="center",
+            va="center",
+            transform=axes[4].transAxes,
+        )
         axes[4].set_title("Gaze Convergence")
 
     # Add block legend to bottom
     from matplotlib.patches import Patch
+
     legend_elements = [
         Patch(facecolor=b.color, alpha=0.3, label=b.name.replace("_", " "))
         for b in blocks
@@ -284,8 +290,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-config", required=True, type=str)
     parser.add_argument("--camera-id", default="camera_a", type=str)
     parser.add_argument("--metrics-csv", default="synchrony_metrics.csv", type=str)
-    parser.add_argument("--xcorr-csv", default="", type=str,
-                        help="Cross-correlation CSV (auto-detected if empty).")
+    parser.add_argument(
+        "--xcorr-csv",
+        default="",
+        type=str,
+        help="Cross-correlation CSV (auto-detected if empty).",
+    )
     parser.add_argument("--output", default="synchrony_dashboard.png", type=str)
     add_time_range_args(parser)
     return parser
@@ -317,7 +327,9 @@ def main() -> None:
     xcorr_csv = camera_dir / (args.xcorr_csv or "movement_xcorr.csv")
     if xcorr_csv.exists():
         xcorr_df = pd.read_csv(xcorr_csv)
-        xcorr_df = filter_by_time_range(xcorr_df, t_start, t_end, time_column="window_start_s")
+        xcorr_df = filter_by_time_range(
+            xcorr_df, t_start, t_end, time_column="window_start_s"
+        )
     else:
         xcorr_df = pd.DataFrame(
             columns=["window_start_s", "window_end_s", "peak_xcorr", "peak_lag_s"]
@@ -337,7 +349,11 @@ def main() -> None:
         )
 
     fig = plot_dashboard(
-        proximity_df, xcorr_df, gaze_cat_df, convergence_df, blocks,
+        proximity_df,
+        xcorr_df,
+        gaze_cat_df,
+        convergence_df,
+        blocks,
         title=f"Synchrony: {session_config.session_id} / {args.camera_id}",
     )
 

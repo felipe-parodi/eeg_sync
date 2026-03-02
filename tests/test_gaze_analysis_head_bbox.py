@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
-import pytest
 
 from gaze_analysis.head_bbox import (
-    COCO_HEAD_KEYPOINTS,
     extract_head_bboxes,
 )
 
@@ -213,10 +210,14 @@ def test_head_bbox_multiple_frames() -> None:
             "kp_002": (210.0, 90.0, 0.88),
         }
         frames.append(
-            _make_pose_df(kp, track_id=0, frame_idx=frame_idx, timestamp_s=frame_idx * 0.2)
+            _make_pose_df(
+                kp, track_id=0, frame_idx=frame_idx, timestamp_s=frame_idx * 0.2
+            )
         )
         tracks.append(
-            _make_tracks_df(track_id=0, frame_idx=frame_idx, timestamp_s=frame_idx * 0.2)
+            _make_tracks_df(
+                track_id=0, frame_idx=frame_idx, timestamp_s=frame_idx * 0.2
+            )
         )
 
     pose_df = pd.concat(frames, ignore_index=True)
@@ -255,14 +256,28 @@ def test_empty_pose_returns_empty() -> None:
     """Empty input DataFrames should return an empty result."""
     pose_df = pd.DataFrame(
         columns=[
-            "frame_idx", "timestamp_s", "track_id", "track_label",
-            "keypoint_name", "x_m", "y_m", "z_m", "keypoint_confidence",
+            "frame_idx",
+            "timestamp_s",
+            "track_id",
+            "track_label",
+            "keypoint_name",
+            "x_m",
+            "y_m",
+            "z_m",
+            "keypoint_confidence",
         ]
     )
     tracks_df = pd.DataFrame(
         columns=[
-            "frame_idx", "timestamp_s", "track_id", "track_label",
-            "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2", "track_confidence",
+            "frame_idx",
+            "timestamp_s",
+            "track_id",
+            "track_label",
+            "bbox_x1",
+            "bbox_y1",
+            "bbox_x2",
+            "bbox_y2",
+            "track_confidence",
         ]
     )
     result = extract_head_bboxes(

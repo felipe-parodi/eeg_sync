@@ -127,7 +127,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="video-compress-rapid",
         description="Rapidly compress videos before inference.",
     )
-    parser.add_argument("--video", action="append", default=[], help="Input video path.")
+    parser.add_argument(
+        "--video", action="append", default=[], help="Input video path."
+    )
     parser.add_argument(
         "--input-dir",
         default=None,

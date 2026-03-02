@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from gaze_analysis.synchrony import (
     compute_gaze_categories,
@@ -12,7 +11,6 @@ from gaze_analysis.synchrony import (
     compute_movement_xcorr,
     compute_torso_proximity,
 )
-
 
 # ---- Helpers ----
 

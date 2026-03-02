@@ -61,12 +61,15 @@ Repository = "https://github.com/felipeparodi/eeg_sync"
 [tool.ruff]
 line-length = 88
 target-version = "py310"
+exclude = ["third_party"]
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]  # Line too long (handled by formatter)
+per-file-ignores = {"tests/*" = ["E402"], "video_inference/pipeline.py" = ["N806"]}
 
 [tool.black]
 line-length = 88
 target-version = ["py310"]
+exclude = "third_party"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

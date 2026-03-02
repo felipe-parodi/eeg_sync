@@ -23,7 +23,7 @@ def test_bbox_iou_returns_expected_value():
 def test_first_frame_assigns_parent_as_larger_bbox():
     detections = [
         {"bbox": [100, 100, 140, 180], "confidence": 0.9},  # smaller
-        {"bbox": [20, 50, 120, 230], "confidence": 0.95},   # larger
+        {"bbox": [20, 50, 120, 230], "confidence": 0.95},  # larger
     ]
     assigned, _ = assign_two_person_tracks(detections)
 
@@ -39,16 +39,19 @@ def test_first_frame_assigns_parent_as_larger_bbox():
 def test_temporal_assignment_prevents_swap_when_detection_order_flips():
     # Frame 0: parent left, child right
     frame0 = [
-        {"bbox": [10, 10, 110, 220], "confidence": 0.95},   # parent-like
+        {"bbox": [10, 10, 110, 220], "confidence": 0.95},  # parent-like
         {"bbox": [180, 40, 240, 170], "confidence": 0.92},  # child-like
     ]
     assigned0, state = assign_two_person_tracks(frame0, state=None)
-    assert next(item for item in assigned0 if item.track_label == "parent").detection_index == 0
+    assert (
+        next(item for item in assigned0 if item.track_label == "parent").detection_index
+        == 0
+    )
 
     # Frame 1: detector output order flips but spatial continuity is preserved.
     frame1 = [
         {"bbox": [182, 42, 242, 172], "confidence": 0.91},  # child first now
-        {"bbox": [12, 11, 112, 221], "confidence": 0.96},   # parent second
+        {"bbox": [12, 11, 112, 221], "confidence": 0.96},  # parent second
     ]
     assigned1, _ = assign_two_person_tracks(frame1, state=state)
     parent = next(item for item in assigned1 if item.track_label == "parent")

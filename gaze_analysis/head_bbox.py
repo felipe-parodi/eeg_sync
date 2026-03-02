@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import List
 
-import numpy as np
 import pandas as pd
 
 # COCO keypoints 0-4 are head region: nose, left eye, right eye, left ear, right ear
@@ -128,8 +127,14 @@ def extract_head_bboxes(
     if pose_df.empty:
         return pd.DataFrame(
             columns=[
-                "frame_idx", "timestamp_s", "track_id",
-                "head_x1", "head_y1", "head_x2", "head_y2", "head_source",
+                "frame_idx",
+                "timestamp_s",
+                "track_id",
+                "head_x1",
+                "head_y1",
+                "head_x2",
+                "head_y2",
+                "head_source",
             ]
         )
 

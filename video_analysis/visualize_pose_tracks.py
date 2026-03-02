@@ -31,10 +31,10 @@ COCO17_EDGES: Tuple[Tuple[int, int], ...] = (
 )
 
 TRACK_COLORS: Dict[int, Tuple[int, int, int]] = {
-    0: (0, 128, 255),   # orange in BGR (person_00)
-    1: (255, 160, 0),   # blue in BGR (person_01)
-    2: (0, 220, 0),     # green in BGR (person_02)
-    3: (180, 0, 255),   # purple in BGR (person_03)
+    0: (0, 128, 255),  # orange in BGR (person_00)
+    1: (255, 160, 0),  # blue in BGR (person_01)
+    2: (0, 220, 0),  # green in BGR (person_02)
+    3: (180, 0, 255),  # purple in BGR (person_03)
 }
 
 
@@ -110,7 +110,9 @@ def _draw_person(
     for point in parsed_points:
         if point is None or point[2] < keypoint_conf_thresh:
             continue
-        cv2.circle(image, (point[0], point[1]), 3, color, thickness=-1, lineType=cv2.LINE_AA)
+        cv2.circle(
+            image, (point[0], point[1]), 3, color, thickness=-1, lineType=cv2.LINE_AA
+        )
 
 
 def _load_frames_from_csv(
@@ -163,7 +165,12 @@ def _load_frames_from_csv(
             tid = int(t_row["track_id"])
             person_pose = p_rows[p_rows["track_id"] == tid].sort_values("keypoint_name")
             keypoints_3d = [
-                [float(r["x_m"]), float(r["y_m"]), float(r["z_m"]), float(r["keypoint_confidence"])]
+                [
+                    float(r["x_m"]),
+                    float(r["y_m"]),
+                    float(r["z_m"]),
+                    float(r["keypoint_confidence"]),
+                ]
                 for _, r in person_pose.iterrows()
             ]
             persons.append(
@@ -290,17 +297,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--camera-dir", required=True, type=str)
     parser.add_argument("--output-video", required=True, type=str)
-    parser.add_argument("--input-json", default="intermediate/inference_raw.json", type=str)
+    parser.add_argument(
+        "--input-json", default="intermediate/inference_raw.json", type=str
+    )
     parser.add_argument("--frames-dir", default="frames", type=str)
     parser.add_argument("--output-fps", default=12.0, type=float)
     parser.add_argument("--keypoint-conf-thresh", default=0.2, type=float)
     parser.add_argument("--max-frames", default=None, type=int)
     parser.add_argument("--start-frame", default=0, type=int)
-    parser.add_argument("--draw-bbox", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--pose-csv", default=None, type=str,
-                        help="Pose CSV file (relative to camera-dir) to use instead of JSON.")
-    parser.add_argument("--tracks-csv", default=None, type=str,
-                        help="Tracks CSV file (relative to camera-dir) to use instead of JSON.")
+    parser.add_argument(
+        "--draw-bbox", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--pose-csv",
+        default=None,
+        type=str,
+        help="Pose CSV file (relative to camera-dir) to use instead of JSON.",
+    )
+    parser.add_argument(
+        "--tracks-csv",
+        default=None,
+        type=str,
+        help="Tracks CSV file (relative to camera-dir) to use instead of JSON.",
+    )
     return parser
 
 
@@ -326,4 +345,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

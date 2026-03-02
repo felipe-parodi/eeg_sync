@@ -31,7 +31,9 @@ def _sorted_frame_paths(frames_dir: Path) -> List[Path]:
     )
 
 
-def _write_frame_index(frame_paths: List[Path], frame_rate: float, output_csv: Path) -> None:
+def _write_frame_index(
+    frame_paths: List[Path], frame_rate: float, output_csv: Path
+) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     with output_csv.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)

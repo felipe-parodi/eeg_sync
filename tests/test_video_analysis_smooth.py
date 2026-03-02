@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -112,9 +111,7 @@ def test_ema_does_not_smooth_confidence():
     confs = [0.9, 0.3, 0.8, 0.1, 0.7]
     df = _make_pose_df(confidences=confs)
     result = smooth_pose_3d(df, tau=0.5)
-    np.testing.assert_array_almost_equal(
-        result["keypoint_confidence"].values, confs
-    )
+    np.testing.assert_array_almost_equal(result["keypoint_confidence"].values, confs)
 
 
 def test_ema_per_track_independence():
@@ -124,9 +121,7 @@ def test_ema_per_track_independence():
     combined = pd.concat([df0, df1], ignore_index=True)
     result = smooth_pose_3d(combined, tau=_TAU_HALF)
     track1 = result[result["track_id"] == 1]
-    np.testing.assert_array_almost_equal(
-        track1["x_m"].values, [100.0, 100.0, 100.0]
-    )
+    np.testing.assert_array_almost_equal(track1["x_m"].values, [100.0, 100.0, 100.0])
 
 
 def test_ema_single_frame_passthrough():
@@ -281,9 +276,7 @@ def test_infill_skips_long_low_conf_runs():
         y_values=[10.0, 999.0, 999.0, 999.0, 999.0, 999.0, 20.0],
         confidences=[0.9, 0.05, 0.05, 0.05, 0.05, 0.05, 0.9],
     )
-    result = infill_low_confidence_keypoints(
-        df, conf_threshold=0.3, max_infill_run=3
-    )
+    result = infill_low_confidence_keypoints(df, conf_threshold=0.3, max_infill_run=3)
     # Run length is 5 > max_infill_run=3, so all 999.0 values should remain.
     middle = result["x_m"].values[1:6]
     np.testing.assert_array_equal(middle, [999.0] * 5)
@@ -297,9 +290,7 @@ def test_infill_fills_short_low_conf_runs():
         y_values=[10.0, 999.0, 999.0, 999.0, 20.0],
         confidences=[0.9, 0.05, 0.05, 0.05, 0.9],
     )
-    result = infill_low_confidence_keypoints(
-        df, conf_threshold=0.3, max_infill_run=3
-    )
+    result = infill_low_confidence_keypoints(df, conf_threshold=0.3, max_infill_run=3)
     # Run length is 3 == max_infill_run, so values should be interpolated.
     middle = result["x_m"].values[1:4]
     # Linear interp from 10 to 20: 12.5, 15.0, 17.5
@@ -320,7 +311,7 @@ def test_cli_writes_output_files(tmp_path: Path):
     pose.to_csv(camera_dir / "pose_3d_interpolated.csv", index=False)
     tracks.to_csv(camera_dir / "tracks_2d_interpolated.csv", index=False)
 
-    summary = smooth_camera_outputs(
+    smooth_camera_outputs(
         SmoothingConfig(
             camera_dir=str(camera_dir),
             tau=0.5,

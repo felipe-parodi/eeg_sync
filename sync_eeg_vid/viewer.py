@@ -579,7 +579,9 @@ class VideoFrameViewer:
                 if DEBUG_KEY_EVENTS:
                     # Debug key code
                     key_name = self._get_key_name(key)
-                    print(f"[DEBUG] Key: {key} ({key_name})                    ", end="\r")
+                    print(
+                        f"[DEBUG] Key: {key} ({key_name})                    ", end="\r"
+                    )
 
                 # Handle clap marking keys
                 if key == ord("c"):

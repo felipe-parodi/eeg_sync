@@ -294,9 +294,7 @@ def smooth_camera_outputs(config: SmoothingConfig) -> Dict[str, object]:
 
     # Infill low-confidence keypoints first, then smooth.
     pose_df = infill_low_confidence_keypoints(pose_df, config.conf_threshold)
-    pose_smooth = smooth_pose_3d(
-        pose_df, config.tau, conf_gate=config.conf_gate
-    )
+    pose_smooth = smooth_pose_3d(pose_df, config.tau, conf_gate=config.conf_gate)
     tracks_smooth = smooth_tracks_2d(tracks_df, config.tau)
 
     pose_smooth.to_csv(camera_dir / config.pose_output, index=False)
@@ -332,19 +330,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only smooth keypoints below this confidence; high-confidence "
         "positions pass through unchanged. 0 disables gating.",
     )
-    parser.add_argument(
-        "--pose-input", default="pose_3d_interpolated.csv", type=str
-    )
+    parser.add_argument("--pose-input", default="pose_3d_interpolated.csv", type=str)
     parser.add_argument(
         "--tracks-input", default="tracks_2d_interpolated.csv", type=str
     )
     parser.add_argument("--pose-output", default="pose_3d_smooth.csv", type=str)
-    parser.add_argument(
-        "--tracks-output", default="tracks_2d_smooth.csv", type=str
-    )
-    parser.add_argument(
-        "--summary-output", default="smoothing_summary.json", type=str
-    )
+    parser.add_argument("--tracks-output", default="tracks_2d_smooth.csv", type=str)
+    parser.add_argument("--summary-output", default="smoothing_summary.json", type=str)
     return parser
 
 

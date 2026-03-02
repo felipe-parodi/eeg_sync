@@ -266,7 +266,9 @@ def run_camera_pipeline(
         if config.max_persons != 2:
             raise ValueError("sam3d backend currently supports max_persons=2 only")
         if config.tracker_backend != "internal":
-            raise ValueError("sam3d backend currently supports tracker_backend=internal only")
+            raise ValueError(
+                "sam3d backend currently supports tracker_backend=internal only"
+            )
 
         runner_config: Any = RunnerConfig(
             checkpoint_path=config.checkpoint_path,
@@ -382,7 +384,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--session-id", default=None, type=str)
     run_parser.add_argument("--checkpoint-path", default="", type=str)
     run_parser.add_argument("--mhr-path", default="", type=str)
-    run_parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
+    run_parser.add_argument(
+        "--device", default="auto", choices=["auto", "cpu", "cuda", "mps"]
+    )
     run_parser.add_argument(
         "--inference-backend",
         default="sam3d",
