@@ -273,7 +273,7 @@ def compute_gaze_categories(
     child_track_id: int = 1,
     parent_head_centers: list[tuple[float, float]] | None = None,
     child_head_centers: list[tuple[float, float]] | None = None,
-    proximity_threshold: float = 0.15,
+    proximity_threshold: float | None = None,
 ) -> pd.DataFrame:
     """Classify gaze patterns per frame into categories.
 
@@ -291,10 +291,17 @@ def compute_gaze_categories(
         parent_head_centers: List of (x, y) normalized head centers per frame.
         child_head_centers: List of (x, y) normalized head centers per frame.
         proximity_threshold: Distance threshold (normalized) for "looking at".
+            If None and head centers are provided, uses an adaptive per-frame
+            threshold scaled to 40% of the inter-head distance (clamped to
+            [0.04, 0.15]). If None and no head centers, falls back to 0.15.
 
     Returns:
         DataFrame with frame_idx, timestamp_s, gaze_category columns.
     """
+    use_adaptive = proximity_threshold is None
+    if proximity_threshold is None:
+        proximity_threshold = 0.15  # fallback when no head centers
+
     parent_gaze = (
         gaze_df[gaze_df["track_id"] == parent_track_id]
         .sort_values("frame_idx")
@@ -338,17 +345,26 @@ def compute_gaze_categories(
         else:
             c_hx, c_hy = 0.0, 0.0
 
+        # Per-frame adaptive threshold: scale by inter-head distance
+        if use_adaptive and parent_head_centers is not None and child_head_centers is not None:
+            inter_head_dist = np.sqrt(
+                (p_hx - c_hx) ** 2 + (p_hy - c_hy) ** 2
+            )
+            thresh_i = float(np.clip(0.4 * inter_head_dist, 0.04, 0.15))
+        else:
+            thresh_i = proximity_threshold
+
         # Distance from parent's gaze to child's head
         p_looks_at_child = (
-            np.sqrt((p_gx - c_hx) ** 2 + (p_gy - c_hy) ** 2) < proximity_threshold
+            np.sqrt((p_gx - c_hx) ** 2 + (p_gy - c_hy) ** 2) < thresh_i
         )
         # Distance from child's gaze to parent's head
         c_looks_at_parent = (
-            np.sqrt((c_gx - p_hx) ** 2 + (c_gy - p_hy) ** 2) < proximity_threshold
+            np.sqrt((c_gx - p_hx) ** 2 + (c_gy - p_hy) ** 2) < thresh_i
         )
         # Distance between gaze peaks
         gaze_close = (
-            np.sqrt((p_gx - c_gx) ** 2 + (p_gy - c_gy) ** 2) < proximity_threshold
+            np.sqrt((p_gx - c_gx) ** 2 + (p_gy - c_gy) ** 2) < thresh_i
         )
 
         if p_looks_at_child and c_looks_at_parent:
