@@ -286,6 +286,34 @@ def test_independent_gaze_looking_different_spots() -> None:
     assert all(result["gaze_category"] == "independent")
 
 
+def test_adaptive_threshold_close_proximity() -> None:
+    """With adaptive threshold, close heads + shared gaze = joint_attention, not mutual."""
+    n = 3
+    # Heads very close together (0.06 apart), both gaze at a spot between them
+    # but slightly off-center (0.07 from parent head, 0.05 from child head)
+    parent_head = [(0.47, 0.3)] * n
+    child_head = [(0.53, 0.3)] * n  # 0.06 apart
+    # Both look at the same spot slightly toward the child
+    parent_gaze = [(0.515, 0.3)] * n  # 0.045 from parent, 0.015 from child
+    child_gaze = [(0.515, 0.3)] * n
+    gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
+
+    # With fixed 0.15 threshold: both distances < 0.15 → mutual_gaze (wrong)
+    result_fixed = compute_gaze_categories(
+        gaze_df, 0, 1, parent_head, child_head, proximity_threshold=0.15
+    )
+    assert all(result_fixed["gaze_category"] == "mutual_gaze")
+
+    # With adaptive threshold: 0.4 * 0.06 = 0.024, clamped to 0.04
+    # Parent gaze→child head = 0.015 < 0.04 (parent looks at child)
+    # Child gaze→parent head = 0.045 > 0.04 (child does NOT look at parent)
+    # → should NOT be mutual_gaze
+    result_adaptive = compute_gaze_categories(
+        gaze_df, 0, 1, parent_head, child_head, proximity_threshold=None
+    )
+    assert all(result_adaptive["gaze_category"] != "mutual_gaze")
+
+
 # ====================================================================
 # Metric 4: Gaze Convergence Score
 # ====================================================================

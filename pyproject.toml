@@ -39,14 +39,22 @@ pose3d = [
 eeg-sync = "sync_eeg_vid.cli:main"
 video-infer-sam3d = "video_inference.sam3d_runner:main"
 video-infer-ultralytics = "video_inference.ultralytics_runner:main"
+video-infer-rtmlib = "video_inference.rtmlib_runner:main"
 video-infer = "video_inference.pipeline:main"
 video-compress-rapid = "video_inference.rapid_compress:main"
 video-interpolate = "video_analysis.interpolate:main"
 video-visualize = "video_analysis.visualize_pose_tracks:main"
 video-smooth = "video_analysis.temporal_smooth:main"
+video-visualize-3d = "video_analysis.visualize_pose_3d:main"
+video-annotate-tracks = "video_analysis.track_annotator:main"
+video-correct-tracks = "video_analysis.track_correction:main"
+video-filter-tracks = "video_analysis.track_filter:main"
 gaze-infer = "gaze_analysis.gazelle_runner:main"
 gaze-synchrony = "gaze_analysis.synchrony:main"
 gaze-plot = "gaze_analysis.plotting:main"
+video-pose-metrics = "video_analysis.pose_metrics:main"
+video-gaze-metrics = "video_analysis.gaze_metrics:main"
+video-gaze-snapshots = "video_analysis.gaze_snapshots:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis"]

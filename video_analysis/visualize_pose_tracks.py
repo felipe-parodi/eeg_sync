@@ -53,6 +53,19 @@ class VisualizationConfig:
     draw_bbox: bool = True
     pose_csv: Optional[str] = None
     tracks_csv: Optional[str] = None
+    block_name: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+
+
+def _parse_time(time_str: str) -> float:
+    """Parse ``MM:SS`` or ``MM:SS.ff`` or ``HH:MM:SS`` to seconds."""
+    parts = time_str.split(":")
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + float(parts[1])
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    raise ValueError(f"Cannot parse time: {time_str!r}")
 
 
 def _color_for_track(track_id: int) -> Tuple[int, int, int]:
@@ -147,8 +160,16 @@ def _load_frames_from_csv(
     csv_timestamps = sorted(tracks_df["timestamp_s"].unique())
     csv_ts_array = np.array(csv_timestamps, dtype=float)
 
+    # Also track real frame_idx from frame_index.csv.
+    if frame_index_path.exists():
+        frame_real_indices = frame_index["frame_idx"].values.astype(int)
+    else:
+        frame_real_indices = np.arange(len(frame_timestamps), dtype=int)
+
     frames: List[Dict[str, object]] = []
-    for img_ts, img_name in zip(frame_timestamps, frame_image_names):
+    for img_ts, img_name, real_fidx in zip(
+        frame_timestamps, frame_image_names, frame_real_indices
+    ):
         if len(csv_ts_array) == 0:
             break
         nearest_idx = int(np.argmin(np.abs(csv_ts_array - img_ts)))
@@ -188,9 +209,13 @@ def _load_frames_from_csv(
                 }
             )
 
-        frames.append(
-            {"frame_idx": len(frames), "image_name": str(img_name), "persons": persons}
-        )
+        frames.append({
+            "frame_idx": len(frames),
+            "real_frame_idx": int(real_fidx),
+            "timestamp_s": float(img_ts),
+            "image_name": str(img_name),
+            "persons": persons,
+        })
 
     return frames
 
@@ -220,6 +245,14 @@ def render_pose_track_video(config: VisualizationConfig) -> Dict[str, object]:
         payload = json.loads(inference_path.read_text(encoding="utf-8"))
         frames = payload.get("frames", [])
         source_label = str(inference_path)
+    # Filter by time range (applied before start_frame/max_frames slicing).
+    if config.start_time:
+        start_s = _parse_time(config.start_time)
+        frames = [f for f in frames if f.get("timestamp_s", 0) >= start_s]
+    if config.end_time:
+        end_s = _parse_time(config.end_time)
+        frames = [f for f in frames if f.get("timestamp_s", float("inf")) <= end_s]
+
     if config.start_frame > 0:
         frames = frames[config.start_frame :]
     if config.max_frames is not None:
@@ -262,12 +295,30 @@ def render_pose_track_video(config: VisualizationConfig) -> Dict[str, object]:
                 draw_bbox=config.draw_bbox,
             )
 
+        # Build overlay text with actual timestamp when available.
+        ts = frame_entry.get("timestamp_s")
+        real_fidx = frame_entry.get("real_frame_idx")
+        if ts is not None:
+            mins = int(float(ts) // 60)
+            secs = float(ts) % 60
+            ts_str = f"{mins}:{secs:04.1f}"
+        else:
+            ts_str = None
+
+        if ts_str and real_fidx is not None:
+            info = f"{ts_str} (frame {real_fidx}) {image_name}"
+        else:
+            info = f"frame={frame_entry.get('frame_idx', '?')} {image_name}"
+
+        if config.block_name:
+            info = f"[{config.block_name}] {info}"
+
         cv2.putText(
             image,
-            f"frame={frame_entry.get('frame_idx', '?')} image={image_name}",
+            info,
             (20, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.55,
             (255, 255, 255),
             2,
             cv2.LINE_AA,
@@ -320,6 +371,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         help="Tracks CSV file (relative to camera-dir) to use instead of JSON.",
     )
+    parser.add_argument(
+        "--block-name",
+        default=None,
+        type=str,
+        help="Block name to display in overlay (e.g. 'grocery').",
+    )
+    parser.add_argument(
+        "--start-time",
+        default=None,
+        type=str,
+        help="Start time filter (MM:SS or MM:SS.ff). Only render frames at or after this time.",
+    )
+    parser.add_argument(
+        "--end-time",
+        default=None,
+        type=str,
+        help="End time filter (MM:SS or MM:SS.ff). Only render frames at or before this time.",
+    )
     return parser
 
 
@@ -338,6 +407,9 @@ def main() -> None:
         draw_bbox=args.draw_bbox,
         pose_csv=args.pose_csv,
         tracks_csv=args.tracks_csv,
+        block_name=args.block_name,
+        start_time=args.start_time,
+        end_time=args.end_time,
     )
     summary = render_pose_track_video(cfg)
     print(json.dumps(summary, indent=2))
