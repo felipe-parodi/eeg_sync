@@ -271,8 +271,8 @@ def compute_gaze_categories(
     gaze_df: pd.DataFrame,
     parent_track_id: int = 0,
     child_track_id: int = 1,
-    parent_head_centers: list[tuple[float, float]] | None = None,
-    child_head_centers: list[tuple[float, float]] | None = None,
+    parent_head_centers: dict[int, tuple[float, float]] | None = None,
+    child_head_centers: dict[int, tuple[float, float]] | None = None,
     proximity_threshold: float | None = None,
 ) -> pd.DataFrame:
     """Classify gaze patterns per frame into categories.
@@ -288,8 +288,11 @@ def compute_gaze_categories(
         gaze_df: Gaze CSV DataFrame with gaze_peak_x, gaze_peak_y per person.
         parent_track_id: Track ID for the parent.
         child_track_id: Track ID for the child.
-        parent_head_centers: List of (x, y) normalized head centers per frame.
-        child_head_centers: List of (x, y) normalized head centers per frame.
+        parent_head_centers: Mapping ``frame_idx -> (x, y)`` of normalized head
+            centers for the parent. Keyed by ``frame_idx`` (not list position)
+            so the function aligns correctly even when the head_bbox dataframe
+            has different frame coverage than the gaze dataframe.
+        child_head_centers: Mapping ``frame_idx -> (x, y)`` for the child.
         proximity_threshold: Distance threshold (normalized) for "looking at".
             If None and head centers are provided, uses an adaptive per-frame
             threshold scaled to 40% of the inter-head distance (clamped to
@@ -329,19 +332,22 @@ def compute_gaze_categories(
     categories = []
 
     for i in range(n):
-        p_gx = merged.iloc[i]["gaze_peak_x_p"]
-        p_gy = merged.iloc[i]["gaze_peak_y_p"]
-        c_gx = merged.iloc[i]["gaze_peak_x_c"]
-        c_gy = merged.iloc[i]["gaze_peak_y_c"]
+        row = merged.iloc[i]
+        frame_idx = int(row["frame_idx"])
+        p_gx = row["gaze_peak_x_p"]
+        p_gy = row["gaze_peak_y_p"]
+        c_gx = row["gaze_peak_x_c"]
+        c_gy = row["gaze_peak_y_c"]
 
-        # Head centers for this frame
-        if parent_head_centers is not None and i < len(parent_head_centers):
-            p_hx, p_hy = parent_head_centers[i]
+        # Head centers for this frame, looked up by frame_idx so the function
+        # tolerates head_bbox / gaze coverage gaps.
+        if parent_head_centers is not None:
+            p_hx, p_hy = parent_head_centers.get(frame_idx, (0.0, 0.0))
         else:
             p_hx, p_hy = 0.0, 0.0
 
-        if child_head_centers is not None and i < len(child_head_centers):
-            c_hx, c_hy = child_head_centers[i]
+        if child_head_centers is not None:
+            c_hx, c_hy = child_head_centers.get(frame_idx, (0.0, 0.0))
         else:
             c_hx, c_hy = 0.0, 0.0
 
@@ -561,24 +567,29 @@ def main() -> None:
     # Metric 2: Movement cross-correlation
     xcorr_df = compute_movement_xcorr(pose_df, pid, cid)
 
-    # Metric 3: Gaze categories (derive head centers from gaze CSV or head_bbox)
+    # Metric 3: Gaze categories (derive head centers from gaze CSV or head_bbox).
+    # Build dicts keyed by frame_idx so the lookup inside
+    # compute_gaze_categories aligns even when head_bbox is missing frames
+    # that gaze still has (or vice versa).
     head_bbox_path = camera_dir / "head_bboxes.csv"
     if head_bbox_path.exists():
         head_bbox_df = pd.read_csv(head_bbox_path)
-        p_heads = head_bbox_df[head_bbox_df["track_id"] == pid].sort_values("frame_idx")
-        c_heads = head_bbox_df[head_bbox_df["track_id"] == cid].sort_values("frame_idx")
-        parent_head_centers = list(
-            zip(
-                ((p_heads["head_x1"] + p_heads["head_x2"]) / 2).values,
-                ((p_heads["head_y1"] + p_heads["head_y2"]) / 2).values,
+        p_heads = head_bbox_df[head_bbox_df["track_id"] == pid]
+        c_heads = head_bbox_df[head_bbox_df["track_id"] == cid]
+        parent_head_centers = {
+            int(row.frame_idx): (
+                float((row.head_x1 + row.head_x2) / 2),
+                float((row.head_y1 + row.head_y2) / 2),
             )
-        )
-        child_head_centers = list(
-            zip(
-                ((c_heads["head_x1"] + c_heads["head_x2"]) / 2).values,
-                ((c_heads["head_y1"] + c_heads["head_y2"]) / 2).values,
+            for row in p_heads.itertuples(index=False)
+        }
+        child_head_centers = {
+            int(row.frame_idx): (
+                float((row.head_x1 + row.head_x2) / 2),
+                float((row.head_y1 + row.head_y2) / 2),
             )
-        )
+            for row in c_heads.itertuples(index=False)
+        }
     else:
         parent_head_centers = None
         child_head_centers = None

@@ -204,8 +204,11 @@ def _build_head_centers(
     head_bboxes_df: pd.DataFrame,
     parent_id: int,
     child_id: int,
-) -> Tuple[Optional[List[Tuple[float, float]]], Optional[List[Tuple[float, float]]]]:
-    """Build aligned head center lists for gaze category computation.
+) -> Tuple[
+    Optional[Dict[int, Tuple[float, float]]],
+    Optional[Dict[int, Tuple[float, float]]],
+]:
+    """Build per-frame head center lookups for gaze category computation.
 
     Args:
         gaze_df: Gaze DataFrame with frame_idx, track_id.
@@ -214,56 +217,27 @@ def _build_head_centers(
         child_id: Child track ID.
 
     Returns:
-        (parent_head_centers, child_head_centers) — lists of (x, y) or None.
+        ``(parent_head_centers, child_head_centers)`` — each is a
+        ``{frame_idx: (x, y)}`` dict, or None if no head bboxes are available.
     """
     if head_bboxes_df.empty:
         return None, None
 
-    # Get frames where both parent and child have gaze data
-    parent_frames = set(gaze_df[gaze_df["track_id"] == parent_id]["frame_idx"].values)
-    child_frames = set(gaze_df[gaze_df["track_id"] == child_id]["frame_idx"].values)
-    common_frames = sorted(parent_frames & child_frames)
+    def _track_centers(track_id: int) -> Dict[int, Tuple[float, float]]:
+        sub = head_bboxes_df[head_bboxes_df["track_id"] == track_id]
+        return {
+            int(row.frame_idx): (
+                float((row.head_x1 + row.head_x2) / 2),
+                float((row.head_y1 + row.head_y2) / 2),
+            )
+            for row in sub.itertuples(index=False)
+        }
 
-    if not common_frames:
+    parent_centers = _track_centers(parent_id)
+    child_centers = _track_centers(child_id)
+
+    if not parent_centers and not child_centers:
         return None, None
-
-    # Build head center lookup per track
-    p_heads = head_bboxes_df[head_bboxes_df["track_id"] == parent_id].set_index(
-        "frame_idx"
-    )
-    c_heads = head_bboxes_df[head_bboxes_df["track_id"] == child_id].set_index(
-        "frame_idx"
-    )
-
-    parent_centers = []
-    child_centers = []
-    for fidx in common_frames:
-        if fidx in p_heads.index:
-            pr = p_heads.loc[fidx]
-            if isinstance(pr, pd.DataFrame):
-                pr = pr.iloc[0]
-            parent_centers.append(
-                (
-                    (pr["head_x1"] + pr["head_x2"]) / 2,
-                    (pr["head_y1"] + pr["head_y2"]) / 2,
-                )
-            )
-        else:
-            parent_centers.append((0.0, 0.0))
-
-        if fidx in c_heads.index:
-            cr = c_heads.loc[fidx]
-            if isinstance(cr, pd.DataFrame):
-                cr = cr.iloc[0]
-            child_centers.append(
-                (
-                    (cr["head_x1"] + cr["head_x2"]) / 2,
-                    (cr["head_y1"] + cr["head_y2"]) / 2,
-                )
-            )
-        else:
-            child_centers.append((0.0, 0.0))
-
     return parent_centers, child_centers
 
 

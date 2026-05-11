@@ -218,6 +218,13 @@ def test_xcorr_uncorrelated_signals() -> None:
 # ====================================================================
 
 
+def _head_center_dict(
+    n: int, value: tuple[float, float]
+) -> dict[int, tuple[float, float]]:
+    """Build a ``{frame_idx: (x, y)}`` dict for n consecutive frames."""
+    return {i: value for i in range(n)}
+
+
 def test_mutual_gaze_both_looking_at_each_other() -> None:
     """When both look at each other's head location, classify as mutual_gaze."""
     # Parent head at normalized (0.2, 0.3), child head at (0.7, 0.3)
@@ -227,9 +234,9 @@ def test_mutual_gaze_both_looking_at_each_other() -> None:
     child_gaze = [(0.2, 0.3)] * n  # looking at parent
     gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
 
-    # Head locations (normalized)
-    parent_head_center = [(0.2, 0.3)] * n
-    child_head_center = [(0.7, 0.3)] * n
+    # Head locations (normalized) keyed by frame_idx
+    parent_head_center = _head_center_dict(n, (0.2, 0.3))
+    child_head_center = _head_center_dict(n, (0.7, 0.3))
 
     result = compute_gaze_categories(
         gaze_df,
@@ -251,8 +258,8 @@ def test_joint_attention_both_looking_same_spot() -> None:
     gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
 
     # Heads are at different locations
-    parent_head = [(0.2, 0.3)] * n
-    child_head = [(0.8, 0.3)] * n
+    parent_head = _head_center_dict(n, (0.2, 0.3))
+    child_head = _head_center_dict(n, (0.8, 0.3))
 
     result = compute_gaze_categories(
         gaze_df,
@@ -272,8 +279,8 @@ def test_independent_gaze_looking_different_spots() -> None:
     child_gaze = [(0.9, 0.9)] * n  # bottom-right
     gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
 
-    parent_head = [(0.3, 0.5)] * n
-    child_head = [(0.7, 0.5)] * n
+    parent_head = _head_center_dict(n, (0.3, 0.5))
+    child_head = _head_center_dict(n, (0.7, 0.5))
 
     result = compute_gaze_categories(
         gaze_df,
@@ -291,8 +298,8 @@ def test_adaptive_threshold_close_proximity() -> None:
     n = 3
     # Heads very close together (0.06 apart), both gaze at a spot between them
     # but slightly off-center (0.07 from parent head, 0.05 from child head)
-    parent_head = [(0.47, 0.3)] * n
-    child_head = [(0.53, 0.3)] * n  # 0.06 apart
+    parent_head = _head_center_dict(n, (0.47, 0.3))
+    child_head = _head_center_dict(n, (0.53, 0.3))  # 0.06 apart
     # Both look at the same spot slightly toward the child
     parent_gaze = [(0.515, 0.3)] * n  # 0.045 from parent, 0.015 from child
     child_gaze = [(0.515, 0.3)] * n
@@ -312,6 +319,55 @@ def test_adaptive_threshold_close_proximity() -> None:
         gaze_df, 0, 1, parent_head, child_head, proximity_threshold=None
     )
     assert all(result_adaptive["gaze_category"] != "mutual_gaze")
+
+
+def test_head_center_lookup_aligns_by_frame_idx_not_position() -> None:
+    """Regression: head centers must be looked up by frame_idx, not list index.
+
+    Earlier the function indexed ``parent_head_centers[i]`` where ``i`` was the
+    loop counter over the merged gaze frames. If head_bbox was missing for
+    some frames present in gaze, the positional index pointed at the wrong
+    frame's head bbox and gaze categories silently got misclassified.
+    """
+    # Gaze data for 4 frames.
+    n = 4
+    parent_gaze = [(0.7, 0.3)] * n
+    child_gaze = [(0.2, 0.3)] * n
+    gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
+
+    # Head bbox detection FAILED on frame 2 — dict keys are {0, 1, 3}.
+    parent_head_centers = {
+        0: (0.2, 0.3),
+        1: (0.2, 0.3),
+        3: (0.99, 0.99),  # garbage; this is for frame 3, not for "third item"
+    }
+    child_head_centers = {
+        0: (0.7, 0.3),
+        1: (0.7, 0.3),
+        3: (0.01, 0.01),
+    }
+
+    result = compute_gaze_categories(
+        gaze_df,
+        0,
+        1,
+        parent_head_centers=parent_head_centers,
+        child_head_centers=child_head_centers,
+        proximity_threshold=0.15,
+    )
+
+    # Frames 0 and 1 have correct heads -> mutual_gaze.
+    assert (
+        result.loc[result["frame_idx"] == 0, "gaze_category"].iloc[0] == "mutual_gaze"
+    )
+    assert (
+        result.loc[result["frame_idx"] == 1, "gaze_category"].iloc[0] == "mutual_gaze"
+    )
+    # Frame 2 has NO head bbox -> falls back to (0,0); both gaze peaks are
+    # far from (0,0) so neither "looks at" the other -> not mutual_gaze.
+    assert (
+        result.loc[result["frame_idx"] == 2, "gaze_category"].iloc[0] != "mutual_gaze"
+    )
 
 
 # ====================================================================
