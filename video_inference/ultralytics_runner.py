@@ -299,7 +299,7 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
 
         tracker_name = config.tracker_name.lower()
         if tracker_name == "bytetrack":
-            rf_tracker = sv.ByteTrack()
+            rf_tracker = sv.ByteTrack(track_buffer=60)
         else:
             raise ValueError(
                 f"Unsupported tracker_name '{config.tracker_name}' for roboflow backend. "
