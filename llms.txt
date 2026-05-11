@@ -1,32 +1,79 @@
-# EEG-Video Sync
+# eeg_sync
 
-> Synchronize OpenBCI EEG recordings with GoPro videos for parent-child interaction studies. Includes a video pose inference pipeline with 2D (Ultralytics) and 3D (SAM-3D-Body) backends.
+> Pose, gaze, and synchrony analysis for parent–child interaction videos, with an optional EEG ↔ video synchronization tool. The video pipeline is the primary workflow; EEG sync is a separate side track.
 
-## Documentation
+## Start here
 
-- [README](README.md): Installation, quick start, and usage guide
-- [Getting Started](docs/GETTING_STARTED.md): First-time setup walkthrough
-- [Sync Tutorial](docs/HOW_TO_USE_SYNC.md): Step-by-step EEG-video synchronization
-- [Pose + EEG Tutorial](docs/TUTORIAL_POSE_EEG.md): Combined pose inference and EEG analysis
-- [Clock Drift](docs/CLOCK_DRIFT.md): Handling clock drift between devices
+- [Colleague quickstart](docs/COLLEAGUE_QUICKSTART.md): one-doc end-to-end walkthrough for a single session, written for both humans and LLMs
+- [Pipeline reference](docs/PIPELINE.md): stage-by-stage CLI reference with inputs/outputs for every command
+- [Inputs](docs/INPUTS.md): expected folder layout, video conventions, `session_config.json` fields, segment-timing format
+- [Outputs](docs/OUTPUTS.md): file catalog + column dictionaries for every CSV/JSON the pipeline produces
 
-## Source Code
+## Templates
 
-- [sync_eeg_vid/](sync_eeg_vid/): Core sync package (EEG parsing, video viewer, offset computation)
-- [video_inference/pipeline.py](video_inference/pipeline.py): End-to-end video inference orchestrator
-- [video_inference/sam3d_runner.py](video_inference/sam3d_runner.py): SAM-3D-Body 3D pose backend
-- [video_inference/ultralytics_runner.py](video_inference/ultralytics_runner.py): YOLOv11 2D pose backend
-- [video_inference/device.py](video_inference/device.py): GPU/CPU device resolution
-- [video_inference/schema.py](video_inference/schema.py): Output CSV schema validation
-- [video_inference/tracking.py](video_inference/tracking.py): Two-person IoU-based tracking
-- [video_analysis/interpolate.py](video_analysis/interpolate.py): Temporal interpolation of pose data
-- [video_analysis/visualize_pose_tracks.py](video_analysis/visualize_pose_tracks.py): Pose overlay visualization
+- [session_config.example.json](templates/session_config.example.json): annotated starting config
+- [segment_timings.example.csv](templates/segment_timings.example.csv): collaborator-input format for per-block start/end times
+- [exclusion_windows.example.csv](templates/exclusion_windows.example.csv): collaborator-input format for "experimenter in frame" segments
+- [Templates README](templates/README.md): conversion tips
+
+## Top-level README
+
+- [README](README.md): project overview, install, command summary, EEG-sync usage
+
+## Pipeline source code
+
+- [video_inference/pipeline.py](video_inference/pipeline.py): end-to-end inference orchestrator (`video-infer run`)
+- [video_inference/ultralytics_runner.py](video_inference/ultralytics_runner.py): YOLOv11 2D pose backend (recommended)
+- [video_inference/rtmlib_runner.py](video_inference/rtmlib_runner.py): RTMLib Body 2D / Wholebody3d backend
+- [video_inference/sam3d_runner.py](video_inference/sam3d_runner.py): SAM-3D-Body true-3D pose backend
+- [video_inference/tracking.py](video_inference/tracking.py): two-person IoU continuity (`internal` tracker)
+- [video_inference/schema.py](video_inference/schema.py): output CSV validation
+- [video_inference/device.py](video_inference/device.py): device resolution (cuda > mps > cpu)
+- [video_inference/rapid_compress.py](video_inference/rapid_compress.py): `video-compress-rapid`
+
+## Track cleanup tools
+
+- [video_analysis/track_filter.py](video_analysis/track_filter.py): `video-filter-tracks` (block-based top-N + parent/child by bbox area)
+- [video_analysis/track_annotator.py](video_analysis/track_annotator.py): `video-annotate-tracks` (interactive OpenCV reassignment)
+- [video_analysis/track_correction.py](video_analysis/track_correction.py): `video-correct-tracks` (apply corrections JSON)
+- [video_analysis/temporal_smooth.py](video_analysis/temporal_smooth.py): `video-smooth` (confidence-gated EMA)
+- [video_analysis/interpolate.py](video_analysis/interpolate.py): `video-interpolate` (linear upsample)
+
+## Metrics & visualization
+
+- [video_analysis/pose_metrics.py](video_analysis/pose_metrics.py): `video-pose-metrics` (torso proximity + movement xcorr per block)
+- [video_analysis/gaze_metrics.py](video_analysis/gaze_metrics.py): `video-gaze-metrics` (gaze categories + convergence per block)
+- [video_analysis/gaze_snapshots.py](video_analysis/gaze_snapshots.py): `video-gaze-snapshots` (heatmap-over-frame samples)
+- [video_analysis/visualize_pose_tracks.py](video_analysis/visualize_pose_tracks.py): `video-visualize` (2D overlay video)
+- [video_analysis/visualize_pose_3d.py](video_analysis/visualize_pose_3d.py): `video-visualize-3d` (matplotlib 3D)
+
+## Gaze analysis
+
+- [gaze_analysis/gazelle_runner.py](gaze_analysis/gazelle_runner.py): `gaze-infer` (Gazelle batch inference)
+- [gaze_analysis/synchrony.py](gaze_analysis/synchrony.py): `gaze-synchrony` (4 synchrony metrics)
+- [gaze_analysis/plotting.py](gaze_analysis/plotting.py): `gaze-plot` (4-panel dashboard)
+- [gaze_analysis/head_bbox.py](gaze_analysis/head_bbox.py): head-bbox derivation from keypoints
+- [gaze_analysis/config.py](gaze_analysis/config.py): `session_config.json` loader + time-range filtering
+- [gaze_analysis/gaze_schema.py](gaze_analysis/gaze_schema.py): gaze CSV column definitions
+
+## EEG sync (optional side track)
+
+- [sync_eeg_vid/cli.py](sync_eeg_vid/cli.py): `eeg-sync` interactive entry point
+- [sync_eeg_vid/sync_pipeline.py](sync_eeg_vid/sync_pipeline.py): `sync_two_eeg_files`, `sync_eeg_to_video`, `sync_videos`
+- [sync_eeg_vid/eeg_io.py](sync_eeg_vid/eeg_io.py): OpenBCI parsing + IR pulse detection
+- [sync_eeg_vid/viewer.py](sync_eeg_vid/viewer.py): OpenCV frame viewer
+- [docs/HOW_TO_USE_SYNC.md](docs/HOW_TO_USE_SYNC.md): using `sync_results.json` in analysis
+- [docs/TUTORIAL_POSE_EEG.md](docs/TUTORIAL_POSE_EEG.md): joining pose data to EEG
+- [docs/CLOCK_DRIFT.md](docs/CLOCK_DRIFT.md): when single-point sync isn't enough
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md): first multi-modal analysis
 
 ## Configuration
 
-- [pyproject.toml](pyproject.toml): Project metadata, dependencies, and tool configuration
-- [environment.yml](environment.yml): Conda environment with ffmpeg
+- [pyproject.toml](pyproject.toml): packaging, dependencies, all CLI entry points
+- [environment.yml](environment.yml): full conda env with ffmpeg + CUDA
+- [session_config.json](session_config.json): live session config (copy from `templates/`)
 
-## AI Guidance
+## AI / LLM guidance
 
-- [AGENTS.md](AGENTS.md): Detailed AI assistant guide with architecture and conventions
+- [AGENTS.md](AGENTS.md): architecture, conventions, testing patterns
+- [CLAUDE.md](CLAUDE.md): Claude Code–specific reminders (CPU default, compression requirement)

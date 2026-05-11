@@ -1,0 +1,4 @@
+session_id,start_time,end_time,reason
+P001c,8:14,8:42,experimenter entered to swap toys
+P001c,18:30,18:58,parent left briefly to take a phone call
+P002c,7:05,7:18,parent answered phone (still in frame but not interacting)

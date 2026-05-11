@@ -8,6 +8,7 @@ video_inference/compressed/
 video_inference/output/
 !tests/fixtures/**/*.json
 !session_config.json
+!templates/*.json
 
 # Claude Code
 .claude

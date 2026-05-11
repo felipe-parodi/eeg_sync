@@ -1,0 +1,27 @@
+{
+  "_comment_session_id": "Short identifier for this recording session (used in output paths).",
+  "session_id": "P001c",
+
+  "_comment_output_dir": "Where the pipeline writes per-camera output folders. One subfolder per camera (camera_a, camera_b).",
+  "output_dir": "video_inference/output/P001c",
+
+  "_comment_image": "Frame size of the COMPRESSED videos the pipeline reads. video-compress-rapid produces 854x480 by default.",
+  "image_width": 854,
+  "image_height": 480,
+
+  "_comment_frame_rate": "Inference frame rate (fps). 5.0 is the recommended default. Lower = faster runs; higher = smoother metrics.",
+  "frame_rate": 5.0,
+
+  "_comment_camera_mappings": "Which raw track_id is parent vs child, per camera. You can SKIP filling these in if you plan to run `video-filter-tracks` (which auto-assigns parent=0/child=1 by bbox area per block) and then point the metrics CLIs at tracks_2d_filtered.csv / pose_3d_filtered.csv.",
+  "camera_mappings": [
+    {"camera_id": "camera_a", "parent_track_id": 0, "child_track_id": 1},
+    {"camera_id": "camera_b", "parent_track_id": 0, "child_track_id": 1}
+  ],
+
+  "_comment_session_blocks": "Named analysis windows within the video. Times are seconds from video start (NOT seconds from start of the session task). `color` is only used for plot shading.",
+  "session_blocks": [
+    {"name": "grocery_free_play",      "start_s":  806, "end_s": 1420, "color": "green"},
+    {"name": "synchrony_intervention", "start_s": 1676, "end_s": 1725, "color": "orange"},
+    {"name": "storybook_reading",      "start_s": 1762, "end_s": 2226, "color": "blue"}
+  ]
+}

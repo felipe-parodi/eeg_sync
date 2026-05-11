@@ -1,18 +1,27 @@
-# Video Inference Pipeline
+# video_inference
 
-This module provides an end-to-end CLI for:
+Pose inference pipeline — frame extraction, model inference, temporal tracking, and schema export. The CLI here is `video-infer run`; the full stage-by-stage reference lives in [`../docs/PIPELINE.md`](../docs/PIPELINE.md).
 
-1. Video compression
-2. Frame extraction
-3. SAM-3D-Body inference
-4. Temporal ID stabilization (`parent/child` for 2-person internal mode or `person_XX` for multi-person tracker mode)
-5. Schema export and validation
+For an end-to-end colleague-facing walkthrough including the post-inference cleanup steps (`video-filter-tracks`, `video-smooth`, metrics), read [`../docs/COLLEAGUE_QUICKSTART.md`](../docs/COLLEAGUE_QUICKSTART.md).
 
-Backends:
-- `sam3d` (default, currently 2-person workflow)
-- `ultralytics` (2D pose + configurable multi-person ID assignment)
+## Backends
 
-## Rapid pre-compression (recommended for CPU runs)
+| Backend | Flag | Output dimensions | Notes |
+|---|---|---|---|
+| Ultralytics YOLOv11-pose | `--inference-backend ultralytics` | 2D (`z_m=0.0`) | **Default for the colleague workflow.** CPU-friendly. |
+| RTMLib | `--inference-backend rtmlib` (`--rtmlib-3d` for 3D) | 2D Body or 3D Wholebody | onnxruntime / opencv / openvino execution providers. |
+| SAM-3D-Body | `--inference-backend sam3d` | True 3D in metres | Slower; requires the `third_party/sam-3d-body` submodule. |
+
+## Tracker modes
+
+| Tracker | Behaviour |
+|---|---|
+| `--tracker-backend internal` | Two-person heuristic with IoU continuity. Only suitable when `--max-persons 2` and detections are clean. |
+| `--tracker-backend roboflow --tracker-name bytetrack` | ByteTrack with `track_buffer=60` frames. Recommended for `--max-persons > 2` and any session with possible occlusions. |
+
+The output ID slot is bounded by `--max-persons`; ByteTrack's internal IDs are recycled into stable `0..max_persons-1` slots.
+
+## Rapid pre-compression
 
 ```bash
 video-compress-rapid \
@@ -21,138 +30,75 @@ video-compress-rapid \
   --output-dir video_inference/compressed
 ```
 
-## Command
+Always run this before `video-infer` unless your inputs are already compressed; raw GoPro files are 2–10 GB.
 
-```bash
-video-infer run \
-  --video-a video_inference/compressed/camera_a_raw_rapid.mp4 \
-  --video-b video_inference/compressed/camera_b_raw_rapid.mp4 \
-  --checkpoint-path /path/to/model.ckpt \
-  --mhr-path /path/to/mhr_model.pt \
-  --output-dir video_inference/output \
-  --device cpu \
-  --skip-compress
-```
-
-Ultralytics backend example:
+## End-to-end command (recommended for the colleague workflow)
 
 ```bash
 video-infer run \
   --video-a video_inference/compressed/camera_a_raw_rapid.mp4 \
   --video-b video_inference/compressed/camera_b_raw_rapid.mp4 \
   --inference-backend ultralytics \
-  --ultralytics-model-path yolo11n-pose.pt \
-  --tracker-backend internal \
-  --device cpu \
-  --skip-compress
-```
-
-Ultralytics + Roboflow tracker (ByteTrack) example:
-
-```bash
-video-infer run \
-  --video-a video_inference/compressed/camera_a_raw_rapid.mp4 \
-  --video-b video_inference/compressed/camera_b_raw_rapid.mp4 \
-  --inference-backend ultralytics \
-  --ultralytics-model-path yolo11n-pose.pt \
-  --tracker-backend roboflow \
-  --tracker-name bytetrack \
-  --device auto \
-  --skip-compress
-```
-
-Two-camera, 4-person workflow (recommended for your current videos):
-
-```bash
-video-infer run \
-  --video-a video_inference/compressed/camera_a_raw_rapid.mp4 \
-  --video-b video_inference/compressed/camera_b_raw_rapid.mp4 \
-  --inference-backend ultralytics \
-  --ultralytics-model-path video_inference/output/models/yolo11n-pose.pt \
-  --tracker-backend roboflow \
-  --tracker-name bytetrack \
+  --ultralytics-model-path yolo11m-pose.pt \
+  --tracker-backend roboflow --tracker-name bytetrack \
   --max-persons 4 \
-  --frame-rate 1 \
-  --device cpu \
-  --skip-compress
+  --frame-rate 5 \
+  --device auto \
+  --skip-compress \
+  --session-id <SESSION_ID>
 ```
 
-Low-FPS inference (recommended for fast demos and CPU):
+Set `--max-persons 4` (not 2) when an experimenter may briefly enter frame — the extra tracks are pruned to parent + child afterwards by `video-filter-tracks`.
 
+## Backend-specific examples
+
+### SAM-3D (true 3D)
 ```bash
 video-infer run \
-  --video-a video_inference/compressed/camera_a_raw_rapid.mp4 \
+  --video-a video_inference/compressed/cam_a.mp4 \
+  --inference-backend sam3d \
+  --checkpoint-path <path/to/sam3d.ckpt> \
+  --mhr-path        <path/to/mhr.pt> \
+  --device cpu --skip-compress
+```
+
+### RTMLib 3D
+```bash
+video-infer run \
+  --video-a video_inference/compressed/cam_a.mp4 \
+  --inference-backend rtmlib --rtmlib-3d \
+  --rtmlib-backend onnxruntime --rtmlib-mode balanced \
+  --device auto --skip-compress
+```
+
+### Ultralytics internal 2-person tracker
+```bash
+video-infer run \
+  --video-a video_inference/compressed/cam_a.mp4 \
   --inference-backend ultralytics \
-  --ultralytics-model-path video_inference/output/models/yolo11n-pose.pt \
+  --ultralytics-model-path yolo11n-pose.pt \
   --tracker-backend internal \
-  --device cpu \
-  --frame-rate 1 \
-  --skip-compress
+  --max-persons 2 \
+  --device cpu --skip-compress
 ```
 
-Then apply confidence-gated smoothing (recommended):
+## Per-camera outputs
 
-```bash
-video-smooth \
-  --camera-dir video_inference/output/<session_id>/camera_a \
-  --pose-input pose_3d.csv \
-  --tracks-input tracks_2d.csv \
-  --tau 0.15 \
-  --conf-gate 0.3
+```
+<output-dir>/<session_id>/<camera>/
+  manifest.json
+  tracks_2d.csv
+  pose_3d.csv
+  frames/frame_*.jpg
+  intermediate/inference_raw.json
 ```
 
-Optionally interpolate to higher FPS (usually not needed at 5 FPS):
-
-```bash
-video-interpolate \
-  --camera-dir video_inference/output/<session_id>/camera_a \
-  --target-fps 8
-```
-
-## Output structure
-
-For each camera, the pipeline writes:
-
-- `manifest.json`
-- `tracks_2d.csv`
-- `pose_3d.csv`
-- `frames/frame_*.jpg`
-- `intermediate/inference_raw.json`
-
-Session-level summary:
-
-- `session_summary.json`
-
-## Session Timestamps (P001c)
-
-Analysis blocks within the session (all times relative to video start):
-
-| Block | Start | End | Seconds | Color |
-|-------|-------|-----|---------|-------|
-| Grocery free play | 13:26 | 23:40 | 806–1420 | green |
-| Synchrony intervention | 27:56 | 28:45 | 1676–1725 | orange |
-| Storybook reading | 29:22 | 37:06 | 1762–2226 | blue |
-
-Use `--start-s` / `--end-s` or `--time-block` to limit gaze and synchrony analysis to a specific block:
-
-```bash
-# Analyze only the storybook block
-gaze-synchrony --camera-dir ... --session-config session_config.json --time-block storybook_reading
-
-# Analyze from minute 10 onward
-gaze-synchrony --camera-dir ... --session-config session_config.json --start-s 600
-```
-
-These timestamps are also defined in `session_config.json` and used for dashboard plot shading.
+Plus session-level `session_summary.json`. Schemas and column dictionaries: [`../docs/OUTPUTS.md`](../docs/OUTPUTS.md).
 
 ## Notes
 
-- `--device auto` prefers CUDA, then MPS (Apple Silicon), then CPU.
-- For pre-compressed inputs, add `--skip-compress` to avoid recompression.
-- `--frame-rate` controls inference sampling rate; use `1` for lightweight runs.
-- `--max-persons` sets expected number of tracked individuals.
-- `--tracker-backend roboflow --tracker-name bytetrack` enables external MOT tracking.
-- `--enforce-exact-person-count` can be enabled if you want only frames with exactly N detected people.
-- CPU mode uses safer defaults for current upstream compatibility.
-- For Ultralytics + optional Roboflow trackers, install extras with `pip install .[video]`.
-- Raw participant videos should remain local (`video_inference/data/` is gitignored).
+- `--device auto` prefers CUDA → MPS → CPU.
+- `--frame-rate` controls inference sampling rate; `1` for lightweight previews, `5` is the recommended default.
+- `--enforce-exact-person-count` drops frames that don't have exactly `--max-persons` detections (off by default).
+- Raw participant videos must stay local (`video_inference/data/` is gitignored).
+- After `video-infer run`, run `video-filter-tracks` to prune to parent + child and assign stable IDs. See [`../docs/PIPELINE.md`](../docs/PIPELINE.md#stage-3--video-filter-tracks).
