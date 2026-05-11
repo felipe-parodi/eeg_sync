@@ -467,9 +467,9 @@ def run_annotator(config: TrackAnnotatorConfig) -> Optional[Path]:
     print("  S               Save corrections")
     print("  N               Jump to next keyframe (+1 min)")
     print("  B               Jump to prev keyframe (-1 min)")
-    print("  LEFT/RIGHT, A/D +/-1 frame")
-    print("  UP/DOWN, W/S    +/-30 frames (~1 sec)")
-    print("  [ / ]            +/-1 minute")
+    print("  LEFT/RIGHT, A/D +/-1 displayed frame")
+    print("  UP/DOWN, W/S    ~1 second")
+    print("  [ / ]            ~1 minute")
     print("  Q / ESC          Quit (auto-saves)")
 
     try:
