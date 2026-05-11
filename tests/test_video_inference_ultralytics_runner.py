@@ -177,8 +177,9 @@ class _FakeDetections:
 
 
 class _FakeByteTrack:
-    def __init__(self):
+    def __init__(self, **kwargs):
         self._next_id = 0
+        self.kwargs = kwargs
 
     def update_with_detections(self, _detections):
         tracker_id = np.asarray([self._next_id], dtype=int)

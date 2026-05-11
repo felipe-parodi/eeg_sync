@@ -87,9 +87,7 @@ def draw_gaze_overlay(
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
 
         # Label
-        cv2.putText(
-            img, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1
-        )
+        cv2.putText(img, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
         # Head center
         hcx = (x1 + x2) // 2
@@ -194,8 +192,13 @@ def generate_block_snapshots(
             frame_heads = head_bboxes_df[head_bboxes_df["frame_idx"] == fidx]
 
             annotated = draw_gaze_overlay(
-                img, frame_gaze, frame_heads,
-                image_width, image_height, parent_id, child_id,
+                img,
+                frame_gaze,
+                frame_heads,
+                image_width,
+                image_height,
+                parent_id,
+                child_id,
             )
 
             # Add timestamp label
@@ -204,12 +207,22 @@ def generate_block_snapshots(
             seconds = ts % 60
             label = f"{block.name} | {minutes:02d}:{seconds:04.1f} (f{fidx})"
             cv2.putText(
-                annotated, label, (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
+                annotated,
+                label,
+                (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
             )
             cv2.putText(
-                annotated, label, (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1,
+                annotated,
+                label,
+                (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 0),
+                1,
             )
 
             annotated_images.append(annotated)
@@ -295,7 +308,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-id", default="camera_a", type=str)
     parser.add_argument("--gaze-csv", default="gaze_heatmap.csv", type=str)
     parser.add_argument("--pose-input", default="pose_3d_filtered_5hz.csv", type=str)
-    parser.add_argument("--tracks-input", default="tracks_2d_filtered_5hz.csv", type=str)
+    parser.add_argument(
+        "--tracks-input", default="tracks_2d_filtered_5hz.csv", type=str
+    )
     parser.add_argument("--n-samples", default=8, type=int)
     parser.add_argument("--output-dir", default="block_checks", type=str)
     return parser

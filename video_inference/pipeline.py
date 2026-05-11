@@ -13,6 +13,7 @@ import pandas as pd
 
 from .compress import CompressionResult, compress_video
 from .frames import FrameExtractionResult, extract_frames_ffmpeg
+from .rtmlib_runner import RtmlibRunnerConfig, run_rtmlib_pose_on_images
 from .sam3d_runner import RunnerConfig, run_sam3d_on_images
 from .schema import ValidationResult, validate_session_output
 from .ultralytics_runner import UltraRunnerConfig, run_ultralytics_pose_on_images
@@ -59,6 +60,10 @@ class PipelineConfig:
     batch_size: int = 8
     max_images: Optional[int] = None
     use_mask: bool = False
+    rtmlib_mode: str = "balanced"
+    rtmlib_backend: str = "onnxruntime"
+    rtmlib_3d: bool = True
+    rtmlib_det_frequency: int = 1
     frame_rate: float = 5.0
     max_width: int = 1280
     crf: int = 23
@@ -307,10 +312,32 @@ def run_camera_pipeline(
             id_policy = "parent_larger_child_smaller_with_temporal_consistency"
         else:
             id_policy = f"{config.tracker_backend}_stable_ids_top_{config.max_persons}"
+    elif config.inference_backend == "rtmlib":
+        runner_config = RtmlibRunnerConfig(
+            image_folder=str(extraction_result.frames_dir),
+            output_json=str(raw_output_json),
+            device=config.device,
+            backend=config.rtmlib_backend,
+            mode=config.rtmlib_mode,
+            mode_3d=config.rtmlib_3d,
+            det_frequency=config.rtmlib_det_frequency,
+            kpt_thr=config.bbox_thresh,
+            max_persons=config.max_persons,
+            max_images=config.max_images,
+            keep_empty_frames=config.keep_empty_frames,
+            enforce_exact_person_count=config.enforce_exact_person_count,
+            tracker_backend=config.tracker_backend,
+            tracker_name=config.tracker_name,
+        )
+        selected_infer_fn = infer_fn or run_rtmlib_pose_on_images
+        if config.max_persons == 2 and config.tracker_backend == "internal":
+            id_policy = "parent_larger_child_smaller_with_temporal_consistency"
+        else:
+            id_policy = f"bytetrack_top_{config.max_persons}"
     else:
         raise ValueError(
             f"Unsupported inference_backend '{config.inference_backend}'. "
-            "Expected 'sam3d' or 'ultralytics'."
+            "Expected 'sam3d', 'ultralytics', or 'rtmlib'."
         )
 
     if config.reuse_existing and raw_output_json.exists():
@@ -390,7 +417,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--inference-backend",
         default="sam3d",
-        choices=["sam3d", "ultralytics"],
+        choices=["sam3d", "ultralytics", "rtmlib"],
     )
     run_parser.add_argument(
         "--inference-mode",
@@ -435,6 +462,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--reuse-existing", action="store_true", default=False)
     run_parser.add_argument("--skip-compress", action="store_true", default=False)
     run_parser.add_argument("--dry-run", action="store_true", default=False)
+    run_parser.add_argument(
+        "--rtmlib-mode",
+        default="balanced",
+        choices=["performance", "balanced", "lightweight"],
+    )
+    run_parser.add_argument(
+        "--rtmlib-backend",
+        default="onnxruntime",
+        choices=["onnxruntime", "opencv", "openvino"],
+    )
+    run_parser.add_argument(
+        "--rtmlib-3d",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use Wholebody3d (3D) if set, Body (2D) otherwise.",
+    )
+    run_parser.add_argument("--rtmlib-det-frequency", default=1, type=int)
 
     return parser
 
@@ -468,6 +512,10 @@ def main() -> None:
             batch_size=args.batch_size,
             max_images=args.max_images,
             use_mask=args.use_mask,
+            rtmlib_mode=args.rtmlib_mode,
+            rtmlib_backend=args.rtmlib_backend,
+            rtmlib_3d=args.rtmlib_3d,
+            rtmlib_det_frequency=args.rtmlib_det_frequency,
             frame_rate=args.frame_rate,
             max_width=args.max_width,
             crf=args.crf,
