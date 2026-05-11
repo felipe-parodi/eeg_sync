@@ -23,6 +23,7 @@ from video_analysis.track_annotator import (
 )
 from video_analysis.track_correction import (
     apply_corrections,
+    apply_corrections_to_session,
     load_corrections,
 )
 
@@ -245,6 +246,79 @@ def test_read_source_fps_malformed_manifest_returns_default(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests: corrections reload round-trip
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Tests: apply_corrections_to_session
+# ---------------------------------------------------------------------------
+
+
+def _write_corrections_json(path: Path, corrections: dict) -> None:
+    """Mimic the annotator's save format: stringified outer keys."""
+    out = {str(k): v for k, v in corrections.items()}
+    path.write_text(json.dumps(out))
+
+
+def test_apply_corrections_to_session_raises_when_both_inputs_missing(tmp_path):
+    """Wrong --session-dir / --camera must fail loudly, not return silently.
+
+    Regression: previously both file existence checks were ``if path.exists():
+    ...`` with no else, so a wrong path produced an empty summary and zero
+    error messages.
+    """
+    camera_dir = tmp_path / "camera_a"
+    camera_dir.mkdir()
+    corrections_path = camera_dir / "track_corrections.json"
+    _write_corrections_json(corrections_path, {0: {0: 1}})
+
+    with pytest.raises(FileNotFoundError, match="Neither"):
+        apply_corrections_to_session(
+            camera_dir=camera_dir, corrections_path=corrections_path
+        )
+
+
+def test_apply_corrections_to_session_writes_both_outputs(tmp_path):
+    """Happy path: both inputs present -> both outputs written."""
+    camera_dir = tmp_path / "camera_a"
+    camera_dir.mkdir()
+    tracks_csv = camera_dir / "tracks_2d.csv"
+    pose_csv = camera_dir / "pose_3d.csv"
+    _make_tracks_csv(tracks_csv, n_frames=3, n_tracks=2)
+    pd.DataFrame(
+        {"frame_idx": [0, 0, 1, 1], "track_id": [0, 1, 0, 1], "x": [0, 1, 2, 3]}
+    ).to_csv(pose_csv, index=False)
+
+    corrections_path = camera_dir / "track_corrections.json"
+    _write_corrections_json(corrections_path, {0: {0: 1, 1: 0}})
+
+    summary = apply_corrections_to_session(
+        camera_dir=camera_dir, corrections_path=corrections_path
+    )
+
+    assert "tracks_output" in summary
+    assert "pose_output" in summary
+    assert (camera_dir / "tracks_2d_corrected.csv").exists()
+    assert (camera_dir / "pose_3d_corrected.csv").exists()
+
+
+def test_apply_corrections_to_session_partial_inputs_does_not_raise(tmp_path):
+    """If only one of tracks/pose is present, succeed and write the one we have."""
+    camera_dir = tmp_path / "camera_a"
+    camera_dir.mkdir()
+    tracks_csv = camera_dir / "tracks_2d.csv"
+    _make_tracks_csv(tracks_csv, n_frames=3, n_tracks=2)
+    # No pose_3d.csv.
+
+    corrections_path = camera_dir / "track_corrections.json"
+    _write_corrections_json(corrections_path, {0: {0: 1, 1: 0}})
+
+    summary = apply_corrections_to_session(
+        camera_dir=camera_dir, corrections_path=corrections_path
+    )
+
+    assert "tracks_output" in summary
+    assert "pose_output" not in summary
+    assert (camera_dir / "tracks_2d_corrected.csv").exists()
 
 
 def test_corrections_reload_preserves_int_keys_at_both_levels(tmp_path):

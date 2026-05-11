@@ -94,6 +94,13 @@ def apply_corrections_to_session(
     tracks_path = camera_dir / tracks_input
     pose_path = camera_dir / pose_input
 
+    if not tracks_path.exists() and not pose_path.exists():
+        raise FileNotFoundError(
+            f"Neither '{tracks_input}' nor '{pose_input}' found in "
+            f"{camera_dir}. Check --session-dir / --camera, or pass "
+            "--tracks-input / --pose-input if your files are named differently."
+        )
+
     summary: Dict[str, Any] = {
         "corrections_file": str(corrections_path),
         "n_corrected_frames": n_frames,
@@ -107,6 +114,8 @@ def apply_corrections_to_session(
         tracks_df.to_csv(out_path, index=False)
         summary["tracks_output"] = str(out_path)
         print(f"[track-correction] wrote {out_path}")
+    else:
+        print(f"[track-correction] skipped tracks: '{tracks_input}' not found")
 
     if pose_path.exists():
         pose_df = pd.read_csv(pose_path)
@@ -115,6 +124,8 @@ def apply_corrections_to_session(
         pose_df.to_csv(out_path, index=False)
         summary["pose_output"] = str(out_path)
         print(f"[track-correction] wrote {out_path}")
+    else:
+        print(f"[track-correction] skipped pose: '{pose_input}' not found")
 
     return summary
 
