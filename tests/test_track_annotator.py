@@ -16,6 +16,7 @@ from video_analysis.track_annotator import (
     _format_time,
     _parse_time,
     _point_in_bbox,
+    _read_source_fps_from_manifest,
     bbox_iou_dict,
     load_tracks,
     propagate_corrections,
@@ -201,3 +202,69 @@ def test_propagate_stops_at_next_annotation(tmp_path):
     assert 4 in corrections
     # Frame 5 should keep its original annotation, not be overwritten.
     assert corrections[5] == {0: 0, 1: 1}
+
+
+# ---------------------------------------------------------------------------
+# Tests: source FPS resolution from manifest
+# ---------------------------------------------------------------------------
+
+
+def _write_manifest(camera_dir: Path, fps: float) -> None:
+    """Write a minimal pipeline-style manifest into *camera_dir*."""
+    camera_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "schema_version": "0.1.0",
+        "session_id": "test_session",
+        "source_videos": [
+            {"camera_id": camera_dir.name, "relative_path": "x.mp4", "fps": fps}
+        ],
+        "assumptions": {"max_persons": 2, "enforce_exact_person_count": False},
+        "outputs": {"tracks_2d": "tracks_2d.csv", "pose_3d": "pose_3d.csv"},
+    }
+    (camera_dir / "manifest.json").write_text(json.dumps(manifest))
+
+
+def test_read_source_fps_uses_manifest_value(tmp_path):
+    """Annotator should pick up the inference fps from manifest.json."""
+    camera_dir = tmp_path / "camera_a"
+    _write_manifest(camera_dir, fps=5.0)
+    assert _read_source_fps_from_manifest(camera_dir) == 5.0
+
+
+def test_read_source_fps_missing_manifest_returns_default(tmp_path):
+    """No manifest -> fall back to the supplied default."""
+    assert _read_source_fps_from_manifest(tmp_path, default=15.0) == 15.0
+
+
+def test_read_source_fps_malformed_manifest_returns_default(tmp_path):
+    """Unparseable manifest -> fall back to default (don't crash the UI)."""
+    (tmp_path / "manifest.json").write_text("not json")
+    assert _read_source_fps_from_manifest(tmp_path, default=15.0) == 15.0
+
+
+# ---------------------------------------------------------------------------
+# Tests: corrections reload round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_corrections_reload_preserves_int_keys_at_both_levels(tmp_path):
+    """Saved-then-reloaded corrections must keep int keys at outer AND inner.
+
+    Regression: an earlier reload path int-converted only outer keys,
+    leaving inner keys as JSON strings. That made previously-saved
+    corrections invisible to UI display and to propagate_corrections.
+    """
+    corrections = {5: {0: 1, 1: 0}}
+    # Mimic the annotator's save format (line 539 of track_annotator.py).
+    out = {str(k): v for k, v in corrections.items()}
+    path = tmp_path / "track_corrections.json"
+    path.write_text(json.dumps(out))
+
+    reloaded = load_corrections(path)
+
+    assert reloaded == corrections
+    assert all(isinstance(k, int) for k in reloaded.keys())
+    assert all(isinstance(k, int) for k in reloaded[5].keys())
+    # And the lookups the annotator/propagation rely on must succeed:
+    assert reloaded[5].get(0) == 1
+    assert reloaded[5].get(1) == 0

@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 import pandas as pd
 
+from video_analysis.track_correction import load_corrections
 from video_analysis.visualize_pose_tracks import TRACK_COLORS
 
 # Key constants.
@@ -50,6 +51,7 @@ class TrackAnnotatorConfig:
     iou_threshold: float = 0.3
     keyframe_interval_s: float = 60.0
     display_fps: float = 5.0
+    source_fps: Optional[float] = None
 
 
 @dataclass
@@ -69,6 +71,37 @@ class _AnnotatorState:
 # ------------------------------------------------------------------
 # Data helpers
 # ------------------------------------------------------------------
+
+
+def _read_source_fps_from_manifest(camera_dir: Path, default: float = 30.0) -> float:
+    """Return the inference frame rate from ``camera_dir/manifest.json``.
+
+    The video-inference pipeline writes ``source_videos[0].fps`` equal to the
+    cadence at which frames were extracted (i.e. ``frame_idx`` units per
+    second). Falls back to *default* if the manifest is missing, unreadable,
+    or lacks the field.
+
+    Args:
+        camera_dir: Camera output directory.
+        default: Fallback FPS when the manifest can't be read.
+
+    Returns:
+        Frame rate in Hz.
+    """
+    manifest_path = camera_dir / "manifest.json"
+    if not manifest_path.exists():
+        return default
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return default
+    sources = manifest.get("source_videos") or []
+    if not sources:
+        return default
+    fps = sources[0].get("fps")
+    if isinstance(fps, (int, float)) and fps > 0:
+        return float(fps)
+    return default
 
 
 def _parse_time(time_str: str) -> float:
@@ -362,13 +395,19 @@ def run_annotator(config: TrackAnnotatorConfig) -> Optional[Path]:
     if not frames_dir.exists():
         raise FileNotFoundError(f"Frames dir not found: {frames_dir}")
 
+    # Resolve source frame rate. Manifest-driven by default so the annotator
+    # works with whatever --frame-rate the pipeline ran at; user can override.
+    source_fps = config.source_fps
+    if source_fps is None:
+        source_fps = _read_source_fps_from_manifest(camera_dir)
+
     # Determine frame range.
     start_frame = 0
     end_frame = None
     if config.start_time:
-        start_frame = int(_parse_time(config.start_time) * 30)
+        start_frame = int(_parse_time(config.start_time) * source_fps)
     if config.end_time:
-        end_frame = int(_parse_time(config.end_time) * 30)
+        end_frame = int(_parse_time(config.end_time) * source_fps)
 
     tracks_df = load_tracks(tracks_csv, start_frame, end_frame)
     if tracks_df.empty:
@@ -378,22 +417,20 @@ def run_annotator(config: TrackAnnotatorConfig) -> Optional[Path]:
     frame_indices = sorted(tracks_df["frame_idx"].unique())
 
     # Subsample for display; propagation still uses all frames.
-    step = max(1, int(30.0 / config.display_fps))
+    step = max(1, int(round(source_fps / config.display_fps)))
     display_indices = frame_indices[::step]
 
     state = _AnnotatorState(
         tracks_df=tracks_df,
         frame_indices=frame_indices,
         display_indices=display_indices,
-        fps=30.0,
+        fps=source_fps,
     )
 
     # Load existing corrections if present.
     corrections_path = camera_dir / "track_corrections.json"
     if corrections_path.exists():
-        with open(corrections_path) as f:
-            raw = json.load(f)
-        state.corrections = {int(k): v for k, v in raw.items()}
+        state.corrections = load_corrections(corrections_path)
         print(f"[annotator] loaded {len(state.corrections)} existing corrections")
 
     # Display scaling.
@@ -616,6 +653,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         help="Display frame rate for navigation (default 5 Hz)",
     )
+    parser.add_argument(
+        "--source-fps",
+        default=None,
+        type=float,
+        help=(
+            "Inference frame rate used to map --start-time/--end-time to "
+            "frame indices. Defaults to manifest.json's source_videos[0].fps "
+            "(or 30 if no manifest)."
+        ),
+    )
     return parser
 
 
@@ -631,6 +678,7 @@ def main() -> None:
         iou_threshold=args.iou_threshold,
         keyframe_interval_s=args.keyframe_interval,
         display_fps=args.display_fps,
+        source_fps=args.source_fps,
     )
     result = run_annotator(cfg)
     if result:
