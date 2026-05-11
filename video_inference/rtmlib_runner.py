@@ -30,7 +30,6 @@ class RtmlibRunnerConfig:
     backend: str = "onnxruntime"
     mode: str = "balanced"
     mode_3d: bool = True
-    det_frequency: int = 1
     kpt_thr: float = 0.3
     max_persons: int = 2
     max_images: Optional[int] = None
@@ -460,7 +459,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="Use Wholebody3d (3D) if set, Body (2D) otherwise.",
     )
-    parser.add_argument("--det-frequency", default=1, type=int)
     parser.add_argument("--kpt-thr", default=0.3, type=float)
     parser.add_argument("--max-persons", default=2, type=int)
     parser.add_argument("--max-images", default=None, type=int)
@@ -494,7 +492,6 @@ def main() -> None:
         backend=args.backend,
         mode=args.mode,
         mode_3d=args.mode_3d,
-        det_frequency=args.det_frequency,
         kpt_thr=args.kpt_thr,
         max_persons=args.max_persons,
         max_images=args.max_images,
