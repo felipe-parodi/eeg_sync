@@ -164,7 +164,9 @@ video-smooth \
   --tau 0.15 --conf-gate 0.3
 ```
 
-Output: `pose_3d_smooth.csv` / `tracks_2d_smooth.csv`.
+Outputs: `pose_3d_smooth.csv`, `tracks_2d_smooth.csv`, `smoothing_summary.json`.
+
+> **Always pass `--pose-input` / `--tracks-input` explicitly.** The defaults across CLIs are inconsistent (`video-smooth` looks for `_interpolated.csv`; `video-gaze-metrics` looks for `_filtered_5hz.csv`). Pointing them at the file you actually have is the only safe way.
 
 ---
 
@@ -179,11 +181,20 @@ video-pose-metrics \
   --pose-input pose_3d_smooth.csv
 ```
 
-**Gaze metrics** (mutual gaze, joint attention, gaze convergence) — requires running `gaze-infer` first; see [PIPELINE.md](PIPELINE.md#gaze).
+**Gaze metrics** (mutual gaze, joint attention, gaze convergence) — requires running `gaze-infer` first; see [PIPELINE.md](PIPELINE.md#stage-5bd--gaze).
 
 ```bash
-gaze-infer       --camera-dir video_inference/output/P001c/camera_a --session-config session_config.json
-video-gaze-metrics --camera-dir video_inference/output/P001c/camera_a --session-config session_config.json
+gaze-infer \
+  --camera-dir video_inference/output/P001c/camera_a \
+  --session-config session_config.json \
+  --pose-input pose_3d_smooth.csv \
+  --tracks-input tracks_2d_smooth.csv
+
+video-gaze-metrics \
+  --camera-dir video_inference/output/P001c/camera_a \
+  --session-config session_config.json \
+  --pose-input pose_3d_smooth.csv \
+  --tracks-input tracks_2d_smooth.csv
 ```
 
 Both metrics CLIs write per-block plots (PNG) and a metrics CSV into the camera directory.

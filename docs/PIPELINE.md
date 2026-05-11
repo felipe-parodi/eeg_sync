@@ -211,7 +211,7 @@ video-interpolate \
 
 ## Stage 4b — `video-smooth`
 
-Confidence-gated bidirectional EMA. Keypoints above `--conf-gate` pass through untouched; below get smoothed with time constant `--tau`. The recommended cleanup before metrics.
+Confidence-gated bidirectional EMA. Keypoints above `--conf-gate` pass through untouched; below get smoothed with time constant `--tau`. A second knob, `--conf-threshold` (default 0.3), controls which raw keypoints get NaN-infilled before smoothing — usually safe to leave at the default. The recommended cleanup before metrics.
 
 ```bash
 video-smooth \
@@ -223,6 +223,8 @@ video-smooth \
 ```
 
 Writes `pose_3d_smooth.csv`, `tracks_2d_smooth.csv`, `smoothing_summary.json`.
+
+> **Footgun**: `video-smooth --pose-input` defaults to `pose_3d_interpolated.csv` (expects you ran stage 4 first). Pass it explicitly to point at whichever upstream file you actually have.
 
 ---
 
@@ -279,8 +281,12 @@ Per-block gaze category proportions (mutual, joint, parent-watching, child-watch
 ```bash
 video-gaze-metrics \
   --camera-dir video_inference/output/P001c/camera_a \
-  --session-config session_config.json
+  --session-config session_config.json \
+  --pose-input pose_3d_smooth.csv \
+  --tracks-input tracks_2d_smooth.csv
 ```
+
+> **Footgun**: `video-gaze-metrics` (and `video-gaze-snapshots`) default `--pose-input` to `pose_3d_filtered_5hz.csv` — a file the standard colleague workflow never produces. Always pass `--pose-input` and `--tracks-input` explicitly.
 
 Writes `gaze_metrics_<block>.png` and a per-block CSV.
 
@@ -294,6 +300,8 @@ Samples N frames per block and renders the gaze heatmap overlaid on the source f
 video-gaze-snapshots \
   --camera-dir video_inference/output/P001c/camera_a \
   --session-config session_config.json \
+  --pose-input pose_3d_smooth.csv \
+  --tracks-input tracks_2d_smooth.csv \
   --n-samples 8 \
   --output-dir block_checks
 ```

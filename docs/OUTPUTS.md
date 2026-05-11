@@ -46,11 +46,13 @@ video_inference/output/<session_id>/
     ├── block_checks/                     # ← after `video-gaze-snapshots`
     │   └── <block>_sample_*.png
     │
-    └── viz/  or  overlay.mp4             # ← after `video-visualize`
-    └── viz_3d/                           # ← after `video-visualize-3d`
+    └── <user-chosen>.mp4                 # ← after `video-visualize` (path is whatever you pass to --output-video)
+    └── <user-chosen>/                    # ← after `video-visualize-3d` (path is whatever you pass to --output-dir)
 ```
 
 Files only exist after the stage that produces them. Earlier-stage files are never overwritten — each cleanup stage writes a new suffix.
+
+> **Always pass `--pose-input` and `--tracks-input` explicitly** to downstream CLIs. Defaults are inconsistent across modules (`video-smooth` expects `_interpolated.csv`, `video-gaze-metrics` expects `_filtered_5hz.csv`) and won't match the standard colleague workflow. Pick the suffix you actually have on disk and pass it.
 
 ---
 
