@@ -346,26 +346,22 @@ def compute_gaze_categories(
             c_hx, c_hy = 0.0, 0.0
 
         # Per-frame adaptive threshold: scale by inter-head distance
-        if use_adaptive and parent_head_centers is not None and child_head_centers is not None:
-            inter_head_dist = np.sqrt(
-                (p_hx - c_hx) ** 2 + (p_hy - c_hy) ** 2
-            )
+        if (
+            use_adaptive
+            and parent_head_centers is not None
+            and child_head_centers is not None
+        ):
+            inter_head_dist = np.sqrt((p_hx - c_hx) ** 2 + (p_hy - c_hy) ** 2)
             thresh_i = float(np.clip(0.4 * inter_head_dist, 0.04, 0.15))
         else:
             thresh_i = proximity_threshold
 
         # Distance from parent's gaze to child's head
-        p_looks_at_child = (
-            np.sqrt((p_gx - c_hx) ** 2 + (p_gy - c_hy) ** 2) < thresh_i
-        )
+        p_looks_at_child = np.sqrt((p_gx - c_hx) ** 2 + (p_gy - c_hy) ** 2) < thresh_i
         # Distance from child's gaze to parent's head
-        c_looks_at_parent = (
-            np.sqrt((c_gx - p_hx) ** 2 + (c_gy - p_hy) ** 2) < thresh_i
-        )
+        c_looks_at_parent = np.sqrt((c_gx - p_hx) ** 2 + (c_gy - p_hy) ** 2) < thresh_i
         # Distance between gaze peaks
-        gaze_close = (
-            np.sqrt((p_gx - c_gx) ** 2 + (p_gy - c_gy) ** 2) < thresh_i
-        )
+        gaze_close = np.sqrt((p_gx - c_gx) ** 2 + (p_gy - c_gy) ** 2) < thresh_i
 
         if p_looks_at_child and c_looks_at_parent:
             cat = "mutual_gaze"

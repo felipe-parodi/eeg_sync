@@ -463,15 +463,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--skip-compress", action="store_true", default=False)
     run_parser.add_argument("--dry-run", action="store_true", default=False)
     run_parser.add_argument(
-        "--rtmlib-mode", default="balanced",
+        "--rtmlib-mode",
+        default="balanced",
         choices=["performance", "balanced", "lightweight"],
     )
     run_parser.add_argument(
-        "--rtmlib-backend", default="onnxruntime",
+        "--rtmlib-backend",
+        default="onnxruntime",
         choices=["onnxruntime", "opencv", "openvino"],
     )
     run_parser.add_argument(
-        "--rtmlib-3d", action=argparse.BooleanOptionalAction, default=True,
+        "--rtmlib-3d",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Use Wholebody3d (3D) if set, Body (2D) otherwise.",
     )
     run_parser.add_argument("--rtmlib-det-frequency", default=1, type=int)

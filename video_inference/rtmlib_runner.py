@@ -85,9 +85,7 @@ def _bbox_from_keypoints_2d(kpts_2d: np.ndarray, expansion: float = 1.1) -> List
     return [cx - half_w, cy - half_h, cx + half_w, cy + half_h]
 
 
-def _track_label_for_id(
-    track_id: int, max_persons: int, tracker_backend: str
-) -> str:
+def _track_label_for_id(track_id: int, max_persons: int, tracker_backend: str) -> str:
     """Return a human-readable label for a track slot."""
     if max_persons == 2 and tracker_backend == "internal":
         return "parent" if track_id == 0 else "child"
@@ -172,8 +170,7 @@ def run_rtmlib_pose_on_images(config: RtmlibRunnerConfig) -> Dict[str, Any]:
             from rtmlib import Body  # type: ignore
     except ImportError as error:
         raise ImportError(
-            "rtmlib is required for this backend. "
-            "Install with: pip install rtmlib"
+            "rtmlib is required for this backend. " "Install with: pip install rtmlib"
         ) from error
 
     if config.max_persons < 1:
@@ -296,26 +293,32 @@ def run_rtmlib_pose_on_images(config: RtmlibRunnerConfig) -> Dict[str, Any]:
                 # so we must use kpts_2d_coco17 (pixel space) for visualisation
                 # and downstream pipeline compatibility.
                 kp_list = [
-                    [float(kpts_2d_coco17[k, 0]),
-                     float(kpts_2d_coco17[k, 1]),
-                     float(kpts_3d_person[k, 2]),
-                     float(scores_coco17[k])]
+                    [
+                        float(kpts_2d_coco17[k, 0]),
+                        float(kpts_2d_coco17[k, 1]),
+                        float(kpts_3d_person[k, 2]),
+                        float(scores_coco17[k]),
+                    ]
                     for k in range(kpts_3d_person.shape[0])
                 ]
             else:
                 kp_list = [
-                    [float(kpts_2d_coco17[k, 0]),
-                     float(kpts_2d_coco17[k, 1]),
-                     0.0,
-                     float(scores_coco17[k])]
+                    [
+                        float(kpts_2d_coco17[k, 0]),
+                        float(kpts_2d_coco17[k, 1]),
+                        0.0,
+                        float(scores_coco17[k]),
+                    ]
                     for k in range(kpts_2d_coco17.shape[0])
                 ]
 
-            detections.append({
-                "bbox": bbox,
-                "confidence": mean_conf,
-                "pred_keypoints_3d": kp_list,
-            })
+            detections.append(
+                {
+                    "bbox": bbox,
+                    "confidence": mean_conf,
+                    "pred_keypoints_3d": kp_list,
+                }
+            )
 
         if not detections:
             if config.keep_empty_frames and not config.enforce_exact_person_count:
@@ -353,18 +356,20 @@ def run_rtmlib_pose_on_images(config: RtmlibRunnerConfig) -> Dict[str, Any]:
                         active_output_slots=active_output_slots,
                     )
                     det = detections[det_idx]
-                    persons.append({
-                        "track_id": output_track_id,
-                        "track_label": _track_label_for_id(
-                            output_track_id,
-                            config.max_persons,
-                            config.tracker_backend,
-                        ),
-                        "bbox_xyxy": [float(v) for v in det["bbox"]],
-                        "confidence": det["confidence"],
-                        "keypoints_3d": det["pred_keypoints_3d"],
-                        "source_tracker_id": source_track_id,
-                    })
+                    persons.append(
+                        {
+                            "track_id": output_track_id,
+                            "track_label": _track_label_for_id(
+                                output_track_id,
+                                config.max_persons,
+                                config.tracker_backend,
+                            ),
+                            "bbox_xyxy": [float(v) for v in det["bbox"]],
+                            "confidence": det["confidence"],
+                            "keypoints_3d": det["pred_keypoints_3d"],
+                            "source_tracker_id": source_track_id,
+                        }
+                    )
         elif len(detections) >= 2 and config.max_persons == 2:
             top2 = sorted(
                 detections,
@@ -379,25 +384,29 @@ def run_rtmlib_pose_on_images(config: RtmlibRunnerConfig) -> Dict[str, Any]:
             )
             for assignment in assigned:
                 det = top2[assignment.detection_index]
-                persons.append({
-                    "track_id": assignment.track_id,
-                    "track_label": assignment.track_label,
-                    "bbox_xyxy": [float(v) for v in assignment.bbox.tolist()],
-                    "confidence": assignment.confidence,
-                    "keypoints_3d": det["pred_keypoints_3d"],
-                })
+                persons.append(
+                    {
+                        "track_id": assignment.track_id,
+                        "track_label": assignment.track_label,
+                        "bbox_xyxy": [float(v) for v in assignment.bbox.tolist()],
+                        "confidence": assignment.confidence,
+                        "keypoints_3d": det["pred_keypoints_3d"],
+                    }
+                )
         else:
             for p_idx, det in enumerate(detections):
                 label = _track_label_for_id(
                     p_idx, config.max_persons, config.tracker_backend
                 )
-                persons.append({
-                    "track_id": p_idx,
-                    "track_label": label,
-                    "bbox_xyxy": [float(v) for v in det["bbox"]],
-                    "confidence": det["confidence"],
-                    "keypoints_3d": det["pred_keypoints_3d"],
-                })
+                persons.append(
+                    {
+                        "track_id": p_idx,
+                        "track_label": label,
+                        "bbox_xyxy": [float(v) for v in det["bbox"]],
+                        "confidence": det["confidence"],
+                        "keypoints_3d": det["pred_keypoints_3d"],
+                    }
+                )
 
         persons = sorted(persons, key=lambda p: int(p["track_id"]))
         frame_output["persons"] = persons
@@ -436,15 +445,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--device", default="auto", choices=["auto", "cpu", "cuda", "mps"]
     )
     parser.add_argument(
-        "--backend", default="onnxruntime",
+        "--backend",
+        default="onnxruntime",
         choices=["onnxruntime", "opencv", "openvino"],
     )
     parser.add_argument(
-        "--mode", default="balanced",
+        "--mode",
+        default="balanced",
         choices=["performance", "balanced", "lightweight"],
     )
     parser.add_argument(
-        "--mode-3d", action=argparse.BooleanOptionalAction, default=True,
+        "--mode-3d",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Use Wholebody3d (3D) if set, Body (2D) otherwise.",
     )
     parser.add_argument("--det-frequency", default=1, type=int)
@@ -453,11 +466,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-images", default=None, type=int)
     parser.add_argument(
         "--keep-empty-frames",
-        action=argparse.BooleanOptionalAction, default=True,
+        action=argparse.BooleanOptionalAction,
+        default=True,
     )
     parser.add_argument(
         "--enforce-exact-person-count",
-        action=argparse.BooleanOptionalAction, default=False,
+        action=argparse.BooleanOptionalAction,
+        default=False,
     )
     parser.add_argument(
         "--tracker-backend",

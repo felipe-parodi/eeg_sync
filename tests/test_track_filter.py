@@ -29,23 +29,25 @@ def _make_tracks_df(n_frames: int = 100, tracks=None):
         tracks = [
             (0, 0, n_frames, 200),  # parent: large bbox, always present
             (1, 0, n_frames, 100),  # child: small bbox, always present
-            (2, 30, 50, 150),       # researcher: medium, brief appearance
+            (2, 30, 50, 150),  # researcher: medium, brief appearance
         ]
 
     rows = []
     for tid, sf, ef, size in tracks:
         for f in range(sf, ef):
-            rows.append({
-                "frame_idx": f,
-                "timestamp_s": f / 30.0,
-                "track_id": tid,
-                "track_label": f"person_{tid:02d}",
-                "bbox_x1": 100.0,
-                "bbox_y1": 100.0,
-                "bbox_x2": 100.0 + size,
-                "bbox_y2": 100.0 + size,
-                "track_confidence": 0.9,
-            })
+            rows.append(
+                {
+                    "frame_idx": f,
+                    "timestamp_s": f / 30.0,
+                    "track_id": tid,
+                    "track_label": f"person_{tid:02d}",
+                    "bbox_x1": 100.0,
+                    "bbox_y1": 100.0,
+                    "bbox_x2": 100.0 + size,
+                    "bbox_y2": 100.0 + size,
+                    "track_confidence": 0.9,
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -83,8 +85,8 @@ def test_identify_top_tracks_empty():
 def test_identify_top_tracks_area_ordering():
     """Larger bbox area should be parent (role 0)."""
     tracks = [
-        (5, 0, 50, 300),   # big bbox
-        (7, 0, 50, 80),    # small bbox
+        (5, 0, 50, 300),  # big bbox
+        (7, 0, 50, 80),  # small bbox
     ]
     df = _make_tracks_df(50, tracks)
     result = identify_top_tracks(df, 0, 49, n_keep=2)

@@ -34,17 +34,19 @@ def _make_synthetic_pose_csv(path: Path, n_frames: int = 5, n_tracks: int = 2):
         ts = frame_idx / 30.0
         for track_id in range(n_tracks):
             for kp_name in COCO17_NAMES:
-                rows.append({
-                    "frame_idx": frame_idx,
-                    "timestamp_s": ts,
-                    "track_id": track_id,
-                    "track_label": f"person_{track_id:02d}",
-                    "keypoint_name": kp_name,
-                    "x_m": 100.0 + track_id * 50.0 + np.random.rand() * 10,
-                    "y_m": 200.0 + track_id * 30.0 + np.random.rand() * 10,
-                    "z_m": -0.5 + np.random.rand() * 1.0,
-                    "keypoint_confidence": 0.5 + np.random.rand() * 0.5,
-                })
+                rows.append(
+                    {
+                        "frame_idx": frame_idx,
+                        "timestamp_s": ts,
+                        "track_id": track_id,
+                        "track_label": f"person_{track_id:02d}",
+                        "keypoint_name": kp_name,
+                        "x_m": 100.0 + track_id * 50.0 + np.random.rand() * 10,
+                        "y_m": 200.0 + track_id * 30.0 + np.random.rand() * 10,
+                        "z_m": -0.5 + np.random.rand() * 1.0,
+                        "keypoint_confidence": 0.5 + np.random.rand() * 0.5,
+                    }
+                )
     df = pd.DataFrame(rows)
     df.to_csv(path, index=False)
     return df

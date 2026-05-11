@@ -103,9 +103,7 @@ def compute_per_block_gaze_metrics(
     block_stats: List[Dict[str, Any]] = []
 
     # Extract head bboxes once for all frames
-    head_bboxes_df = extract_head_bboxes(
-        pose_df, tracks_df, image_width, image_height
-    )
+    head_bboxes_df = extract_head_bboxes(pose_df, tracks_df, image_width, image_height)
 
     for block in blocks:
         # Filter gaze data to block
@@ -184,7 +182,9 @@ def compute_per_block_gaze_metrics(
         block_stats.append(stats)
 
     categories_df = (
-        pd.concat(all_categories, ignore_index=True) if all_categories else pd.DataFrame()
+        pd.concat(all_categories, ignore_index=True)
+        if all_categories
+        else pd.DataFrame()
     )
     convergence_df = (
         pd.concat(all_convergence, ignore_index=True)
@@ -220,12 +220,8 @@ def _build_head_centers(
         return None, None
 
     # Get frames where both parent and child have gaze data
-    parent_frames = set(
-        gaze_df[gaze_df["track_id"] == parent_id]["frame_idx"].values
-    )
-    child_frames = set(
-        gaze_df[gaze_df["track_id"] == child_id]["frame_idx"].values
-    )
+    parent_frames = set(gaze_df[gaze_df["track_id"] == parent_id]["frame_idx"].values)
+    child_frames = set(gaze_df[gaze_df["track_id"] == child_id]["frame_idx"].values)
     common_frames = sorted(parent_frames & child_frames)
 
     if not common_frames:
@@ -247,7 +243,10 @@ def _build_head_centers(
             if isinstance(pr, pd.DataFrame):
                 pr = pr.iloc[0]
             parent_centers.append(
-                ((pr["head_x1"] + pr["head_x2"]) / 2, (pr["head_y1"] + pr["head_y2"]) / 2)
+                (
+                    (pr["head_x1"] + pr["head_x2"]) / 2,
+                    (pr["head_y1"] + pr["head_y2"]) / 2,
+                )
             )
         else:
             parent_centers.append((0.0, 0.0))
@@ -257,7 +256,10 @@ def _build_head_centers(
             if isinstance(cr, pd.DataFrame):
                 cr = cr.iloc[0]
             child_centers.append(
-                ((cr["head_x1"] + cr["head_x2"]) / 2, (cr["head_y1"] + cr["head_y2"]) / 2)
+                (
+                    (cr["head_x1"] + cr["head_x2"]) / 2,
+                    (cr["head_y1"] + cr["head_y2"]) / 2,
+                )
             )
         else:
             child_centers.append((0.0, 0.0))
@@ -362,13 +364,13 @@ def plot_gaze_convergence_per_block(
     # Left panel: boxplot comparison
     ax_box = axes[0]
     box_data = [
-        convergence_df[convergence_df["block"] == name][
-            "gaze_convergence_score"
-        ].values
+        convergence_df[convergence_df["block"] == name]["gaze_convergence_score"].values
         for name in block_names
     ]
     colors = [BLOCK_COLORS.get(name, "#999") for name in block_names]
-    bp = ax_box.boxplot(box_data, tick_labels=block_names, patch_artist=True, widths=0.6)
+    bp = ax_box.boxplot(
+        box_data, tick_labels=block_names, patch_artist=True, widths=0.6
+    )
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.6)
@@ -398,9 +400,7 @@ def plot_gaze_convergence_per_block(
         window = min(30, len(block_data) // 4) if len(block_data) > 10 else 1
         if window > 1:
             rolling = (
-                block_data["gaze_convergence_score"]
-                .rolling(window, center=True)
-                .mean()
+                block_data["gaze_convergence_score"].rolling(window, center=True).mean()
             )
             ax.plot(t_rel, rolling, color=color, linewidth=1.5)
         ax.set_ylim(0, 1)
@@ -439,7 +439,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gaze-csv", default="gaze_heatmap.csv", type=str)
     parser.add_argument("--gaze-npz", default="gaze_heatmaps.npz", type=str)
     parser.add_argument("--pose-input", default="pose_3d_filtered_5hz.csv", type=str)
-    parser.add_argument("--tracks-input", default="tracks_2d_filtered_5hz.csv", type=str)
+    parser.add_argument(
+        "--tracks-input", default="tracks_2d_filtered_5hz.csv", type=str
+    )
     return parser
 
 

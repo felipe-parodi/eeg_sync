@@ -209,13 +209,15 @@ def _load_frames_from_csv(
                 }
             )
 
-        frames.append({
-            "frame_idx": len(frames),
-            "real_frame_idx": int(real_fidx),
-            "timestamp_s": float(img_ts),
-            "image_name": str(img_name),
-            "persons": persons,
-        })
+        frames.append(
+            {
+                "frame_idx": len(frames),
+                "real_frame_idx": int(real_fidx),
+                "timestamp_s": float(img_ts),
+                "image_name": str(img_name),
+                "persons": persons,
+            }
+        )
 
     return frames
 

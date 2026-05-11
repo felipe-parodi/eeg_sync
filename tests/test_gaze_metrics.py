@@ -25,16 +25,18 @@ def _make_gaze_df(
         ts = start_s + f / fps
         frame_idx = int(start_s * 30) + f * 6  # simulate 5Hz from 30fps
         for tid in [0, 1]:
-            rows.append({
-                "frame_idx": frame_idx,
-                "timestamp_s": ts,
-                "track_id": tid,
-                "gaze_peak_x": 0.5 + np.random.randn() * 0.1,
-                "gaze_peak_y": 0.5 + np.random.randn() * 0.1,
-                "gaze_peak_value": 0.8,
-                "inout_score": 0.9,
-                "head_source": "keypoints",
-            })
+            rows.append(
+                {
+                    "frame_idx": frame_idx,
+                    "timestamp_s": ts,
+                    "track_id": tid,
+                    "gaze_peak_x": 0.5 + np.random.randn() * 0.1,
+                    "gaze_peak_y": 0.5 + np.random.randn() * 0.1,
+                    "gaze_peak_value": 0.8,
+                    "inout_score": 0.9,
+                    "head_source": "keypoints",
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -46,25 +48,34 @@ def _make_pose_df(
     """Create synthetic pose data with head + torso keypoints."""
     rows = []
     kp_names = [
-        "kp_000", "kp_001", "kp_002", "kp_003", "kp_004",  # head
-        "kp_005", "kp_006", "kp_011", "kp_012",  # torso
+        "kp_000",
+        "kp_001",
+        "kp_002",
+        "kp_003",
+        "kp_004",  # head
+        "kp_005",
+        "kp_006",
+        "kp_011",
+        "kp_012",  # torso
     ]
     for f in range(n_frames):
         ts = start_s + f / fps
         frame_idx = int(start_s * 30) + f * 6
         for tid, cx in [(0, 300.0), (1, 500.0)]:
             for kp in kp_names:
-                rows.append({
-                    "frame_idx": frame_idx,
-                    "timestamp_s": ts,
-                    "track_id": tid,
-                    "track_label": "parent" if tid == 0 else "child",
-                    "keypoint_name": kp,
-                    "x_m": cx + np.random.randn() * 2,
-                    "y_m": 200.0 + np.random.randn() * 2,
-                    "z_m": 0.0,
-                    "keypoint_confidence": 0.9,
-                })
+                rows.append(
+                    {
+                        "frame_idx": frame_idx,
+                        "timestamp_s": ts,
+                        "track_id": tid,
+                        "track_label": "parent" if tid == 0 else "child",
+                        "keypoint_name": kp,
+                        "x_m": cx + np.random.randn() * 2,
+                        "y_m": 200.0 + np.random.randn() * 2,
+                        "z_m": 0.0,
+                        "keypoint_confidence": 0.9,
+                    }
+                )
     return pd.DataFrame(rows)
 
 
@@ -79,17 +90,19 @@ def _make_tracks_df(
         ts = start_s + f / fps
         frame_idx = int(start_s * 30) + f * 6
         for tid, cx in [(0, 300.0), (1, 500.0)]:
-            rows.append({
-                "frame_idx": frame_idx,
-                "timestamp_s": ts,
-                "track_id": tid,
-                "bbox_x1": cx - 50,
-                "bbox_y1": 100.0,
-                "bbox_x2": cx + 50,
-                "bbox_y2": 400.0,
-                "detection_confidence": 0.9,
-                "image": f"frame_{frame_idx:06d}.jpg",
-            })
+            rows.append(
+                {
+                    "frame_idx": frame_idx,
+                    "timestamp_s": ts,
+                    "track_id": tid,
+                    "bbox_x1": cx - 50,
+                    "bbox_y1": 100.0,
+                    "bbox_x2": cx + 50,
+                    "bbox_y2": 400.0,
+                    "detection_confidence": 0.9,
+                    "image": f"frame_{frame_idx:06d}.jpg",
+                }
+            )
     return pd.DataFrame(rows)
 
 

@@ -78,8 +78,7 @@ def identify_top_tracks(
         descending average bbox area.
     """
     block = tracks_df[
-        (tracks_df["frame_idx"] >= start_frame)
-        & (tracks_df["frame_idx"] <= end_frame)
+        (tracks_df["frame_idx"] >= start_frame) & (tracks_df["frame_idx"] <= end_frame)
     ]
     if block.empty:
         return []
@@ -146,12 +145,14 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
 
         for role_idx, (tid, role, avg_area) in enumerate(top):
             remap[tid] = role_idx  # parent=0, child=1
-            summary_entry["tracks"].append({
-                "original_id": tid,
-                "new_id": role_idx,
-                "role": role,
-                "avg_bbox_area": round(avg_area, 1),
-            })
+            summary_entry["tracks"].append(
+                {
+                    "original_id": tid,
+                    "new_id": role_idx,
+                    "role": role,
+                    "avg_bbox_area": round(avg_area, 1),
+                }
+            )
             print(
                 f"[filter] {blk.name}: track {tid} -> {role_idx} "
                 f"({role}, avg area {avg_area:.0f})"
@@ -172,9 +173,7 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
         block_df = block_df[block_df["track_id"].isin(keep_ids)].copy()
         # Remap IDs.
         block_df["track_id"] = block_df["track_id"].map(remap)
-        block_df["track_label"] = block_df["track_id"].map(
-            {0: "parent", 1: "child"}
-        )
+        block_df["track_label"] = block_df["track_id"].map({0: "parent", 1: "child"})
         filtered_rows.append(block_df)
 
     if filtered_rows:
@@ -191,7 +190,9 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
         "blocks": block_summaries,
         "tracks_output": str(out_tracks),
         "total_rows": len(result_df),
-        "unique_frames": int(result_df["frame_idx"].nunique()) if not result_df.empty else 0,
+        "unique_frames": (
+            int(result_df["frame_idx"].nunique()) if not result_df.empty else 0
+        ),
     }
 
     # Also filter pose CSV if it exists.
@@ -233,11 +234,13 @@ def parse_blocks_string(blocks_str: str) -> List[BlockDef]:
                 f"Invalid block definition: {entry!r}. "
                 "Expected format: name,start,end"
             )
-        blocks.append(BlockDef(
-            name=parts[0].strip(),
-            start_time=parts[1].strip(),
-            end_time=parts[2].strip(),
-        ))
+        blocks.append(
+            BlockDef(
+                name=parts[0].strip(),
+                start_time=parts[1].strip(),
+                end_time=parts[2].strip(),
+            )
+        )
     return blocks
 
 
@@ -256,8 +259,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Block definitions: name,start,end;name,start,end",
     )
     parser.add_argument("--source-fps", default=30.0, type=float)
-    parser.add_argument("--n-keep", default=2, type=int,
-                        help="Number of tracks to keep per block")
+    parser.add_argument(
+        "--n-keep", default=2, type=int, help="Number of tracks to keep per block"
+    )
     return parser
 
 

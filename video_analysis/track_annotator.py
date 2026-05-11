@@ -444,9 +444,7 @@ def run_annotator(config: TrackAnnotatorConfig) -> Optional[Path]:
                 img_path = frames_dir / f"frame_{frame_idx + 1:06d}.jpg"
                 img = cv2.imread(str(img_path))
                 if img is None:
-                    state.cursor = min(
-                        state.cursor + 1, len(state.display_indices) - 1
-                    )
+                    state.cursor = min(state.cursor + 1, len(state.display_indices) - 1)
                     continue
 
                 if scale < 1.0:

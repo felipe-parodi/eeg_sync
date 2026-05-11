@@ -45,16 +45,12 @@ def test_resolve_rtmlib_device_cuda(monkeypatch):
 
 
 def test_resolve_rtmlib_device_cpu(monkeypatch):
-    monkeypatch.setattr(
-        "video_inference.rtmlib_runner.resolve_device", lambda _: "cpu"
-    )
+    monkeypatch.setattr("video_inference.rtmlib_runner.resolve_device", lambda _: "cpu")
     assert _resolve_rtmlib_device("auto") == "cpu"
 
 
 def test_resolve_rtmlib_device_mps_maps_to_cuda(monkeypatch):
-    monkeypatch.setattr(
-        "video_inference.rtmlib_runner.resolve_device", lambda _: "mps"
-    )
+    monkeypatch.setattr("video_inference.rtmlib_runner.resolve_device", lambda _: "mps")
     assert _resolve_rtmlib_device("auto") == "cuda"
 
 
@@ -137,9 +133,7 @@ def _create_fake_frames(tmp_path, n_frames: int = 4):
 
 
 def test_run_rtmlib_3d_produces_valid_payload(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "video_inference.rtmlib_runner.resolve_device", lambda _: "cpu"
-    )
+    monkeypatch.setattr("video_inference.rtmlib_runner.resolve_device", lambda _: "cpu")
     _setup_fake_rtmlib(monkeypatch, mode_3d=True, n_persons=2)
     image_folder = _create_fake_frames(tmp_path, n_frames=3)
     output_json = tmp_path / "output.json"
@@ -175,9 +169,7 @@ def test_run_rtmlib_3d_keypoints_use_pixel_coords(tmp_path, monkeypatch):
     rand*h (0-100). kpts_3d values are rand(0,1). If the bug is present,
     x,y would be < 1.0; with the fix, they should be in pixel range.
     """
-    monkeypatch.setattr(
-        "video_inference.rtmlib_runner.resolve_device", lambda _: "cpu"
-    )
+    monkeypatch.setattr("video_inference.rtmlib_runner.resolve_device", lambda _: "cpu")
     _setup_fake_rtmlib(monkeypatch, mode_3d=True, n_persons=1)
     image_folder = _create_fake_frames(tmp_path, n_frames=1)
     output_json = tmp_path / "output.json"
@@ -210,9 +202,7 @@ def test_run_rtmlib_3d_keypoints_use_pixel_coords(tmp_path, monkeypatch):
 
 def test_run_rtmlib_3d_keypoints_are_coco17_subset(tmp_path, monkeypatch):
     """Verify that 133 wholebody keypoints are subsetted to 17."""
-    monkeypatch.setattr(
-        "video_inference.rtmlib_runner.resolve_device", lambda _: "cpu"
-    )
+    monkeypatch.setattr("video_inference.rtmlib_runner.resolve_device", lambda _: "cpu")
     _setup_fake_rtmlib(monkeypatch, mode_3d=True, n_persons=1)
     image_folder = _create_fake_frames(tmp_path, n_frames=1)
     output_json = tmp_path / "output.json"
@@ -237,9 +227,7 @@ def test_run_rtmlib_3d_keypoints_are_coco17_subset(tmp_path, monkeypatch):
 
 
 def test_run_rtmlib_2d_produces_valid_payload(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "video_inference.rtmlib_runner.resolve_device", lambda _: "cpu"
-    )
+    monkeypatch.setattr("video_inference.rtmlib_runner.resolve_device", lambda _: "cpu")
     _setup_fake_rtmlib(monkeypatch, mode_3d=False, n_persons=2)
     image_folder = _create_fake_frames(tmp_path, n_frames=3)
     output_json = tmp_path / "output.json"
@@ -282,9 +270,7 @@ def test_run_rtmlib_missing_image_folder(tmp_path):
 
 
 def test_run_rtmlib_empty_frames_produces_empty_payload(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "video_inference.rtmlib_runner.resolve_device", lambda _: "cpu"
-    )
+    monkeypatch.setattr("video_inference.rtmlib_runner.resolve_device", lambda _: "cpu")
     _setup_fake_rtmlib(monkeypatch, mode_3d=True, n_persons=0)
     image_folder = tmp_path / "frames"
     image_folder.mkdir(parents=True, exist_ok=True)
@@ -301,9 +287,7 @@ def test_run_rtmlib_empty_frames_produces_empty_payload(tmp_path, monkeypatch):
 
 def test_run_rtmlib_tracking_assigns_parent_child(tmp_path, monkeypatch):
     """Parent should get track_id=0 (larger bbox), child track_id=1."""
-    monkeypatch.setattr(
-        "video_inference.rtmlib_runner.resolve_device", lambda _: "cpu"
-    )
+    monkeypatch.setattr("video_inference.rtmlib_runner.resolve_device", lambda _: "cpu")
     _setup_fake_rtmlib(monkeypatch, mode_3d=True, n_persons=2)
     image_folder = _create_fake_frames(tmp_path, n_frames=2)
     output_json = tmp_path / "output.json"
@@ -325,9 +309,7 @@ def test_run_rtmlib_tracking_assigns_parent_child(tmp_path, monkeypatch):
 
 
 def test_run_rtmlib_writes_json_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "video_inference.rtmlib_runner.resolve_device", lambda _: "cpu"
-    )
+    monkeypatch.setattr("video_inference.rtmlib_runner.resolve_device", lambda _: "cpu")
     _setup_fake_rtmlib(monkeypatch, mode_3d=True, n_persons=2)
     image_folder = _create_fake_frames(tmp_path, n_frames=1)
     output_json = tmp_path / "output.json"

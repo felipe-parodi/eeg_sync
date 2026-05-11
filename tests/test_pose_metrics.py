@@ -27,17 +27,19 @@ def _make_pose_df(
         ts = f / fps
         for tid, cx in [(0, parent_x), (1, child_x)]:
             for kp in kp_names:
-                rows.append({
-                    "frame_idx": f,
-                    "timestamp_s": ts,
-                    "track_id": tid,
-                    "track_label": "parent" if tid == 0 else "child",
-                    "keypoint_name": kp,
-                    "x_m": cx + np.random.randn() * 2,
-                    "y_m": 300.0 + np.random.randn() * 2,
-                    "z_m": 0.0,
-                    "keypoint_confidence": 0.9,
-                })
+                rows.append(
+                    {
+                        "frame_idx": f,
+                        "timestamp_s": ts,
+                        "track_id": tid,
+                        "track_label": "parent" if tid == 0 else "child",
+                        "keypoint_name": kp,
+                        "x_m": cx + np.random.randn() * 2,
+                        "y_m": 300.0 + np.random.randn() * 2,
+                        "z_m": 0.0,
+                        "keypoint_confidence": 0.9,
+                    }
+                )
     return pd.DataFrame(rows)
 
 

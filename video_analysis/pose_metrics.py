@@ -118,7 +118,9 @@ def compute_per_block_metrics(
             stats["xcorr_n_windows"] = len(xcorr)
         block_stats.append(stats)
 
-    proximity_df = pd.concat(all_proximity, ignore_index=True) if all_proximity else pd.DataFrame()
+    proximity_df = (
+        pd.concat(all_proximity, ignore_index=True) if all_proximity else pd.DataFrame()
+    )
     xcorr_df = pd.concat(all_xcorr, ignore_index=True) if all_xcorr else pd.DataFrame()
 
     return {
@@ -150,8 +152,12 @@ def plot_proximity(
     if n_blocks == 0:
         return
 
-    fig, axes = plt.subplots(1, n_blocks + 1, figsize=(4 + 3.5 * n_blocks, 4),
-                             gridspec_kw={"width_ratios": [1.2] + [1] * n_blocks})
+    fig, axes = plt.subplots(
+        1,
+        n_blocks + 1,
+        figsize=(4 + 3.5 * n_blocks, 4),
+        gridspec_kw={"width_ratios": [1.2] + [1] * n_blocks},
+    )
 
     # Left panel: boxplot comparison
     ax_box = axes[0]
@@ -171,18 +177,28 @@ def plot_proximity(
     y_max = proximity_df["torso_distance_px"].quantile(0.99)
     for i, name in enumerate(block_names):
         ax = axes[i + 1]
-        block_data = proximity_df[proximity_df["block"] == name].sort_values("timestamp_s")
+        block_data = proximity_df[proximity_df["block"] == name].sort_values(
+            "timestamp_s"
+        )
         color = BLOCK_COLORS.get(name, "#999")
 
         # Plot relative time (seconds into block)
         block_start = blocks[[b.name for b in blocks].index(name)].start_s
         t_rel = block_data["timestamp_s"] - block_start
 
-        ax.plot(t_rel, block_data["torso_distance_px"], color=color, alpha=0.3, linewidth=0.5)
+        ax.plot(
+            t_rel,
+            block_data["torso_distance_px"],
+            color=color,
+            alpha=0.3,
+            linewidth=0.5,
+        )
         # Rolling mean for readability
         window = min(90, len(block_data) // 4) if len(block_data) > 10 else 1
         if window > 1:
-            rolling = block_data["torso_distance_px"].rolling(window, center=True).mean()
+            rolling = (
+                block_data["torso_distance_px"].rolling(window, center=True).mean()
+            )
             ax.plot(t_rel, rolling, color=color, linewidth=1.5)
         ax.set_ylim(0, y_max * 1.05)
         ax.set_xlabel("Time in block (s)")
@@ -227,7 +243,16 @@ def plot_synchrony(
         means.append(float(block_data.mean()))
         stds.append(float(block_data.std()))
 
-    ax_xcorr.bar(x, means, yerr=stds, color=colors, alpha=0.7, capsize=5, edgecolor="black", linewidth=0.5)
+    ax_xcorr.bar(
+        x,
+        means,
+        yerr=stds,
+        color=colors,
+        alpha=0.7,
+        capsize=5,
+        edgecolor="black",
+        linewidth=0.5,
+    )
     ax_xcorr.set_xticks(x)
     ax_xcorr.set_xticklabels([n.capitalize() for n in block_names])
     ax_xcorr.set_ylabel("Peak cross-correlation")
@@ -243,14 +268,25 @@ def plot_synchrony(
         lag_stds.append(float(block_data.std()))
 
     bar_colors = ["#e57373" if m > 0 else "#64B5F6" for m in lag_means]
-    ax_lag.bar(x, lag_means, yerr=lag_stds, color=bar_colors, alpha=0.7, capsize=5, edgecolor="black", linewidth=0.5)
+    ax_lag.bar(
+        x,
+        lag_means,
+        yerr=lag_stds,
+        color=bar_colors,
+        alpha=0.7,
+        capsize=5,
+        edgecolor="black",
+        linewidth=0.5,
+    )
     ax_lag.set_xticks(x)
     ax_lag.set_xticklabels([n.capitalize() for n in block_names])
     ax_lag.set_ylabel("Mean lag (s)")
     ax_lag.set_title("Lead-follow (+ = child follows)")
     ax_lag.axhline(0, color="black", linewidth=0.5, linestyle="--")
 
-    fig.suptitle("Parent-Child Movement Synchrony", fontsize=14, fontweight="bold", y=1.02)
+    fig.suptitle(
+        "Parent-Child Movement Synchrony", fontsize=14, fontweight="bold", y=1.02
+    )
     fig.tight_layout()
     fig.savefig(str(output_path) + ".png", dpi=300, bbox_inches="tight")
     fig.savefig(str(output_path) + ".svg", bbox_inches="tight")
@@ -273,10 +309,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-config", required=True, type=str)
     parser.add_argument("--camera-id", default="camera_a", type=str)
     parser.add_argument("--pose-input", default="pose_3d_smooth.csv", type=str)
-    parser.add_argument("--xcorr-window", default=5.0, type=float,
-                        help="Cross-correlation window size in seconds.")
-    parser.add_argument("--xcorr-max-lag", default=2.0, type=float,
-                        help="Max lag to search in seconds.")
+    parser.add_argument(
+        "--xcorr-window",
+        default=5.0,
+        type=float,
+        help="Cross-correlation window size in seconds.",
+    )
+    parser.add_argument(
+        "--xcorr-max-lag", default=2.0, type=float, help="Max lag to search in seconds."
+    )
     return parser
 
 
