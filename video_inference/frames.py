@@ -54,8 +54,11 @@ def extract_frames_ffmpeg(
     Extract image frames from a video via ffmpeg.
 
     Writes:
-    - frame_000000.jpg, frame_000001.jpg, ...
-    - frame_index.csv (frame_idx -> timestamp)
+    - frame_000001.jpg, frame_000002.jpg, ... (ffmpeg's %06d default is
+      1-indexed; downstream code that joins ``frame_idx`` to a filename
+      must add 1, e.g. ``frame_{frame_idx + 1:06d}.jpg``).
+    - frame_index.csv mapping the 0-indexed ``frame_idx`` to its
+      ``timestamp_s`` and ``image_name``.
     """
     source = Path(video_path)
     destination = Path(frames_dir)

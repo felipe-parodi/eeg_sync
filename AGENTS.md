@@ -67,7 +67,7 @@ Pipeline stages run in sequence: **compress -> extract frames -> infer -> track 
 
 - **`pipeline.py`:** Orchestrator CLI (`video-infer run`). Wires together all stages per camera. Supports three backends: `sam3d`, `ultralytics`, `rtmlib`.
 - **`ultralytics_runner.py`:** YOLOv11 2D pose backend. Two tracking modes: internal (parent/child heuristic by bbox area) and external (Roboflow ByteTrack with `track_buffer=60` and ID slot recycling).
-- **`rtmlib_runner.py`:** RTMLib pose backend (2D `Body` and 3D `Wholebody3d`) via onnxruntime / opencv / openvino. `--rtmlib-3d` toggles the 3D model; `--rtmlib-det-frequency` controls how often detection re-runs.
+- **`rtmlib_runner.py`:** RTMLib pose backend (2D `Body` and 3D `Wholebody3d`) via onnxruntime / opencv / openvino. `--rtmlib-3d` toggles the 3D model. The runner bypasses upstream `PoseTracker` (which returned the wrong tuple arity for `RTMPose3d`) and calls the solution class directly per frame.
 - **`sam3d_runner.py`:** SAM-3D-Body true-3D pose backend. Patches upstream CUDA hardcoding for CPU fallback. Imports from `third_party/sam-3d-body/` submodule. Override path via `EEG_SYNC_SAM3D_ROOT` env var.
 - **`tracking.py`:** `TwoPersonTrackerState` with IoU-based temporal continuity. Frame 0 uses area prior (parent = largest bbox), subsequent frames use IoU matching.
 - **`schema.py`:** Validates output CSVs (manifest, `tracks_2d.csv`, `pose_3d.csv`). Returns `ValidationResult` with error list, not exceptions.

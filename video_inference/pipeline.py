@@ -63,7 +63,6 @@ class PipelineConfig:
     rtmlib_mode: str = "balanced"
     rtmlib_backend: str = "onnxruntime"
     rtmlib_3d: bool = True
-    rtmlib_det_frequency: int = 1
     frame_rate: float = 5.0
     max_width: int = 1280
     crf: int = 23
@@ -320,7 +319,6 @@ def run_camera_pipeline(
             backend=config.rtmlib_backend,
             mode=config.rtmlib_mode,
             mode_3d=config.rtmlib_3d,
-            det_frequency=config.rtmlib_det_frequency,
             kpt_thr=config.bbox_thresh,
             max_persons=config.max_persons,
             max_images=config.max_images,
@@ -478,7 +476,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="Use Wholebody3d (3D) if set, Body (2D) otherwise.",
     )
-    run_parser.add_argument("--rtmlib-det-frequency", default=1, type=int)
 
     return parser
 
@@ -515,7 +512,6 @@ def main() -> None:
             rtmlib_mode=args.rtmlib_mode,
             rtmlib_backend=args.rtmlib_backend,
             rtmlib_3d=args.rtmlib_3d,
-            rtmlib_det_frequency=args.rtmlib_det_frequency,
             frame_rate=args.frame_rate,
             max_width=args.max_width,
             crf=args.crf,
