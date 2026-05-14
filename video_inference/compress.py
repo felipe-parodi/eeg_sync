@@ -64,6 +64,12 @@ def compress_video(
     if dry_run:
         return CompressionResult(source, destination, command, executed=False)
 
+    source_mb = source.stat().st_size / (1024 * 1024)
+    print(
+        f"Compressing {source.name} ({source_mb:.0f} MB) -> {destination.name} "
+        f"... this can take several minutes; no progress output is normal."
+    )
+
     try:
         subprocess.run(command, check=True)
     except FileNotFoundError as error:
@@ -72,5 +78,8 @@ def compress_video(
         ) from error
     except subprocess.CalledProcessError as error:
         raise RuntimeError(f"ffmpeg compression failed for {source}") from error
+
+    output_mb = destination.stat().st_size / (1024 * 1024)
+    print(f"Done. Wrote {destination} ({output_mb:.1f} MB).")
 
     return CompressionResult(source, destination, command, executed=True)

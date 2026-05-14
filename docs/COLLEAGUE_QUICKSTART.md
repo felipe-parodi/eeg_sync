@@ -80,6 +80,10 @@ video-compress-rapid \
   --output-dir video_inference/compressed
 ```
 
+Replace the two `--video …` paths with your actual filenames (e.g. `P001c_Short_Full.mov`). You can also pass `--input-dir video_inference/data/` to compress every video in that folder.
+
+Expect roughly **5–10 minutes per hour of raw footage** on a laptop. You'll see a one-line "Compressing … this can take several minutes" message and then nothing until it prints the output size — that silence is normal, ffmpeg just doesn't report progress.
+
 Output: `video_inference/compressed/<name>_rapid.mp4`. Use those paths everywhere downstream and add `--skip-compress` to the next step.
 
 ---
