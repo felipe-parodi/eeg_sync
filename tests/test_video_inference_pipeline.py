@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -104,6 +106,137 @@ def test_run_camera_pipeline_writes_schema_valid_outputs(tmp_path: Path):
     assert validation.is_valid, validation.errors
 
 
+def test_run_camera_pipeline_uses_frame_index_timestamps(tmp_path: Path) -> None:
+    source_video = tmp_path / "input.mp4"
+    source_video.write_text("fake", encoding="utf-8")
+
+    config = PipelineConfig(
+        video_a=str(source_video),
+        video_b=None,
+        output_dir=str(tmp_path / "out"),
+        inference_backend="ultralytics",
+        ultralytics_model_path="yolo11m-pose.pt",
+        frame_rate=2.0,
+        analysis_windows="free,0:10,0:11;storybook,0:20,0:20.5",
+        analysis_windows_camera_a="free,0:10,0:11;storybook,0:20,0:20.5",
+        dry_run=True,
+    )
+
+    def fake_extract_fn(**kwargs):
+        assert kwargs["analysis_windows"] == config.analysis_windows_camera_a
+        frames_dir = Path(kwargs["frames_dir"])
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(1, 4):
+            (frames_dir / f"frame_{idx:06d}.jpg").write_text("x", encoding="utf-8")
+        (frames_dir / "frame_index.csv").write_text(
+            "\n".join(
+                [
+                    "frame_idx,timestamp_s,image_name,window_name,window_start_s,window_end_s",
+                    "0,10.000000,frame_000001.jpg,free,10.000000,11.000000",
+                    "1,10.500000,frame_000002.jpg,free,10.000000,11.000000",
+                    "2,20.000000,frame_000003.jpg,storybook,20.000000,20.500000",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return FrameExtractionResult(
+            video_path=Path(kwargs["video_path"]),
+            frames_dir=frames_dir,
+            frame_rate=float(kwargs["frame_rate"]),
+            frame_paths=sorted(frames_dir.glob("frame_*.jpg")),
+            command=[],
+            executed=False,
+        )
+
+    def fake_infer_fn(runner_config):
+        payload = _fake_payload(frame_count=3)
+        Path(runner_config.output_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(runner_config.output_json).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        return payload
+
+    run_camera_pipeline(
+        camera_id="camera_a",
+        source_video=str(source_video),
+        session_dir=tmp_path / "session",
+        config=config,
+        compress_fn=lambda **kwargs: CompressionResult(
+            input_path=Path(kwargs["input_path"]),
+            output_path=Path(kwargs["output_path"]),
+            command=[],
+            executed=False,
+        ),
+        extract_fn=fake_extract_fn,
+        infer_fn=fake_infer_fn,
+    )
+
+    tracks = pd.read_csv(tmp_path / "session" / "camera_a" / "tracks_2d.csv")
+    timestamps = tracks.groupby("frame_idx")["timestamp_s"].first().tolist()
+
+    assert timestamps == [10.0, 10.5, 20.0]
+
+
+def test_run_camera_pipeline_prefers_camera_specific_analysis_windows(
+    tmp_path: Path,
+) -> None:
+    source_video = tmp_path / "input.mp4"
+    source_video.write_text("fake", encoding="utf-8")
+
+    config = PipelineConfig(
+        video_a=None,
+        video_b=str(source_video),
+        output_dir=str(tmp_path / "out"),
+        inference_backend="ultralytics",
+        analysis_windows="global,0:01,0:02",
+        analysis_windows_camera_b="camera_b_only,0:10,0:11",
+        dry_run=True,
+    )
+
+    def fake_extract_fn(**kwargs):
+        assert kwargs["analysis_windows"] == "camera_b_only,0:10,0:11"
+        frames_dir = Path(kwargs["frames_dir"])
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        (frames_dir / "frame_000001.jpg").write_text("x", encoding="utf-8")
+        (frames_dir / "frame_index.csv").write_text(
+            "frame_idx,timestamp_s,image_name\n0,10.0,frame_000001.jpg\n",
+            encoding="utf-8",
+        )
+        return FrameExtractionResult(
+            video_path=Path(kwargs["video_path"]),
+            frames_dir=frames_dir,
+            frame_rate=float(kwargs["frame_rate"]),
+            frame_paths=sorted(frames_dir.glob("frame_*.jpg")),
+            command=[],
+            executed=False,
+        )
+
+    def fake_infer_fn(runner_config):
+        payload = _fake_payload(frame_count=1)
+        Path(runner_config.output_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(runner_config.output_json).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        return payload
+
+    summary = run_camera_pipeline(
+        camera_id="camera_b",
+        source_video=str(source_video),
+        session_dir=tmp_path / "session",
+        config=config,
+        compress_fn=lambda **kwargs: CompressionResult(
+            input_path=Path(kwargs["input_path"]),
+            output_path=Path(kwargs["output_path"]),
+            command=[],
+            executed=False,
+        ),
+        extract_fn=fake_extract_fn,
+        infer_fn=fake_infer_fn,
+    )
+
+    assert summary.camera_id == "camera_b"
+
+
 def test_run_pipeline_supports_two_cameras_with_mocks(tmp_path: Path):
     video_a = tmp_path / "a.mp4"
     video_b = tmp_path / "b.mp4"
@@ -149,6 +282,47 @@ def test_run_pipeline_supports_two_cameras_with_mocks(tmp_path: Path):
         "camera_a",
         "camera_b",
     }
+
+
+def test_run_pipeline_supports_video_b_only_with_mocks(tmp_path: Path):
+    video_b = tmp_path / "b.mp4"
+    video_b.write_text("b", encoding="utf-8")
+
+    config = PipelineConfig(
+        video_a=None,
+        video_b=str(video_b),
+        output_dir=str(tmp_path / "pipeline_out"),
+        checkpoint_path="fake.ckpt",
+        mhr_path="fake_mhr.pt",
+        dry_run=True,
+    )
+
+    from video_inference import pipeline as pipeline_module
+
+    original_run_camera = pipeline_module.run_camera_pipeline
+
+    def fake_run_camera_pipeline(camera_id, source_video, session_dir, config):
+        camera_dir = Path(session_dir) / camera_id
+        camera_dir.mkdir(parents=True, exist_ok=True)
+        return CameraPipelineSummary(
+            camera_id=camera_id,
+            source_video=source_video,
+            compressed_video=str(camera_dir / "intermediate" / "compressed.mp4"),
+            frames_dir=str(camera_dir / "frames"),
+            raw_output_json=str(camera_dir / "intermediate" / "inference_raw.json"),
+            schema_valid=True,
+            frame_count=2,
+            errors=[],
+        )
+
+    try:
+        pipeline_module.run_camera_pipeline = fake_run_camera_pipeline
+        summary = run_pipeline(config)
+    finally:
+        pipeline_module.run_camera_pipeline = original_run_camera
+
+    assert summary["overall_valid"]
+    assert [item["camera_id"] for item in summary["cameras"]] == ["camera_b"]
 
 
 def test_run_camera_pipeline_can_skip_compression(tmp_path: Path):
