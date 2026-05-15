@@ -103,6 +103,15 @@ requires HTTPS, so use the tunnel URL for collaborator testing. For same-machine
 local HTTP testing only, set `$env:PORTAL_COOKIE_SECURE = "false"` before
 launching the portal.
 
+The portal uses one upload path: authenticated browser chunk uploads under
+`/uploads/*`. The older direct multipart `/submit` path is intentionally not
+registered. Authenticated POST requests require a per-session CSRF token that
+the portal injects into the upload page JavaScript.
+
+Only one processing job runs at a time in a portal process. If two researchers
+submit jobs together, the later job stays queued until the active GPU job
+finishes.
+
 If the package scripts are installed, this equivalent command is also available:
 
 ```powershell

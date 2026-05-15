@@ -9,11 +9,12 @@ import math
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -31,6 +32,9 @@ from fastapi import (
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from .jobs import (
+    PORTAL_DEFAULT_FRAME_RATE,
+    PORTAL_DEFAULT_MAX_PERSONS,
+    PORTAL_DEFAULT_MODEL_PATH,
     CompressionSettings,
     ExclusionWindow,
     PortalJobConfig,
@@ -42,7 +46,6 @@ from .jobs import (
     run_portal_job,
     split_blocks_for_exclusions,
     validate_direct_chunked_upload,
-    validate_video_path,
     write_status,
 )
 
@@ -56,8 +59,19 @@ DEFAULT_MAX_JOB_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024
 DEFAULT_SESSION_TTL_SECONDS = 8 * 60 * 60
 LOGIN_RATE_LIMIT_ATTEMPTS = 5
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 5 * 60
-SESSION_TOKENS: dict[str, float] = {}
+
+
+@dataclass
+class SessionState:
+    """Server-side state for one authenticated portal session."""
+
+    expires_at: float
+    csrf_token: str
+
+
+SESSION_TOKENS: dict[str, SessionState] = {}
 LOGIN_FAILURES: dict[str, list[float]] = {}
+JOB_RUN_LOCK = threading.Lock()
 
 
 def validate_startup_configuration() -> None:
@@ -145,7 +159,10 @@ def create_session_token() -> str:
         secrets.token_bytes(32),
         "sha256",
     ).hexdigest()
-    SESSION_TOKENS[token] = time.time() + session_ttl_seconds()
+    SESSION_TOKENS[token] = SessionState(
+        expires_at=time.time() + session_ttl_seconds(),
+        csrf_token=secrets.token_urlsafe(32),
+    )
     return token
 
 
@@ -153,13 +170,21 @@ def validate_session_token(token: str) -> bool:
     """Return whether a session token exists and has not expired."""
     if not token:
         return False
-    expires_at = SESSION_TOKENS.get(token)
-    if expires_at is None:
+    state = SESSION_TOKENS.get(token)
+    if state is None:
         return False
-    if expires_at < time.time():
+    if state.expires_at < time.time():
         SESSION_TOKENS.pop(token, None)
         return False
     return True
+
+
+def csrf_token_for_session(token: str) -> str:
+    """Return the CSRF token tied to an authenticated session."""
+    state = SESSION_TOKENS.get(token)
+    if state is None:
+        raise HTTPException(status_code=401, detail="Login required")
+    return state.csrf_token
 
 
 def _is_json_or_upload_request(request: Request) -> bool:
@@ -168,13 +193,24 @@ def _is_json_or_upload_request(request: Request) -> bool:
     return request.url.path.startswith("/uploads/") or "application/json" in accept
 
 
-def require_auth(request: Request) -> None:
-    """Require the shared portal login cookie."""
-    cookie = request.cookies.get("portal_session", "")
+def require_auth(request: Request) -> str:
+    """Require the shared portal login cookie and return its session token."""
+    cookie = str(request.cookies.get("portal_session", ""))
     if not validate_session_token(cookie):
         if _is_json_or_upload_request(request):
             raise HTTPException(status_code=401, detail="Login required")
         raise HTTPException(status_code=303, headers={"Location": "/login"})
+    return cookie
+
+
+def require_csrf(request: Request) -> str:
+    """Require an authenticated session plus a matching CSRF header."""
+    session_token = require_auth(request)
+    expected = csrf_token_for_session(session_token)
+    supplied = request.headers.get("x-csrf-token", "")
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail="Invalid CSRF token")
+    return session_token
 
 
 def _html_page(title: str, body: str) -> HTMLResponse:
@@ -313,18 +349,6 @@ def _html_page(title: str, body: str) -> HTMLResponse:
   <main>{body}</main>
 </body>
 </html>""")
-
-
-def submission_error_page(error: Exception) -> HTMLResponse:
-    """Render a submission error page without reflecting raw user input."""
-    safe_error = html.escape(str(error), quote=True)
-    return _html_page(
-        "Submission Error",
-        f"""<section class="panel">
-  <p class="error">{safe_error}</p>
-  <p><a href="/">Back to upload form</a></p>
-</section>""",
-    )
 
 
 def _info_icon(text: str) -> str:
@@ -517,11 +541,11 @@ def build_submission_metadata(
             "include_gaze": include_gaze,
             "analysis_window_only": True,
             "inference_backend": "ultralytics",
-            "pose_model": "yolo11m-pose.pt",
+            "pose_model": PORTAL_DEFAULT_MODEL_PATH,
             "tracker_backend": "roboflow",
             "tracker_name": "bytetrack",
-            "frame_rate": 8.0,
-            "max_persons": 4,
+            "frame_rate": PORTAL_DEFAULT_FRAME_RATE,
+            "max_persons": PORTAL_DEFAULT_MAX_PERSONS,
             "compression_size_threshold_mb": compression_settings.size_threshold_mb,
             "compression_target_fps": compression_settings.target_fps,
             "compression_max_width": compression_settings.max_width,
@@ -614,25 +638,48 @@ def _config_from_chunked_upload(
     )
 
 
-def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) -> None:
-    """Assemble chunked uploads and run the portal pipeline."""
-    try:
-        meta = _read_upload_meta(job_dir)
+def _run_with_job_lock(job_dir: Path, action: Callable[[], None]) -> None:
+    """Run one processing action after acquiring the in-process GPU job lock."""
+    acquired = JOB_RUN_LOCK.acquire(blocking=False)
+    if not acquired:
         write_status(
             job_dir,
             {
-                "state": "running",
-                "message": "Finalizing uploaded video chunks.",
-                "current_step": "finalize uploads",
+                "state": "queued",
+                "message": "Waiting for the currently running GPU job to finish.",
+                "current_step": "queued",
             },
         )
-        config = _config_from_chunked_upload(
-            safe_job_id=safe_job_id,
-            upload_dir=upload_dir,
-            job_dir=job_dir,
-            meta=meta,
-        )
-        run_portal_job(config, REPO_ROOT)
+        JOB_RUN_LOCK.acquire()
+    try:
+        action()
+    finally:
+        JOB_RUN_LOCK.release()
+
+
+def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) -> None:
+    """Assemble chunked uploads and run the portal pipeline."""
+    try:
+
+        def action() -> None:
+            meta = _read_upload_meta(job_dir)
+            write_status(
+                job_dir,
+                {
+                    "state": "running",
+                    "message": "Finalizing uploaded video chunks.",
+                    "current_step": "finalize uploads",
+                },
+            )
+            config = _config_from_chunked_upload(
+                safe_job_id=safe_job_id,
+                upload_dir=upload_dir,
+                job_dir=job_dir,
+                meta=meta,
+            )
+            run_portal_job(config, REPO_ROOT)
+
+        _run_with_job_lock(job_dir, action)
     except Exception as error:
         write_status(
             job_dir,
@@ -643,22 +690,6 @@ def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) ->
             },
         )
         raise
-
-
-async def _save_upload(upload: UploadFile, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    bytes_written = 0
-    with destination.open("wb") as output_file:
-        while True:
-            chunk = await upload.read(1024 * 1024)
-            if not chunk:
-                break
-            bytes_written += len(chunk)
-            if bytes_written > max_job_upload_bytes():
-                raise ValueError(
-                    f"Upload exceeds portal size cap of {max_job_upload_bytes()} bytes"
-                )
-            output_file.write(chunk)
 
 
 def _job_rows() -> str:
@@ -746,18 +777,18 @@ def login(request: Request, password: Annotated[str, Form()]) -> RedirectRespons
 
 
 @app.post("/logout")
-def logout(request: Request) -> RedirectResponse:
+def logout(session_token: Annotated[str, Depends(require_csrf)]) -> RedirectResponse:
     """Clear the current portal session."""
-    token = request.cookies.get("portal_session", "")
-    SESSION_TOKENS.pop(token, None)
+    SESSION_TOKENS.pop(session_token, None)
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie("portal_session")
     return response
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(_: Annotated[None, Depends(require_auth)]) -> HTMLResponse:
+def index(session_token: Annotated[str | None, Depends(require_auth)]) -> HTMLResponse:
     """Render the upload form and recent jobs."""
+    csrf_token = csrf_token_for_session(session_token) if session_token else ""
     return _html_page(
         "Submit Job",
         f"""<form id="upload-form">
@@ -843,6 +874,7 @@ def index(_: Annotated[None, Depends(require_auth)]) -> HTMLResponse:
 
 <script>
 const CHUNK_SIZE = {CHUNK_SIZE_BYTES};
+const CSRF_TOKEN = "{html.escape(csrf_token, quote=True)}";
 const form = document.getElementById("upload-form");
 const statusEl = document.getElementById("upload-status");
 const progressEl = document.getElementById("upload-progress");
@@ -904,6 +936,7 @@ async function postFormData(url, formData) {{
   const response = await fetch(url, {{
     method: "POST",
     body: formData,
+    headers: {{"X-CSRF-Token": CSRF_TOKEN}},
     credentials: "same-origin"
   }});
   if (!response.ok) {{
@@ -918,6 +951,7 @@ function postChunkFormData(url, formData, onProgress) {{
     const request = new XMLHttpRequest();
     request.open("POST", url);
     request.withCredentials = true;
+    request.setRequestHeader("X-CSRF-Token", CSRF_TOKEN);
     request.upload.onprogress = (event) => {{
       if (event.lengthComputable) {{
         onProgress(event.loaded, event.total);
@@ -1054,7 +1088,7 @@ form.addEventListener("submit", async (event) => {{
 
 @app.post("/uploads/init")
 async def init_chunked_upload(
-    _: Annotated[None, Depends(require_auth)],
+    _: Annotated[str, Depends(require_csrf)],
     session_id: Annotated[str, Form()],
     email: Annotated[str, Form()],
     video_a_name: Annotated[str, Form()] = "",
@@ -1133,7 +1167,7 @@ async def init_chunked_upload(
 @app.post("/uploads/{job_id}/chunk")
 async def upload_chunk(
     job_id: str,
-    _: Annotated[None, Depends(require_auth)],
+    _: Annotated[str, Depends(require_csrf)],
     camera_id: Annotated[str, Form()],
     chunk_index: Annotated[int, Form()],
     total_chunks: Annotated[int, Form()],
@@ -1212,7 +1246,7 @@ async def upload_chunk(
 async def finish_chunked_upload(
     job_id: str,
     background_tasks: BackgroundTasks,
-    _: Annotated[None, Depends(require_auth)],
+    _: Annotated[str, Depends(require_csrf)],
 ) -> JSONResponse:
     """Assemble chunks and start processing."""
     try:
@@ -1236,94 +1270,6 @@ async def finish_chunked_upload(
         )
     except Exception as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-
-
-@app.post("/submit", response_model=None)
-async def submit(
-    background_tasks: BackgroundTasks,
-    _: Annotated[None, Depends(require_auth)],
-    session_id: Annotated[str, Form()],
-    email: Annotated[str, Form()],
-    video_a: Annotated[UploadFile | None, File()] = None,
-    video_b: Annotated[UploadFile | None, File()] = None,
-    blocks_text: Annotated[str | None, Form()] = None,
-    blocks_text_a: Annotated[str | None, Form()] = None,
-    blocks_text_b: Annotated[str | None, Form()] = None,
-    exclusions_text: Annotated[str, Form()] = "",
-    include_gaze: Annotated[str | None, Form()] = None,
-) -> RedirectResponse | HTMLResponse:
-    """Create a processing job from uploaded videos and form fields."""
-    try:
-        safe_session_id = _slug(session_id)
-        has_video_a = video_a is not None and bool(video_a.filename)
-        has_video_b = video_b is not None and bool(video_b.filename)
-        if not has_video_a and not has_video_b:
-            raise ValueError("At least one GoPro video is required.")
-        resolved_blocks_text_a = blocks_text_a or blocks_text or ""
-        resolved_blocks_text_b = blocks_text_b or blocks_text or resolved_blocks_text_a
-
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        job_id = f"{stamp}_{safe_session_id}_{uuid.uuid4().hex[:8]}"
-        upload_dir = UPLOAD_ROOT / job_id
-        job_dir = JOB_ROOT / job_id
-        video_a_path = None
-        video_b_path = None
-
-        if has_video_a and video_a is not None:
-            suffix_a = Path(video_a.filename or "camera_a.mov").suffix.lower()
-            video_a_path = upload_dir / f"camera_a{suffix_a}"
-            await _save_upload(video_a, video_a_path)
-            validate_video_path(
-                video_a_path,
-                probe=True,
-                ffprobe_bin=os.environ.get("PORTAL_FFPROBE_BIN", "ffprobe"),
-            )
-        if has_video_b and video_b is not None:
-            suffix_b = Path(video_b.filename or "camera_b.mov").suffix.lower()
-            video_b_path = upload_dir / f"camera_b{suffix_b}"
-            await _save_upload(video_b, video_b_path)
-            validate_video_path(
-                video_b_path,
-                probe=True,
-                ffprobe_bin=os.environ.get("PORTAL_FFPROBE_BIN", "ffprobe"),
-            )
-
-        job_dir.mkdir(parents=True, exist_ok=True)
-        metadata = build_submission_metadata(
-            job_id=job_id,
-            created_at=datetime.now().isoformat(timespec="seconds"),
-            safe_session_id=safe_session_id,
-            email=email,
-            blocks_text=resolved_blocks_text_a,
-            blocks_text_b=resolved_blocks_text_b,
-            exclusions_text=exclusions_text,
-            video_a_name=video_a.filename if has_video_a and video_a else "",
-            video_b_name=video_b.filename if has_video_b and video_b else "",
-            video_a_size=video_a_path.stat().st_size if video_a_path else 0,
-            video_b_size=video_b_path.stat().st_size if video_b_path else 0,
-            include_gaze=include_gaze == "yes",
-        )
-        metadata["upload"]["protocol"] = "direct_multipart"
-        _write_submission_metadata(job_dir, metadata)
-        blocks_by_camera = _blocks_by_camera_from_meta(metadata)
-        legacy_blocks = next(iter(blocks_by_camera.values()))
-        config = PortalJobConfig(
-            job_id=job_id,
-            session_id=safe_session_id,
-            email=email,
-            video_a=video_a_path,
-            video_b=video_b_path,
-            job_dir=job_dir,
-            output_root=OUTPUT_ROOT,
-            session_config_path=job_dir / "session_config.json",
-            blocks=legacy_blocks,
-            blocks_by_camera=blocks_by_camera,
-            include_gaze=include_gaze == "yes",
-        )
-        background_tasks.add_task(run_portal_job, config, REPO_ROOT)
-        return RedirectResponse(f"/jobs/{job_id}", status_code=303)
-    except Exception as error:
-        return submission_error_page(error)
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)

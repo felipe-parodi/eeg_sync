@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import smtplib
 import subprocess
 import sys
@@ -16,6 +15,12 @@ from typing import Any, Iterable, Sequence
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4"}
 CHUNK_CAMERA_IDS = {"camera_a", "camera_b"}
+PORTAL_DEFAULT_FRAME_RATE = 8.0
+PORTAL_DEFAULT_IMAGE_WIDTH = 854
+PORTAL_DEFAULT_IMAGE_HEIGHT = 480
+PORTAL_DEFAULT_MAX_PERSONS = 4
+PORTAL_DEFAULT_MODEL_PATH = "yolo11m-pose.pt"
+PORTAL_DEFAULT_OVERLAY_SECONDS = 120.0
 
 
 @dataclass
@@ -73,13 +78,13 @@ class PortalJobConfig:
     blocks: list[SessionBlock]
     blocks_by_camera: dict[str, list[SessionBlock]] = field(default_factory=dict)
     include_gaze: bool = False
-    frame_rate: float = 8.0
-    image_width: int = 854
-    image_height: int = 480
-    max_persons: int = 4
+    frame_rate: float = PORTAL_DEFAULT_FRAME_RATE
+    image_width: int = PORTAL_DEFAULT_IMAGE_WIDTH
+    image_height: int = PORTAL_DEFAULT_IMAGE_HEIGHT
+    max_persons: int = PORTAL_DEFAULT_MAX_PERSONS
     device: str = "auto"
-    model_path: str = "yolo11m-pose.pt"
-    overlay_seconds: float = 120.0
+    model_path: str = PORTAL_DEFAULT_MODEL_PATH
+    overlay_seconds: float = PORTAL_DEFAULT_OVERLAY_SECONDS
 
     @property
     def session_output_dir(self) -> Path:
@@ -331,27 +336,6 @@ def validate_video_path(
         probe_video_path(path, ffprobe_bin=ffprobe_bin)
 
 
-def chunk_path_for(upload_dir: Path, camera_id: str, chunk_index: int) -> Path:
-    """Return the canonical path for an uploaded file chunk.
-
-    Args:
-        upload_dir: Per-job upload directory.
-        camera_id: Camera identifier, either ``camera_a`` or ``camera_b``.
-        chunk_index: Zero-based chunk index.
-
-    Returns:
-        Path where the chunk should be stored.
-
-    Raises:
-        ValueError: If camera_id or chunk_index is invalid.
-    """
-    if camera_id not in CHUNK_CAMERA_IDS:
-        raise ValueError("camera_id must be 'camera_a' or 'camera_b'")
-    if chunk_index < 0:
-        raise ValueError("chunk_index must be non-negative")
-    return upload_dir / "chunks" / camera_id / f"chunk_{chunk_index:06d}.part"
-
-
 def final_upload_path_for(
     upload_dir: Path, camera_id: str, original_filename: str
 ) -> Path:
@@ -456,50 +440,6 @@ def validate_direct_chunked_upload(
             f"Uploaded {camera_id} size mismatch: expected "
             f"{expected_size_bytes} bytes, found {actual_size} bytes"
         )
-    return output_path
-
-
-def assemble_chunked_upload(
-    upload_dir: Path,
-    camera_id: str,
-    original_filename: str,
-    total_chunks: int,
-) -> Path:
-    """Assemble uploaded chunks into the final camera video file.
-
-    Args:
-        upload_dir: Per-job upload directory.
-        camera_id: Camera identifier, either ``camera_a`` or ``camera_b``.
-        original_filename: Browser-provided filename used only for extension.
-        total_chunks: Number of chunks expected.
-
-    Returns:
-        Final assembled video path.
-
-    Raises:
-        FileNotFoundError: If any chunk is missing.
-        ValueError: If the extension or chunk count is invalid.
-    """
-    if total_chunks < 1:
-        raise ValueError("total_chunks must be at least 1")
-    suffix = Path(original_filename).suffix.lower()
-    if suffix not in VIDEO_EXTENSIONS:
-        raise ValueError(
-            f"Unsupported video extension for {original_filename}. "
-            f"Supported: {sorted(VIDEO_EXTENSIONS)}"
-        )
-
-    output_path = upload_dir / f"{camera_id}{suffix}"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("wb") as output_file:
-        for index in range(total_chunks):
-            chunk_path = chunk_path_for(upload_dir, camera_id, index)
-            if not chunk_path.exists():
-                raise FileNotFoundError(f"Missing upload chunk: {chunk_path}")
-            with chunk_path.open("rb") as chunk_file:
-                shutil.copyfileobj(chunk_file, output_file)
-
-    validate_video_path(output_path)
     return output_path
 
 
@@ -1160,14 +1100,3 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
             job_dir=config.job_dir,
         )
         raise
-
-
-def copy_upload_to_path(source_path: Path, destination_path: Path) -> None:
-    """Copy an uploaded temporary file into the portal workspace.
-
-    Args:
-        source_path: Temporary upload path.
-        destination_path: Final destination.
-    """
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source_path, destination_path)

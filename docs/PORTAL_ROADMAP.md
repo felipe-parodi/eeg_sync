@@ -33,6 +33,8 @@ recordings is:
 
 The portal now uploads both cameras in parallel and writes chunks directly into
 their final video files, so it no longer does a separate chunk-stitch copy.
+The portal also runs only one GPU processing job at a time to avoid local
+workstation memory exhaustion.
 
 The portal now runs inference only on requested analysis blocks. Segment-aware
 frame extraction preserves original source-video timestamps in `frame_index.csv`

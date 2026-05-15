@@ -5,17 +5,18 @@ from zipfile import ZipFile
 import pytest
 
 import portal.app as portal_app
-from portal.app import build_submission_metadata, submission_error_page
+from portal.app import build_submission_metadata
 from portal.app import index as render_index
 from portal.jobs import (
+    PORTAL_DEFAULT_FRAME_RATE,
+    PORTAL_DEFAULT_MAX_PERSONS,
+    PORTAL_DEFAULT_MODEL_PATH,
     CompressionSettings,
     ExclusionWindow,
     PortalJobConfig,
     SessionBlock,
-    assemble_chunked_upload,
     build_ffmpeg_compression_command,
     build_processing_steps,
-    chunk_path_for,
     final_upload_path_for,
     make_result_zip,
     mark_chunk_received,
@@ -81,12 +82,58 @@ def test_login_sets_expiring_secure_session_cookie(monkeypatch) -> None:
     assert len(portal_app.SESSION_TOKENS) == 1
 
 
-def test_submission_error_page_escapes_user_controlled_text() -> None:
-    response = submission_error_page(ValueError("<script>alert(1)</script>.mov"))
+def test_index_embeds_session_csrf_token(monkeypatch) -> None:
+    monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
+    monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
+    portal_app.SESSION_TOKENS.clear()
+    session_token = portal_app.create_session_token()
+    csrf_token = portal_app.csrf_token_for_session(session_token)
+
+    response = render_index(session_token)
     text = response.body.decode("utf-8")
 
-    assert "<script>alert(1)</script>" not in text
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;.mov" in text
+    assert f'const CSRF_TOKEN = "{csrf_token}";' in text
+
+
+def test_require_csrf_rejects_missing_or_wrong_token(monkeypatch) -> None:
+    monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
+    monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
+    portal_app.SESSION_TOKENS.clear()
+    session_token = portal_app.create_session_token()
+    csrf_token = portal_app.csrf_token_for_session(session_token)
+    request = SimpleNamespace(
+        cookies={"portal_session": session_token},
+        headers={"x-csrf-token": csrf_token},
+        url=SimpleNamespace(path="/uploads/init"),
+    )
+
+    assert portal_app.require_csrf(request) == session_token
+
+    request.headers = {}
+    with pytest.raises(portal_app.HTTPException) as error:
+        portal_app.require_csrf(request)
+    assert error.value.status_code == 403
+
+
+def test_legacy_submit_route_is_not_registered() -> None:
+    routes = {
+        (route.path, tuple(sorted(getattr(route, "methods", []))))
+        for route in portal_app.app.routes
+    }
+
+    assert not any(path == "/submit" for path, _methods in routes)
+
+
+def test_job_lock_runs_action_under_lock(tmp_path: Path) -> None:
+    seen_locked: list[bool] = []
+
+    portal_app._run_with_job_lock(
+        tmp_path,
+        lambda: seen_locked.append(portal_app.JOB_RUN_LOCK.locked()),
+    )
+
+    assert seen_locked == [True]
+    assert not portal_app.JOB_RUN_LOCK.locked()
 
 
 def test_job_detail_escapes_status_message(tmp_path: Path, monkeypatch) -> None:
@@ -150,6 +197,9 @@ def test_build_submission_metadata_preserves_raw_and_parsed_inputs() -> None:
     assert metadata["processing"]["include_gaze"] is True
     assert metadata["processing"]["analysis_window_only"] is True
     assert metadata["processing"]["compression_encoders"] == ["h264_nvenc"]
+    assert metadata["processing"]["frame_rate"] == PORTAL_DEFAULT_FRAME_RATE
+    assert metadata["processing"]["max_persons"] == PORTAL_DEFAULT_MAX_PERSONS
+    assert metadata["processing"]["pose_model"] == PORTAL_DEFAULT_MODEL_PATH
 
 
 def test_build_submission_metadata_allows_video_b_to_be_omitted() -> None:
@@ -368,33 +418,6 @@ def test_build_processing_steps_supports_single_camera_b_with_own_blocks(
     assert "--analysis-windows-camera-b storybook,3:20,4:20" in joined
     assert "filter tracks camera_a" not in names
     assert "filter tracks camera_b" in names
-
-
-def test_chunk_path_rejects_invalid_camera_id(tmp_path: Path) -> None:
-    try:
-        chunk_path_for(tmp_path, "../bad", 0)
-    except ValueError as error:
-        assert "camera_id" in str(error)
-    else:
-        raise AssertionError("Expected invalid camera_id to fail")
-
-
-def test_assemble_chunked_upload_writes_final_video(tmp_path: Path) -> None:
-    upload_dir = tmp_path / "upload"
-    for index, data in enumerate([b"abc", b"def", b"ghi"]):
-        path = chunk_path_for(upload_dir, "camera_a", index)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-
-    final_path = assemble_chunked_upload(
-        upload_dir=upload_dir,
-        camera_id="camera_a",
-        original_filename="session.mov",
-        total_chunks=3,
-    )
-
-    assert final_path == upload_dir / "camera_a.mov"
-    assert final_path.read_bytes() == b"abcdefghi"
 
 
 def test_validate_direct_chunked_upload_uses_final_video_and_receipts(
