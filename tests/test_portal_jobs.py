@@ -1,7 +1,11 @@
 from pathlib import Path
+from types import SimpleNamespace
 from zipfile import ZipFile
 
-from portal.app import build_submission_metadata
+import pytest
+
+import portal.app as portal_app
+from portal.app import build_submission_metadata, submission_error_page
 from portal.app import index as render_index
 from portal.jobs import (
     CompressionSettings,
@@ -18,6 +22,7 @@ from portal.jobs import (
     parse_timecode,
     split_blocks_for_exclusions,
     validate_direct_chunked_upload,
+    write_status,
 )
 
 
@@ -46,6 +51,58 @@ def test_upload_page_exposes_drag_and_drop_targets() -> None:
     assert "Proximity" in text
     assert "Movement synchrony" in text
     assert "Gaze estimation" in text
+
+
+def test_portal_password_and_secret_must_be_configured(monkeypatch) -> None:
+    monkeypatch.delenv("PORTAL_PASSWORD", raising=False)
+    monkeypatch.delenv("PORTAL_SECRET_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="PORTAL_PASSWORD must be set"):
+        portal_app.portal_password()
+    with pytest.raises(RuntimeError, match="PORTAL_SECRET_KEY must be set"):
+        portal_app.portal_secret_key()
+
+
+def test_login_sets_expiring_secure_session_cookie(monkeypatch) -> None:
+    monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
+    monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("PORTAL_SESSION_TTL_SECONDS", "60")
+    portal_app.SESSION_TOKENS.clear()
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    response = portal_app.login(request, "test-password")
+
+    cookie = response.headers["set-cookie"].lower()
+    assert response.status_code == 303
+    assert "httponly" in cookie
+    assert "secure" in cookie
+    assert "samesite=strict" in cookie
+    assert "max-age=60" in cookie
+    assert len(portal_app.SESSION_TOKENS) == 1
+
+
+def test_submission_error_page_escapes_user_controlled_text() -> None:
+    response = submission_error_page(ValueError("<script>alert(1)</script>.mov"))
+    text = response.body.decode("utf-8")
+
+    assert "<script>alert(1)</script>" not in text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;.mov" in text
+
+
+def test_job_detail_escapes_status_message(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
+    job_dir = tmp_path / "job-001"
+    write_status(
+        job_dir,
+        {"state": "<b>failed</b>", "message": "<script>alert(1)</script>.mov"},
+    )
+
+    response = portal_app.job_detail("job-001", None)
+    text = response.body.decode("utf-8")
+
+    assert "<script>alert(1)</script>" not in text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;.mov" in text
+    assert "&lt;b&gt;failed&lt;/b&gt;" in text
 
 
 def test_build_submission_metadata_preserves_raw_and_parsed_inputs() -> None:
@@ -133,6 +190,25 @@ def test_build_submission_metadata_requires_one_video() -> None:
         assert "At least one GoPro video" in str(error)
     else:
         raise AssertionError("Expected missing videos to fail")
+
+
+def test_build_submission_metadata_rejects_oversize_upload(monkeypatch) -> None:
+    monkeypatch.setenv("PORTAL_MAX_JOB_UPLOAD_BYTES", "100")
+
+    with pytest.raises(ValueError, match="per-job limit"):
+        build_submission_metadata(
+            job_id="job-001",
+            created_at="2026-05-14T13:00:00",
+            safe_session_id="P001c",
+            email="researcher@example.edu",
+            blocks_text="free_play,1:00,2:00,green",
+            exclusions_text="",
+            video_a_name="gopro_a.mov",
+            video_b_name="",
+            video_a_size=101,
+            video_b_size=0,
+            include_gaze=False,
+        )
 
 
 def test_parse_timecode_accepts_researcher_friendly_formats() -> None:

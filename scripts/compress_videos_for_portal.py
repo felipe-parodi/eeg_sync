@@ -149,6 +149,21 @@ def output_path_for(input_path: Path, output_dir: Path, suffix: str) -> Path:
     return output_dir / f"{input_path.stem}{suffix}.mp4"
 
 
+def validate_unique_output_paths(
+    input_paths: Sequence[Path], output_paths: Sequence[Path]
+) -> None:
+    """Reject compression plans that would overwrite one input with another."""
+    seen: dict[Path, Path] = {}
+    for input_path, output_path in zip(input_paths, output_paths):
+        key = output_path.resolve()
+        if key in seen:
+            raise ValueError(
+                "Multiple inputs would write the same compressed output: "
+                f"{seen[key]} and {input_path} -> {output_path}"
+            )
+        seen[key] = input_path
+
+
 def build_ffmpeg_command(
     input_path: Path,
     output_path: Path,
@@ -164,7 +179,8 @@ def build_ffmpeg_command(
         encoder: ffmpeg H.264 encoder name.
 
     Returns:
-        Command argument list.
+        Command argument list. The command strips audio with ``-an`` because
+        downstream pose and gaze processing do not consume audio.
     """
     vf = f"fps={settings.target_fps},scale='min({settings.max_width},iw)':-2"
     command = [
@@ -270,16 +286,18 @@ def run_compression(args: argparse.Namespace) -> dict[str, Any]:
     )
     inputs = discover_videos(args.video, args.input_dir, args.recursive)
     output_dir = Path(args.output_dir)
+    output_paths = [output_path_for(path, output_dir, args.suffix) for path in inputs]
+    validate_unique_output_paths(inputs, output_paths)
     encoders = ENCODER_PRESETS[args.encoder]
     results = [
         compress_one_video(
             input_path=path,
-            output_path=output_path_for(path, output_dir, args.suffix),
+            output_path=output_path,
             settings=settings,
             encoders=encoders,
             dry_run=args.dry_run,
         )
-        for path in inputs
+        for path, output_path in zip(inputs, output_paths)
     ]
     summary = {
         "settings": asdict(settings),

@@ -38,6 +38,7 @@ class FrameExtractionResult:
 
 
 def _parse_timecode(value: str) -> float:
+    """Parse seconds, MM:SS, or HH:MM:SS to seconds."""
     text = value.strip()
     if not text:
         raise ValueError("time value cannot be empty")
@@ -136,6 +137,7 @@ def _write_segmented_frame_index(
 def _normalize_analysis_windows(
     analysis_windows: Sequence[AnalysisWindow] | str | None,
 ) -> List[AnalysisWindow]:
+    """Normalize optional CLI or typed analysis windows to a list."""
     if analysis_windows is None:
         return []
     if isinstance(analysis_windows, str):
@@ -144,6 +146,7 @@ def _normalize_analysis_windows(
 
 
 def _clear_existing_extracted_frames(frames_dir: Path) -> None:
+    """Remove extracted frames and their timestamp index before re-extraction."""
     for path in _sorted_frame_paths(frames_dir):
         path.unlink()
     index_path = frames_dir / "frame_index.csv"
@@ -160,6 +163,7 @@ def _build_segment_command(
     ffmpeg_bin: str,
     overwrite: bool,
 ) -> List[str]:
+    """Build an ffmpeg command for one half-open analysis window."""
     duration_s = window.end_s - window.start_s
     return [
         ffmpeg_bin,
@@ -183,6 +187,20 @@ def _build_segment_command(
     ]
 
 
+def _ffmpeg_failure_message(
+    source: Path,
+    stderr: str | None,
+    context: str,
+) -> str:
+    """Return a user-facing ffmpeg failure message with useful stderr."""
+    stderr_text = (stderr or "").strip()
+    if not stderr_text:
+        stderr_text = "ffmpeg did not report stderr"
+    if len(stderr_text) > 2000:
+        stderr_text = stderr_text[-2000:]
+    return f"ffmpeg frame extraction failed for {source} ({context}): {stderr_text}"
+
+
 def _extract_segmented_frames(
     source: Path,
     destination: Path,
@@ -192,6 +210,7 @@ def _extract_segmented_frames(
     overwrite: bool,
     dry_run: bool,
 ) -> FrameExtractionResult:
+    """Extract frames from only the requested source-video windows."""
     if overwrite:
         _clear_existing_extracted_frames(destination)
 
@@ -211,17 +230,22 @@ def _extract_segmented_frames(
         )
         commands.append(command)
         if not dry_run:
+            # The before/after diff relies on each segment using a unique
+            # ffmpeg -start_number so existing frame names are never reused.
             before = set(_sorted_frame_paths(destination))
             try:
-                subprocess.run(command, check=True)
+                subprocess.run(command, check=True, capture_output=True, text=True)
             except FileNotFoundError as error:
                 raise RuntimeError(
                     f"'{ffmpeg_bin}' not found. Install ffmpeg or set --ffmpeg-bin."
                 ) from error
             except subprocess.CalledProcessError as error:
                 raise RuntimeError(
-                    f"ffmpeg frame extraction failed for {source} "
-                    f"window {window.name}"
+                    _ffmpeg_failure_message(
+                        source=source,
+                        stderr=error.stderr,
+                        context=f"window {window.name}",
+                    )
                 ) from error
             after = set(_sorted_frame_paths(destination))
             new_count = len(after - before)
@@ -342,13 +366,19 @@ def extract_frames_ffmpeg(
         )
 
     try:
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, capture_output=True, text=True)
     except FileNotFoundError as error:
         raise RuntimeError(
             f"'{ffmpeg_bin}' not found. Install ffmpeg or set --ffmpeg-bin."
         ) from error
     except subprocess.CalledProcessError as error:
-        raise RuntimeError(f"ffmpeg frame extraction failed for {source}") from error
+        raise RuntimeError(
+            _ffmpeg_failure_message(
+                source=source,
+                stderr=error.stderr,
+                context="full video",
+            )
+        ) from error
 
     frame_paths = _sorted_frame_paths(destination)
     _write_frame_index(frame_paths, frame_rate, destination / "frame_index.csv")

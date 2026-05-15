@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -175,6 +176,55 @@ def test_run_camera_pipeline_uses_frame_index_timestamps(tmp_path: Path) -> None
     timestamps = tracks.groupby("frame_idx")["timestamp_s"].first().tolist()
 
     assert timestamps == [10.0, 10.5, 20.0]
+
+
+def test_run_camera_pipeline_requires_frame_index_timestamps_for_windows(
+    tmp_path: Path,
+) -> None:
+    source_video = tmp_path / "input.mp4"
+    source_video.write_text("fake", encoding="utf-8")
+
+    config = PipelineConfig(
+        video_a=str(source_video),
+        video_b=None,
+        output_dir=str(tmp_path / "out"),
+        inference_backend="ultralytics",
+        analysis_windows_camera_a="free,0:10,0:11",
+        dry_run=True,
+    )
+
+    def fake_extract_fn(**kwargs):
+        frames_dir = Path(kwargs["frames_dir"])
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        (frames_dir / "frame_000001.jpg").write_text("x", encoding="utf-8")
+        (frames_dir / "frame_index.csv").write_text(
+            "frame_idx,image_name\n0,frame_000001.jpg\n",
+            encoding="utf-8",
+        )
+        return FrameExtractionResult(
+            video_path=Path(kwargs["video_path"]),
+            frames_dir=frames_dir,
+            frame_rate=float(kwargs["frame_rate"]),
+            frame_paths=sorted(frames_dir.glob("frame_*.jpg")),
+            command=[],
+            executed=False,
+        )
+
+    with pytest.raises(RuntimeError, match="frame_idx and timestamp_s"):
+        run_camera_pipeline(
+            camera_id="camera_a",
+            source_video=str(source_video),
+            session_dir=tmp_path / "session",
+            config=config,
+            compress_fn=lambda **kwargs: CompressionResult(
+                input_path=Path(kwargs["input_path"]),
+                output_path=Path(kwargs["output_path"]),
+                command=[],
+                executed=False,
+            ),
+            extract_fn=fake_extract_fn,
+            infer_fn=lambda runner_config: _fake_payload(frame_count=1),
+        )
 
 
 def test_run_camera_pipeline_prefers_camera_specific_analysis_windows(

@@ -1,6 +1,9 @@
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[1] / "scripts" / "compress_videos_for_portal.py"
@@ -68,3 +71,52 @@ def test_build_ffmpeg_command_supports_cpu_fallback(tmp_path: Path) -> None:
     assert command[command.index("-c:v") + 1] == "libx264"
     assert command[command.index("-preset") + 1] == "ultrafast"
     assert command[command.index("-crf") + 1] == "34"
+
+
+def test_validate_unique_output_paths_rejects_stem_collisions(tmp_path: Path) -> None:
+    module = _load_script_module()
+    input_a = tmp_path / "a" / "session.mov"
+    input_b = tmp_path / "b" / "session.mp4"
+    output_dir = tmp_path / "out"
+    output_paths = [
+        module.output_path_for(input_a, output_dir, "_portal"),
+        module.output_path_for(input_b, output_dir, "_portal"),
+    ]
+
+    with pytest.raises(ValueError, match="same compressed output"):
+        module.validate_unique_output_paths([input_a, input_b], output_paths)
+
+
+def test_compress_one_video_falls_back_to_cpu_encoder(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_script_module()
+    input_path = tmp_path / "raw.mov"
+    output_path = tmp_path / "raw_portal.mp4"
+    input_path.write_bytes(b"x" * 1024)
+    attempts: list[str] = []
+
+    def fake_run(command, check, capture_output, text):
+        encoder = command[command.index("-c:v") + 1]
+        attempts.append(encoder)
+        if encoder == "h264_nvenc":
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=command,
+                stderr="No capable devices found",
+            )
+        output_path.write_bytes(b"compressed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = module.compress_one_video(
+        input_path=input_path,
+        output_path=output_path,
+        settings=module.CompressionSettings(),
+        encoders=("h264_nvenc", "libx264"),
+    )
+
+    assert attempts == ["h264_nvenc", "libx264"]
+    assert result["encoder"] == "libx264"
+    assert result["executed"] is True

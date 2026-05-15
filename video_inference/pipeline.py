@@ -106,17 +106,22 @@ def _payload_to_tracks_and_pose(
     payload: Dict[str, Any],
     frame_rate: float,
     timestamp_by_frame: Optional[Dict[int, float]] = None,
+    require_timestamps: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     track_rows: List[Dict[str, Any]] = []
     pose_rows: List[Dict[str, Any]] = []
 
     for frame in payload.get("frames", []):
         frame_idx = int(frame["frame_idx"])
-        timestamp_s = float(
-            timestamp_by_frame.get(frame_idx, frame_idx / frame_rate)
-            if timestamp_by_frame
-            else frame_idx / frame_rate
-        )
+        if timestamp_by_frame is not None and frame_idx in timestamp_by_frame:
+            timestamp_s = float(timestamp_by_frame[frame_idx])
+        elif require_timestamps:
+            raise RuntimeError(
+                f"Missing source timestamp for extracted frame_idx={frame_idx}. "
+                "Regenerate frames or fix frame_index.csv before running segmented inference."
+            )
+        else:
+            timestamp_s = frame_idx / frame_rate
         persons = frame.get("persons", [])
 
         for person in persons:
@@ -175,11 +180,13 @@ def _write_schema_outputs(
     enforce_exact_person_count: bool,
     id_policy: str,
     timestamp_by_frame: Optional[Dict[int, float]] = None,
+    require_timestamps: bool = False,
 ) -> ValidationResult:
     tracks_df, pose_df = _payload_to_tracks_and_pose(
         payload,
         frame_rate=frame_rate,
         timestamp_by_frame=timestamp_by_frame,
+        require_timestamps=require_timestamps,
     )
 
     tracks_path = camera_output_dir / "tracks_2d.csv"
@@ -214,14 +221,32 @@ def _write_schema_outputs(
     return validate_session_output(camera_output_dir)
 
 
-def _read_frame_index_timestamps(frames_dir: Path) -> Dict[int, float]:
+def _read_frame_index_timestamps(
+    frames_dir: Path,
+    *,
+    required: bool = False,
+) -> Dict[int, float]:
     """Read original source timestamps from a frame index if present."""
     index_path = frames_dir / "frame_index.csv"
     if not index_path.exists():
+        if required:
+            raise RuntimeError(
+                f"Missing required frame timestamp index: {index_path}. "
+                "Segmented inference needs frame_index.csv to preserve source-video times."
+            )
         return {}
     frame_index = pd.read_csv(index_path)
     if "frame_idx" not in frame_index.columns or "timestamp_s" not in frame_index:
+        if required:
+            raise RuntimeError(
+                f"{index_path} must contain frame_idx and timestamp_s columns "
+                "for segmented inference."
+            )
         return {}
+    if frame_index[["frame_idx", "timestamp_s"]].isna().any().any():
+        raise RuntimeError(
+            f"{index_path} contains blank frame_idx or timestamp_s values."
+        )
     return {
         int(row.frame_idx): float(row.timestamp_s)
         for row in frame_index[["frame_idx", "timestamp_s"]].itertuples(index=False)
@@ -249,6 +274,7 @@ def run_camera_pipeline(
     source_video_path = Path(source_video)
     if not source_video_path.exists():
         raise FileNotFoundError(f"Source video not found: {source_video_path}")
+    camera_analysis_windows = _analysis_windows_for_camera(config, camera_id)
 
     # Warn if the video is suspiciously large (likely uncompressed).
     _MAX_RECOMMENDED_MB = 50
@@ -307,7 +333,6 @@ def run_camera_pipeline(
             "overwrite": not config.reuse_existing,
             "dry_run": config.dry_run,
         }
-        camera_analysis_windows = _analysis_windows_for_camera(config, camera_id)
         if camera_analysis_windows:
             extract_kwargs["analysis_windows"] = camera_analysis_windows
         extraction_result = extract_fn(**extract_kwargs)
@@ -389,7 +414,11 @@ def run_camera_pipeline(
     else:
         payload = selected_infer_fn(runner_config)
 
-    timestamp_by_frame = _read_frame_index_timestamps(extraction_result.frames_dir)
+    timestamps_required = bool(camera_analysis_windows)
+    timestamp_by_frame = _read_frame_index_timestamps(
+        extraction_result.frames_dir,
+        required=timestamps_required,
+    )
     validation = _write_schema_outputs(
         payload=payload,
         camera_output_dir=camera_dir,
@@ -400,6 +429,7 @@ def run_camera_pipeline(
         enforce_exact_person_count=config.enforce_exact_person_count,
         id_policy=id_policy,
         timestamp_by_frame=timestamp_by_frame,
+        require_timestamps=timestamps_required,
     )
 
     return CameraPipelineSummary(

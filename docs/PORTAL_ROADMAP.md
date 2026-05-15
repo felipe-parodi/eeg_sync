@@ -34,11 +34,14 @@ recordings is:
 The portal now uploads both cameras in parallel and writes chunks directly into
 their final video files, so it no longer does a separate chunk-stitch copy.
 
-The next major processing speedup is to run inference only on requested analysis
-blocks. That needs careful timestamp handling because the current pipeline
-assumes timestamps are measured from the source video start. The safer design is
-to add segment-aware frame extraction that keeps original video timestamps,
-rather than physically concatenating clips and losing the original timeline.
+The portal now runs inference only on requested analysis blocks. Segment-aware
+frame extraction preserves original source-video timestamps in `frame_index.csv`
+and downstream CSV outputs, so filtering and metrics stay aligned to the times
+entered by the researcher.
+
+The next processing speedups are to preflight video duration before upload,
+surface upload throughput in the browser, and avoid re-running downstream stages
+when a failed job is retried after a fix.
 
 ## Parent/Child Review From Sample Frames
 

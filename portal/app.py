@@ -9,7 +9,10 @@ import math
 import os
 import re
 import secrets
+import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -49,27 +52,128 @@ UPLOAD_ROOT = REPO_ROOT / "video_inference" / "data" / "portal_uploads"
 JOB_ROOT = REPO_ROOT / "video_inference" / "output" / "portal_jobs"
 OUTPUT_ROOT = REPO_ROOT / "video_inference" / "output"
 CHUNK_SIZE_BYTES = 50 * 1024 * 1024
+DEFAULT_MAX_JOB_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024
+DEFAULT_SESSION_TTL_SECONDS = 8 * 60 * 60
+LOGIN_RATE_LIMIT_ATTEMPTS = 5
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = 5 * 60
+SESSION_TOKENS: dict[str, float] = {}
+LOGIN_FAILURES: dict[str, list[float]] = {}
 
-app = FastAPI(title=PORTAL_DISPLAY_NAME)
+
+def validate_startup_configuration() -> None:
+    """Fail startup if required portal secrets are missing."""
+    portal_password()
+    portal_secret_key()
+
+
+@asynccontextmanager
+async def portal_lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Validate portal configuration before accepting requests."""
+    validate_startup_configuration()
+    yield
+
+
+app = FastAPI(title=PORTAL_DISPLAY_NAME, lifespan=portal_lifespan)
 
 
 def portal_password() -> str:
     """Return the configured shared portal password."""
-    return os.environ.get("PORTAL_PASSWORD", "silver_eeg_child_2026")
+    password = os.environ.get("PORTAL_PASSWORD")
+    if not password:
+        raise RuntimeError("PORTAL_PASSWORD must be set")
+    return password
 
 
-def session_token() -> str:
-    """Return the deterministic session cookie token for this portal."""
-    secret = os.environ.get("PORTAL_SECRET_KEY", portal_password())
-    return hmac.new(
-        secret.encode("utf-8"), b"video-processing-portal", "sha256"
+def portal_secret_key() -> str:
+    """Return the configured secret used to derive session tokens."""
+    secret = os.environ.get("PORTAL_SECRET_KEY")
+    if not secret:
+        raise RuntimeError("PORTAL_SECRET_KEY must be set")
+    return secret
+
+
+def session_ttl_seconds() -> int:
+    """Return the session lifetime in seconds."""
+    return int(
+        os.environ.get("PORTAL_SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS)
+    )
+
+
+def cookie_secure() -> bool:
+    """Return whether session cookies should require HTTPS."""
+    return os.environ.get("PORTAL_COOKIE_SECURE", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
+def max_job_upload_bytes() -> int:
+    """Return the maximum total upload size accepted for one portal job."""
+    return int(
+        os.environ.get("PORTAL_MAX_JOB_UPLOAD_BYTES", DEFAULT_MAX_JOB_UPLOAD_BYTES)
+    )
+
+
+def max_chunk_upload_bytes() -> int:
+    """Return the maximum accepted size for one upload chunk."""
+    return int(os.environ.get("PORTAL_MAX_CHUNK_BYTES", CHUNK_SIZE_BYTES))
+
+
+def validate_upload_size_limits(video_a_size: int, video_b_size: int) -> None:
+    """Validate browser-declared upload sizes against portal caps."""
+    if video_a_size < 0 or video_b_size < 0:
+        raise ValueError("Uploaded video sizes must be non-negative")
+    total_size = video_a_size + video_b_size
+    max_total = max_job_upload_bytes()
+    if total_size > max_total:
+        raise ValueError(
+            f"Upload is {total_size} bytes, above the per-job limit of {max_total} bytes"
+        )
+    max_chunk = max_chunk_upload_bytes()
+    if max_chunk > CHUNK_SIZE_BYTES:
+        raise ValueError(
+            "PORTAL_MAX_CHUNK_BYTES cannot exceed the browser chunk size "
+            f"({CHUNK_SIZE_BYTES} bytes)"
+        )
+
+
+def create_session_token() -> str:
+    """Create a random server-side session token with an expiry."""
+    token = hmac.new(
+        portal_secret_key().encode("utf-8"),
+        secrets.token_bytes(32),
+        "sha256",
     ).hexdigest()
+    SESSION_TOKENS[token] = time.time() + session_ttl_seconds()
+    return token
+
+
+def validate_session_token(token: str) -> bool:
+    """Return whether a session token exists and has not expired."""
+    if not token:
+        return False
+    expires_at = SESSION_TOKENS.get(token)
+    if expires_at is None:
+        return False
+    if expires_at < time.time():
+        SESSION_TOKENS.pop(token, None)
+        return False
+    return True
+
+
+def _is_json_or_upload_request(request: Request) -> bool:
+    """Return whether failed auth should be reported as JSON/XHR status."""
+    accept = request.headers.get("accept", "")
+    return request.url.path.startswith("/uploads/") or "application/json" in accept
 
 
 def require_auth(request: Request) -> None:
     """Require the shared portal login cookie."""
     cookie = request.cookies.get("portal_session", "")
-    if not hmac.compare_digest(cookie, session_token()):
+    if not validate_session_token(cookie):
+        if _is_json_or_upload_request(request):
+            raise HTTPException(status_code=401, detail="Login required")
         raise HTTPException(status_code=303, headers={"Location": "/login"})
 
 
@@ -211,6 +315,18 @@ def _html_page(title: str, body: str) -> HTMLResponse:
 </html>""")
 
 
+def submission_error_page(error: Exception) -> HTMLResponse:
+    """Render a submission error page without reflecting raw user input."""
+    safe_error = html.escape(str(error), quote=True)
+    return _html_page(
+        "Submission Error",
+        f"""<section class="panel">
+  <p class="error">{safe_error}</p>
+  <p><a href="/">Back to upload form</a></p>
+</section>""",
+    )
+
+
 def _info_icon(text: str) -> str:
     return f'<span class="info-icon" title="{html.escape(text)}">?</span>'
 
@@ -313,6 +429,7 @@ def build_submission_metadata(
     has_video_b = bool(video_b_name) and video_b_size > 0
     if not has_video_a and not has_video_b:
         raise ValueError("At least one GoPro video is required.")
+    validate_upload_size_limits(video_a_size, video_b_size)
 
     blocks_text_a = blocks_text
     blocks_text_b = blocks_text if blocks_text_b is None else blocks_text_b
@@ -427,7 +544,10 @@ def _read_upload_meta(job_dir: Path) -> dict:
     meta_path = job_dir / "upload_meta.json"
     if not meta_path.exists():
         raise FileNotFoundError(f"Upload metadata not found for job {job_dir.name}")
-    return json.loads(meta_path.read_text(encoding="utf-8"))
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Upload metadata must be a JSON object: {meta_path}")
+    return payload
 
 
 def _blocks_by_camera_from_meta(meta: dict) -> dict[str, list[SessionBlock]]:
@@ -463,6 +583,8 @@ def _config_from_chunked_upload(
             original_filename=camera_a["original_filename"],
             total_chunks=int(camera_a["chunk_count"]),
             expected_size_bytes=int(camera_a["size_bytes"]),
+            probe=True,
+            ffprobe_bin=os.environ.get("PORTAL_FFPROBE_BIN", "ffprobe"),
         )
     if "camera_b" in videos:
         camera_b = videos["camera_b"]
@@ -472,6 +594,8 @@ def _config_from_chunked_upload(
             original_filename=camera_b["original_filename"],
             total_chunks=int(camera_b["chunk_count"]),
             expected_size_bytes=int(camera_b["size_bytes"]),
+            probe=True,
+            ffprobe_bin=os.environ.get("PORTAL_FFPROBE_BIN", "ffprobe"),
         )
     blocks_by_camera = _blocks_by_camera_from_meta(meta)
     legacy_blocks = next(iter(blocks_by_camera.values()))
@@ -523,11 +647,17 @@ def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) ->
 
 async def _save_upload(upload: UploadFile, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
+    bytes_written = 0
     with destination.open("wb") as output_file:
         while True:
             chunk = await upload.read(1024 * 1024)
             if not chunk:
                 break
+            bytes_written += len(chunk)
+            if bytes_written > max_job_upload_bytes():
+                raise ValueError(
+                    f"Upload exceeds portal size cap of {max_job_upload_bytes()} bytes"
+                )
             output_file.write(chunk)
 
 
@@ -536,15 +666,47 @@ def _job_rows() -> str:
     for status_path in sorted(JOB_ROOT.glob("*/status.json"), reverse=True):
         job_id = status_path.parent.name
         status = read_status(status_path.parent)
-        state = status.get("state", "unknown")
-        message = status.get("message", "")
+        safe_job_id = html.escape(job_id, quote=True)
+        state = html.escape(str(status.get("state", "unknown")), quote=True)
+        message = html.escape(str(status.get("message", "")), quote=True)
         rows.append(
-            f'<tr><td><a href="/jobs/{job_id}">{job_id}</a></td>'
+            f'<tr><td><a href="/jobs/{safe_job_id}">{safe_job_id}</a></td>'
             f"<td>{state}</td><td>{message}</td></tr>"
         )
     if not rows:
         return '<tr><td colspan="3" class="muted">No jobs yet.</td></tr>'
     return "\n".join(rows)
+
+
+def _client_host(request: Request) -> str:
+    """Return a stable rate-limit key for one client."""
+    if request.client is None:
+        return "unknown"
+    return str(request.client.host)
+
+
+def _record_failed_login(client_host: str) -> None:
+    """Record a failed login attempt within the active rate-limit window."""
+    now = time.time()
+    failures = [
+        stamp
+        for stamp in LOGIN_FAILURES.get(client_host, [])
+        if now - stamp < LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    ]
+    failures.append(now)
+    LOGIN_FAILURES[client_host] = failures
+
+
+def _login_is_rate_limited(client_host: str) -> bool:
+    """Return whether a client has too many failed logins."""
+    now = time.time()
+    failures = [
+        stamp
+        for stamp in LOGIN_FAILURES.get(client_host, [])
+        if now - stamp < LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    ]
+    LOGIN_FAILURES[client_host] = failures
+    return len(failures) >= LOGIN_RATE_LIMIT_ATTEMPTS
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -561,17 +723,35 @@ def login_page() -> HTMLResponse:
 
 
 @app.post("/login")
-def login(password: Annotated[str, Form()]) -> RedirectResponse:
+def login(request: Request, password: Annotated[str, Form()]) -> RedirectResponse:
     """Validate the shared password and set the session cookie."""
+    client_host = _client_host(request)
+    if _login_is_rate_limited(client_host):
+        raise HTTPException(status_code=429, detail="Too many failed login attempts")
     if not secrets.compare_digest(password, portal_password()):
+        _record_failed_login(client_host)
         return RedirectResponse("/login", status_code=303)
+    LOGIN_FAILURES.pop(client_host, None)
+    token = create_session_token()
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
         "portal_session",
-        session_token(),
+        token,
+        max_age=session_ttl_seconds(),
         httponly=True,
-        samesite="lax",
+        samesite="strict",
+        secure=cookie_secure(),
     )
+    return response
+
+
+@app.post("/logout")
+def logout(request: Request) -> RedirectResponse:
+    """Clear the current portal session."""
+    token = request.cookies.get("portal_session", "")
+    SESSION_TOKENS.pop(token, None)
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie("portal_session")
     return response
 
 
@@ -980,6 +1160,15 @@ async def upload_chunk(
             )
         if chunk_index >= expected_chunks:
             raise ValueError(f"chunk_index {chunk_index} exceeds expected chunks")
+        if chunk_index < 0:
+            raise ValueError("chunk_index must be non-negative")
+        expected_size = int(camera_meta["size_bytes"])
+        expected_chunk_size = min(
+            CHUNK_SIZE_BYTES,
+            max(0, expected_size - (chunk_index * CHUNK_SIZE_BYTES)),
+        )
+        if expected_chunk_size <= 0:
+            raise ValueError(f"chunk_index {chunk_index} exceeds expected file size")
 
         output_path = final_upload_path_for(
             upload_dir,
@@ -995,8 +1184,17 @@ async def upload_chunk(
                 data = await chunk.read(1024 * 1024)
                 if not data:
                     break
+                if bytes_written + len(data) > max_chunk_upload_bytes():
+                    raise ValueError(
+                        f"Upload chunk exceeds {max_chunk_upload_bytes()} bytes"
+                    )
                 output_file.write(data)
                 bytes_written += len(data)
+        if bytes_written != expected_chunk_size:
+            raise ValueError(
+                f"{camera_id} chunk {chunk_index} size mismatch: expected "
+                f"{expected_chunk_size} bytes, received {bytes_written} bytes"
+            )
         mark_chunk_received(upload_dir, camera_id, chunk_index, bytes_written)
         return JSONResponse(
             {
@@ -1075,12 +1273,20 @@ async def submit(
             suffix_a = Path(video_a.filename or "camera_a.mov").suffix.lower()
             video_a_path = upload_dir / f"camera_a{suffix_a}"
             await _save_upload(video_a, video_a_path)
-            validate_video_path(video_a_path)
+            validate_video_path(
+                video_a_path,
+                probe=True,
+                ffprobe_bin=os.environ.get("PORTAL_FFPROBE_BIN", "ffprobe"),
+            )
         if has_video_b and video_b is not None:
             suffix_b = Path(video_b.filename or "camera_b.mov").suffix.lower()
             video_b_path = upload_dir / f"camera_b{suffix_b}"
             await _save_upload(video_b, video_b_path)
-            validate_video_path(video_b_path)
+            validate_video_path(
+                video_b_path,
+                probe=True,
+                ffprobe_bin=os.environ.get("PORTAL_FFPROBE_BIN", "ffprobe"),
+            )
 
         job_dir.mkdir(parents=True, exist_ok=True)
         metadata = build_submission_metadata(
@@ -1117,13 +1323,7 @@ async def submit(
         background_tasks.add_task(run_portal_job, config, REPO_ROOT)
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
     except Exception as error:
-        return _html_page(
-            "Submission Error",
-            f"""<section class="panel">
-  <p class="error">{error}</p>
-  <p><a href="/">Back to upload form</a></p>
-</section>""",
-        )
+        return submission_error_page(error)
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -1133,8 +1333,11 @@ def job_detail(
 ) -> HTMLResponse:
     """Render one job status page."""
     safe_job_id = _slug(job_id)
+    display_job_id = html.escape(safe_job_id, quote=True)
     job_dir = JOB_ROOT / safe_job_id
     status = read_status(job_dir)
+    state = html.escape(str(status.get("state", "unknown")), quote=True)
+    message = html.escape(str(status.get("message", "")), quote=True)
     result_zip = status.get("result_zip")
     download = ""
     if result_zip and Path(result_zip).exists():
@@ -1151,11 +1354,11 @@ def job_detail(
     if (job_dir / "job.log").exists():
         log_link = f'<p><a href="/jobs/{safe_job_id}/log">View job log</a></p>'
     return _html_page(
-        f"Job {safe_job_id}",
+        f"Job {display_job_id}",
         f"""<section class="panel">
-  <h2>{safe_job_id}</h2>
-  <p><strong>Status:</strong> {status.get("state", "unknown")}</p>
-  <p><strong>Message:</strong> {status.get("message", "")}</p>
+  <h2>{display_job_id}</h2>
+  <p><strong>Status:</strong> {state}</p>
+  <p><strong>Message:</strong> {message}</p>
   {download}
   {log_link}
   {refresh_script}

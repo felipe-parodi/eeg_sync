@@ -260,11 +260,59 @@ def _all_config_blocks(config: PortalJobConfig) -> list[SessionBlock]:
     return blocks
 
 
-def validate_video_path(path: Path) -> None:
+def probe_video_path(path: Path, ffprobe_bin: str = "ffprobe") -> None:
+    """Validate that ffprobe can parse at least one video stream.
+
+    Args:
+        path: Video path to probe.
+        ffprobe_bin: ffprobe executable name or path.
+
+    Raises:
+        RuntimeError: If ffprobe is unavailable or cannot parse the video.
+        ValueError: If the media has no video stream.
+    """
+    command = [
+        ffprobe_bin,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"'{ffprobe_bin}' not found. Install ffmpeg/ffprobe or set PORTAL_FFPROBE_BIN."
+        ) from error
+    except subprocess.CalledProcessError as error:
+        stderr = error.stderr.strip() if error.stderr else "no stderr"
+        raise RuntimeError(f"ffprobe could not parse {path.name}: {stderr}") from error
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"ffprobe returned invalid JSON for {path.name}") from error
+    if not payload.get("streams"):
+        raise ValueError(f"No video stream found in uploaded file: {path.name}")
+
+
+def validate_video_path(
+    path: Path,
+    *,
+    probe: bool = False,
+    ffprobe_bin: str = "ffprobe",
+) -> None:
     """Validate one uploaded video path.
 
     Args:
         path: Path to validate.
+        probe: Run ffprobe to verify parseable video content.
+        ffprobe_bin: ffprobe executable name or path when ``probe`` is true.
 
     Raises:
         FileNotFoundError: If the path does not exist.
@@ -279,6 +327,8 @@ def validate_video_path(path: Path) -> None:
         )
     if path.stat().st_size <= 0:
         raise ValueError(f"Video file is empty: {path.name}")
+    if probe:
+        probe_video_path(path, ffprobe_bin=ffprobe_bin)
 
 
 def chunk_path_for(upload_dir: Path, camera_id: str, chunk_index: int) -> Path:
@@ -370,6 +420,8 @@ def validate_direct_chunked_upload(
     original_filename: str,
     total_chunks: int,
     expected_size_bytes: int,
+    probe: bool = False,
+    ffprobe_bin: str = "ffprobe",
 ) -> Path:
     """Validate a direct-written chunked upload and return its final video path.
 
@@ -379,6 +431,8 @@ def validate_direct_chunked_upload(
         original_filename: Browser-provided filename used only for extension.
         total_chunks: Number of chunks expected from the browser.
         expected_size_bytes: Browser-reported final file size.
+        probe: Run ffprobe to verify parseable video content.
+        ffprobe_bin: ffprobe executable name or path when ``probe`` is true.
 
     Returns:
         Final assembled video path.
@@ -395,7 +449,7 @@ def validate_direct_chunked_upload(
         if not receipt_path.exists():
             raise FileNotFoundError(f"Missing upload chunk receipt: {receipt_path}")
 
-    validate_video_path(output_path)
+    validate_video_path(output_path, probe=probe, ffprobe_bin=ffprobe_bin)
     actual_size = output_path.stat().st_size
     if actual_size != expected_size_bytes:
         raise ValueError(
@@ -856,7 +910,10 @@ def read_status(job_dir: Path) -> dict[str, Any]:
     path = job_dir / "status.json"
     if not path.exists():
         return {"state": "missing", "message": "No status file found."}
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Job status must be a JSON object: {path}")
+    return payload
 
 
 def job_config_to_dict(config: PortalJobConfig) -> dict[str, Any]:
@@ -954,8 +1011,10 @@ def send_notification(
     port = int(os.environ.get("PORTAL_SMTP_PORT", "587"))
     username = os.environ.get("PORTAL_SMTP_USER")
     password = os.environ.get("PORTAL_SMTP_PASSWORD")
-    with smtplib.SMTP(smtp_host, port, timeout=30) as smtp:
-        smtp.starttls()
+    smtp_cls = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
+    with smtp_cls(smtp_host, port, timeout=30) as smtp:
+        if port != 465 and os.environ.get("PORTAL_SMTP_STARTTLS", "true") != "false":
+            smtp.starttls()
         if username and password:
             smtp.login(username, password)
         smtp.send_message(message)
