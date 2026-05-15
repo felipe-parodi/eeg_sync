@@ -149,3 +149,99 @@ def test_filter_tracks_integration(tmp_path):
     filtered = pd.read_csv(cam_dir / "tracks_2d_filtered.csv")
     assert set(filtered["track_id"].unique()) == {0, 1}
     assert set(filtered["track_label"].unique()) == {"parent", "child"}
+
+
+def test_filter_tracks_uses_timestamp_windows_for_segmented_outputs(tmp_path):
+    """Filtering should use original timestamps, not sparse frame indices."""
+    from video_analysis.track_filter import filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+    rows = []
+    for frame_idx, timestamp_s in [(0, 100.0), (1, 100.5), (2, 200.0)]:
+        rows.extend(
+            [
+                {
+                    "frame_idx": frame_idx,
+                    "timestamp_s": timestamp_s,
+                    "track_id": 7,
+                    "track_label": "person_07",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": 100.0,
+                    "bbox_y2": 200.0,
+                    "track_confidence": 0.9,
+                },
+                {
+                    "frame_idx": frame_idx,
+                    "timestamp_s": timestamp_s,
+                    "track_id": 9,
+                    "track_label": "person_09",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": 80.0,
+                    "bbox_y2": 120.0,
+                    "track_confidence": 0.9,
+                },
+            ]
+        )
+    pd.DataFrame(rows).to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[BlockDef("free_play", "1:40", "1:41")],
+        source_fps=30.0,
+        n_keep=2,
+    )
+    summary = filter_tracks(cfg)
+
+    filtered = pd.read_csv(cam_dir / "tracks_2d_filtered.csv")
+
+    assert summary["total_rows"] == 4
+    assert set(filtered["frame_idx"].unique()) == {0, 1}
+    assert set(filtered["timestamp_s"].unique()) == {100.0, 100.5}
+    assert set(filtered["track_id"].unique()) == {0, 1}
+
+
+def test_filter_tracks_treats_adjacent_blocks_as_half_open(tmp_path):
+    """The end timestamp belongs to the next adjacent block, not both."""
+    from video_analysis.track_filter import filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+    rows = []
+    for frame_idx, timestamp_s in [(0, 10.0), (1, 10.5), (2, 11.0), (3, 11.5)]:
+        for track_id, bbox_x2 in [(7, 100.0), (9, 80.0)]:
+            rows.append(
+                {
+                    "frame_idx": frame_idx,
+                    "timestamp_s": timestamp_s,
+                    "track_id": track_id,
+                    "track_label": f"person_{track_id}",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": bbox_x2,
+                    "bbox_y2": 100.0,
+                    "track_confidence": 0.9,
+                }
+            )
+    pd.DataFrame(rows).to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[
+            BlockDef("first", "0:10", "0:11"),
+            BlockDef("second", "0:11", "0:12"),
+        ],
+        n_keep=2,
+    )
+    filter_tracks(cfg)
+
+    filtered = pd.read_csv(cam_dir / "tracks_2d_filtered.csv")
+
+    assert filtered["timestamp_s"].tolist().count(11.0) == 2
+    assert len(filtered) == 8

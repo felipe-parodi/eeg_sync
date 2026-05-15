@@ -58,6 +58,30 @@ def _bbox_area(row: pd.Series) -> float:
     return w * h
 
 
+def _rank_tracks_by_persistence(
+    block: pd.DataFrame,
+    n_keep: int,
+) -> List[Tuple[int, str, float]]:
+    """Rank the most persistent tracks in one pre-filtered block."""
+    if block.empty:
+        return []
+
+    counts = block.groupby("track_id")["frame_idx"].nunique()
+    top_ids = counts.nlargest(n_keep).index.tolist()
+    if not top_ids:
+        return []
+
+    sub = block[block["track_id"].isin(top_ids)].copy()
+    sub["_area"] = sub.apply(_bbox_area, axis=1)
+    avg_areas = sub.groupby("track_id")["_area"].mean()
+    sorted_ids = avg_areas.sort_values(ascending=False).index.tolist()
+    result = []
+    for role_idx, tid in enumerate(sorted_ids):
+        role = "parent" if role_idx == 0 else "child"
+        result.append((int(tid), role, float(avg_areas[tid])))
+    return result
+
+
 def identify_top_tracks(
     tracks_df: pd.DataFrame,
     start_frame: int,
@@ -80,28 +104,31 @@ def identify_top_tracks(
     block = tracks_df[
         (tracks_df["frame_idx"] >= start_frame) & (tracks_df["frame_idx"] <= end_frame)
     ]
-    if block.empty:
-        return []
+    return _rank_tracks_by_persistence(block, n_keep)
 
-    # Count frames per track.
-    counts = block.groupby("track_id")["frame_idx"].nunique()
-    top_ids = counts.nlargest(n_keep).index.tolist()
 
-    if not top_ids:
-        return []
+def identify_top_tracks_by_time(
+    tracks_df: pd.DataFrame,
+    start_s: float,
+    end_s: float,
+    n_keep: int = 2,
+) -> List[Tuple[int, str, float]]:
+    """Identify the top-N most persistent tracks in a timestamp range.
 
-    # Compute average bbox area per track.
-    sub = block[block["track_id"].isin(top_ids)].copy()
-    sub["_area"] = sub.apply(_bbox_area, axis=1)
-    avg_areas = sub.groupby("track_id")["_area"].mean()
+    Args:
+        tracks_df: Full tracks DataFrame.
+        start_s: First source-video second of the block.
+        end_s: End of the source-video block, exclusive.
+        n_keep: Number of tracks to keep.
 
-    # Sort by area descending: largest = parent (role 0), smallest = child (role 1).
-    sorted_ids = avg_areas.sort_values(ascending=False).index.tolist()
-    result = []
-    for role_idx, tid in enumerate(sorted_ids):
-        role = "parent" if role_idx == 0 else "child"
-        result.append((int(tid), role, float(avg_areas[tid])))
-    return result
+    Returns:
+        List of (track_id, role, avg_area) tuples sorted by role
+        (parent=0 first, child=1 second).
+    """
+    block = tracks_df[
+        (tracks_df["timestamp_s"] >= start_s) & (tracks_df["timestamp_s"] < end_s)
+    ]
+    return _rank_tracks_by_persistence(block, n_keep)
 
 
 def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
@@ -122,24 +149,23 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
         raise FileNotFoundError(f"Tracks CSV not found: {tracks_path}")
 
     tracks_df = pd.read_csv(tracks_path)
-    fps = config.source_fps
     blocks = config.blocks or []
 
-    # Build block frame ranges and track mappings.
+    # Build block time ranges and track mappings.
     block_summaries: List[Dict[str, Any]] = []
-    # Collect (start_frame, end_frame, {old_id: new_id}) per block.
-    block_remaps: List[Tuple[int, int, Dict[int, int]]] = []
+    # Collect (start_s, end_s, {old_id: new_id}) per block.
+    block_remaps: List[Tuple[float, float, Dict[int, int]]] = []
 
     for blk in blocks:
-        sf = _time_to_frame(blk.start_time, fps)
-        ef = _time_to_frame(blk.end_time, fps)
-        top = identify_top_tracks(tracks_df, sf, ef, config.n_keep)
+        start_s = _parse_time(blk.start_time)
+        end_s = _parse_time(blk.end_time)
+        top = identify_top_tracks_by_time(tracks_df, start_s, end_s, config.n_keep)
 
         remap: Dict[int, int] = {}
         summary_entry: Dict[str, Any] = {
             "name": blk.name,
-            "start_frame": sf,
-            "end_frame": ef,
+            "start_s": start_s,
+            "end_s": end_s,
             "tracks": [],
         }
 
@@ -158,15 +184,15 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
                 f"({role}, avg area {avg_area:.0f})"
             )
 
-        block_remaps.append((sf, ef, remap))
+        block_remaps.append((start_s, end_s, remap))
         block_summaries.append(summary_entry)
 
     # Apply filtering: keep only remapped tracks within blocks,
     # drop everything else (gaps between blocks).
     filtered_rows = []
-    for sf, ef, remap in block_remaps:
+    for start_s, end_s, remap in block_remaps:
         block_df = tracks_df[
-            (tracks_df["frame_idx"] >= sf) & (tracks_df["frame_idx"] <= ef)
+            (tracks_df["timestamp_s"] >= start_s) & (tracks_df["timestamp_s"] < end_s)
         ].copy()
         # Keep only tracks in remap.
         keep_ids = set(remap.keys())
@@ -199,9 +225,9 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
     if pose_path.exists():
         pose_df = pd.read_csv(pose_path)
         filtered_pose_rows = []
-        for sf, ef, remap in block_remaps:
+        for start_s, end_s, remap in block_remaps:
             block_pose = pose_df[
-                (pose_df["frame_idx"] >= sf) & (pose_df["frame_idx"] <= ef)
+                (pose_df["timestamp_s"] >= start_s) & (pose_df["timestamp_s"] < end_s)
             ].copy()
             keep_ids = set(remap.keys())
             block_pose = block_pose[block_pose["track_id"].isin(keep_ids)].copy()

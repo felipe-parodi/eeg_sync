@@ -37,7 +37,7 @@ class CameraPipelineSummary:
 class PipelineConfig:
     """Full pipeline configuration."""
 
-    video_a: str
+    video_a: Optional[str]
     video_b: Optional[str]
     output_dir: str
     checkpoint_path: str = ""
@@ -64,6 +64,9 @@ class PipelineConfig:
     rtmlib_backend: str = "onnxruntime"
     rtmlib_3d: bool = True
     frame_rate: float = 5.0
+    analysis_windows: Optional[str] = None
+    analysis_windows_camera_a: Optional[str] = None
+    analysis_windows_camera_b: Optional[str] = None
     max_width: int = 1280
     crf: int = 23
     preset: str = "medium"
@@ -78,22 +81,47 @@ def _default_session_id() -> str:
 
 
 def _camera_inputs(config: PipelineConfig) -> List[tuple[str, str]]:
-    camera_list = [("camera_a", config.video_a)]
+    camera_list = []
+    if config.video_a:
+        camera_list.append(("camera_a", config.video_a))
     if config.video_b:
         camera_list.append(("camera_b", config.video_b))
+    if not camera_list:
+        raise ValueError("At least one input video is required.")
     return camera_list
+
+
+def _analysis_windows_for_camera(
+    config: PipelineConfig, camera_id: str
+) -> Optional[str]:
+    """Return camera-specific analysis windows with global fallback."""
+    if camera_id == "camera_a" and config.analysis_windows_camera_a:
+        return config.analysis_windows_camera_a
+    if camera_id == "camera_b" and config.analysis_windows_camera_b:
+        return config.analysis_windows_camera_b
+    return config.analysis_windows
 
 
 def _payload_to_tracks_and_pose(
     payload: Dict[str, Any],
     frame_rate: float,
+    timestamp_by_frame: Optional[Dict[int, float]] = None,
+    require_timestamps: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     track_rows: List[Dict[str, Any]] = []
     pose_rows: List[Dict[str, Any]] = []
 
     for frame in payload.get("frames", []):
         frame_idx = int(frame["frame_idx"])
-        timestamp_s = float(frame_idx / frame_rate)
+        if timestamp_by_frame is not None and frame_idx in timestamp_by_frame:
+            timestamp_s = float(timestamp_by_frame[frame_idx])
+        elif require_timestamps:
+            raise RuntimeError(
+                f"Missing source timestamp for extracted frame_idx={frame_idx}. "
+                "Regenerate frames or fix frame_index.csv before running segmented inference."
+            )
+        else:
+            timestamp_s = frame_idx / frame_rate
         persons = frame.get("persons", [])
 
         for person in persons:
@@ -151,8 +179,15 @@ def _write_schema_outputs(
     max_persons: int,
     enforce_exact_person_count: bool,
     id_policy: str,
+    timestamp_by_frame: Optional[Dict[int, float]] = None,
+    require_timestamps: bool = False,
 ) -> ValidationResult:
-    tracks_df, pose_df = _payload_to_tracks_and_pose(payload, frame_rate=frame_rate)
+    tracks_df, pose_df = _payload_to_tracks_and_pose(
+        payload,
+        frame_rate=frame_rate,
+        timestamp_by_frame=timestamp_by_frame,
+        require_timestamps=require_timestamps,
+    )
 
     tracks_path = camera_output_dir / "tracks_2d.csv"
     pose_path = camera_output_dir / "pose_3d.csv"
@@ -186,6 +221,38 @@ def _write_schema_outputs(
     return validate_session_output(camera_output_dir)
 
 
+def _read_frame_index_timestamps(
+    frames_dir: Path,
+    *,
+    required: bool = False,
+) -> Dict[int, float]:
+    """Read original source timestamps from a frame index if present."""
+    index_path = frames_dir / "frame_index.csv"
+    if not index_path.exists():
+        if required:
+            raise RuntimeError(
+                f"Missing required frame timestamp index: {index_path}. "
+                "Segmented inference needs frame_index.csv to preserve source-video times."
+            )
+        return {}
+    frame_index = pd.read_csv(index_path)
+    if "frame_idx" not in frame_index.columns or "timestamp_s" not in frame_index:
+        if required:
+            raise RuntimeError(
+                f"{index_path} must contain frame_idx and timestamp_s columns "
+                "for segmented inference."
+            )
+        return {}
+    if frame_index[["frame_idx", "timestamp_s"]].isna().any().any():
+        raise RuntimeError(
+            f"{index_path} contains blank frame_idx or timestamp_s values."
+        )
+    return {
+        int(row.frame_idx): float(row.timestamp_s)
+        for row in frame_index[["frame_idx", "timestamp_s"]].itertuples(index=False)
+    }
+
+
 def run_camera_pipeline(
     camera_id: str,
     source_video: str,
@@ -207,6 +274,7 @@ def run_camera_pipeline(
     source_video_path = Path(source_video)
     if not source_video_path.exists():
         raise FileNotFoundError(f"Source video not found: {source_video_path}")
+    camera_analysis_windows = _analysis_windows_for_camera(config, camera_id)
 
     # Warn if the video is suspiciously large (likely uncompressed).
     _MAX_RECOMMENDED_MB = 50
@@ -257,14 +325,17 @@ def run_camera_pipeline(
             executed=False,
         )
     else:
-        extraction_result = extract_fn(
-            video_path=compression_result.output_path,
-            frames_dir=frames_dir,
-            frame_rate=config.frame_rate,
-            ffmpeg_bin=config.ffmpeg_bin,
-            overwrite=not config.reuse_existing,
-            dry_run=config.dry_run,
-        )
+        extract_kwargs: Dict[str, Any] = {
+            "video_path": compression_result.output_path,
+            "frames_dir": frames_dir,
+            "frame_rate": config.frame_rate,
+            "ffmpeg_bin": config.ffmpeg_bin,
+            "overwrite": not config.reuse_existing,
+            "dry_run": config.dry_run,
+        }
+        if camera_analysis_windows:
+            extract_kwargs["analysis_windows"] = camera_analysis_windows
+        extraction_result = extract_fn(**extract_kwargs)
 
     if config.inference_backend == "sam3d":
         if config.max_persons != 2:
@@ -343,6 +414,11 @@ def run_camera_pipeline(
     else:
         payload = selected_infer_fn(runner_config)
 
+    timestamps_required = bool(camera_analysis_windows)
+    timestamp_by_frame = _read_frame_index_timestamps(
+        extraction_result.frames_dir,
+        required=timestamps_required,
+    )
     validation = _write_schema_outputs(
         payload=payload,
         camera_output_dir=camera_dir,
@@ -352,6 +428,8 @@ def run_camera_pipeline(
         max_persons=config.max_persons,
         enforce_exact_person_count=config.enforce_exact_person_count,
         id_policy=id_policy,
+        timestamp_by_frame=timestamp_by_frame,
+        require_timestamps=timestamps_required,
     )
 
     return CameraPipelineSummary(
@@ -403,7 +481,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run full video inference pipeline.")
-    run_parser.add_argument("--video-a", required=True, type=str)
+    run_parser.add_argument("--video-a", default=None, type=str)
     run_parser.add_argument("--video-b", default=None, type=str)
     run_parser.add_argument("--output-dir", default="video_inference/output", type=str)
     run_parser.add_argument("--session-id", default=None, type=str)
@@ -453,6 +531,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--max-images", default=None, type=int)
     run_parser.add_argument("--use-mask", action="store_true", default=False)
     run_parser.add_argument("--frame-rate", default=5.0, type=float)
+    run_parser.add_argument(
+        "--analysis-windows",
+        default=None,
+        type=str,
+        help="Optional windows to infer: name,start,end;name,start,end",
+    )
+    run_parser.add_argument(
+        "--analysis-windows-camera-a",
+        default=None,
+        type=str,
+        help="Optional camera A windows, overriding --analysis-windows.",
+    )
+    run_parser.add_argument(
+        "--analysis-windows-camera-b",
+        default=None,
+        type=str,
+        help="Optional camera B windows, overriding --analysis-windows.",
+    )
     run_parser.add_argument("--max-width", default=1280, type=int)
     run_parser.add_argument("--crf", default=23, type=int)
     run_parser.add_argument("--preset", default="medium", type=str)
@@ -513,6 +609,9 @@ def main() -> None:
             rtmlib_backend=args.rtmlib_backend,
             rtmlib_3d=args.rtmlib_3d,
             frame_rate=args.frame_rate,
+            analysis_windows=args.analysis_windows,
+            analysis_windows_camera_a=args.analysis_windows_camera_a,
+            analysis_windows_camera_b=args.analysis_windows_camera_b,
             max_width=args.max_width,
             crf=args.crf,
             preset=args.preset,
