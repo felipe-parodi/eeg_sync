@@ -71,6 +71,8 @@ class SessionState:
 
 SESSION_TOKENS: dict[str, SessionState] = {}
 LOGIN_FAILURES: dict[str, list[float]] = {}
+# This is intentionally process-local. Run the portal as a single uvicorn
+# worker; multiple workers would each have their own GPU job lock.
 JOB_RUN_LOCK = threading.Lock()
 
 
@@ -313,6 +315,12 @@ def _html_page(title: str, body: str) -> HTMLResponse:
       font-weight: 700;
       cursor: pointer;
     }}
+    .top-actions {{
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 12px;
+    }}
+    .top-actions button {{ margin-top: 0; }}
     table {{ width: 100%; border-collapse: collapse; background: white; }}
     th, td {{ border-bottom: 1px solid #d9dee5; padding: 10px; text-align: left; }}
     .muted {{ color: #5d6d7e; font-size: 14px; }}
@@ -786,12 +794,14 @@ def logout(session_token: Annotated[str, Depends(require_csrf)]) -> RedirectResp
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(session_token: Annotated[str | None, Depends(require_auth)]) -> HTMLResponse:
+def index(session_token: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
     """Render the upload form and recent jobs."""
-    csrf_token = csrf_token_for_session(session_token) if session_token else ""
+    csrf_token = csrf_token_for_session(session_token)
     return _html_page(
         "Submit Job",
-        f"""<form id="upload-form">
+        f"""<div class="top-actions"><button id="logout-button" type="button">Log out</button></div>
+
+<form id="upload-form">
   <label for="session_id">Session ID {_info_icon("Use the participant/session name that should appear on outputs.")}</label>
   <input id="session_id" name="session_id" type="text" required placeholder="P001c">
 
@@ -876,6 +886,7 @@ def index(session_token: Annotated[str | None, Depends(require_auth)]) -> HTMLRe
 const CHUNK_SIZE = {CHUNK_SIZE_BYTES};
 const CSRF_TOKEN = "{html.escape(csrf_token, quote=True)}";
 const form = document.getElementById("upload-form");
+const logoutButton = document.getElementById("logout-button");
 const statusEl = document.getElementById("upload-status");
 const progressEl = document.getElementById("upload-progress");
 const dropZones = document.querySelectorAll(".file-drop-zone");
@@ -900,6 +911,15 @@ function updateSelectedFile(input) {{
   }}
   label.textContent = input.files.length ? input.files[0].name : "No file selected";
 }}
+
+logoutButton.addEventListener("click", async () => {{
+  await fetch("/logout", {{
+    method: "POST",
+    headers: {{"X-CSRF-Token": CSRF_TOKEN}},
+    credentials: "same-origin"
+  }});
+  window.location.href = "/login";
+}});
 
 dropZones.forEach((zone) => {{
   const input = document.getElementById(zone.dataset.fileInput);

@@ -27,8 +27,11 @@ from portal.jobs import (
 )
 
 
-def test_upload_page_exposes_drag_and_drop_targets() -> None:
-    response = render_index(None)
+def test_upload_page_exposes_drag_and_drop_targets(monkeypatch) -> None:
+    monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
+    monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
+    portal_app.SESSION_TOKENS.clear()
+    response = render_index(portal_app.create_session_token())
     text = response.body.decode("utf-8")
 
     assert response.status_code == 200
@@ -93,6 +96,7 @@ def test_index_embeds_session_csrf_token(monkeypatch) -> None:
     text = response.body.decode("utf-8")
 
     assert f'const CSRF_TOKEN = "{csrf_token}";' in text
+    assert 'id="logout-button"' in text
 
 
 def test_require_csrf_rejects_missing_or_wrong_token(monkeypatch) -> None:
@@ -110,6 +114,11 @@ def test_require_csrf_rejects_missing_or_wrong_token(monkeypatch) -> None:
     assert portal_app.require_csrf(request) == session_token
 
     request.headers = {}
+    with pytest.raises(portal_app.HTTPException) as error:
+        portal_app.require_csrf(request)
+    assert error.value.status_code == 403
+
+    request.headers = {"x-csrf-token": "wrong"}
     with pytest.raises(portal_app.HTTPException) as error:
         portal_app.require_csrf(request)
     assert error.value.status_code == 403
