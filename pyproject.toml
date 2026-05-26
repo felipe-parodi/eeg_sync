@@ -38,6 +38,7 @@ pose3d = [
     "rtmlib",
 ]
 portal = [
+    "eeg-video-sync[video,pose3d,gaze]",
     "fastapi>=0.115.0",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30.0",
