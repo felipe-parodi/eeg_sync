@@ -90,18 +90,18 @@ Run the portal on the workstation:
 
 ```powershell
 cd "C:\Users\Felipe Parodi\Documents\ext_repos\eeg_sync"
-$env:PORTAL_PASSWORD = "<choose-a-shared-password>"
-$env:PORTAL_SECRET_KEY = [Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
-$env:PORTAL_HOST = "127.0.0.1"
-$env:PORTAL_PORT = "8080"
-.\.venv\Scripts\python.exe -m portal.app
+.\start-portal.ps1
 ```
 
-`PORTAL_PASSWORD` and `PORTAL_SECRET_KEY` are required. Do not commit either
-value to source control or send them in GitHub issues. The default cookie mode
-requires HTTPS, so use the tunnel URL for collaborator testing. For same-machine
-local HTTP testing only, set `$env:PORTAL_COOKIE_SECURE = "false"` before
-launching the portal.
+The script prompts for the portal password, then launches the portal. On the
+first run it generates `.portal_secret_key` (gitignored) for session cookie
+signing and reuses it on every subsequent run so existing browser sessions
+survive restarts.
+
+Do not commit `.portal_secret_key` or share the portal password in GitHub
+issues. The default cookie mode requires HTTPS, so use the tunnel URL for
+collaborator testing. For same-machine local HTTP testing only, set
+`$env:PORTAL_COOKIE_SECURE = "false"` before running the script.
 
 The portal uses one upload path: authenticated browser chunk uploads under
 `/uploads/*`. The older direct multipart `/submit` path is intentionally not
@@ -112,11 +112,9 @@ Only one processing job runs at a time in a portal process. If two researchers
 submit jobs together, the later job stays queued until the active GPU job
 finishes.
 
-If the package scripts are installed, this equivalent command is also available:
-
-```powershell
-video-processing-portal
-```
+To run without the script (e.g., from CI or a managed service), set
+`PORTAL_PASSWORD` and `PORTAL_SECRET_KEY` in the environment and invoke
+`video-processing-portal` directly.
 
 Leave that terminal running. In a second terminal, expose it with
 `localhost.run`:
