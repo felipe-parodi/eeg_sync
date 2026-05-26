@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-import smtplib
 import subprocess
 import sys
 import zipfile
 from dataclasses import asdict, dataclass, field
-from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -69,7 +67,6 @@ class PortalJobConfig:
 
     job_id: str
     session_id: str
-    email: str
     video_a: Path | None
     video_b: Path | None
     job_dir: Path
@@ -917,49 +914,6 @@ def make_result_zip(
                 zf.write(source_path, archive_path)
 
 
-def send_notification(
-    to_address: str,
-    subject: str,
-    body: str,
-    job_dir: Path,
-) -> None:
-    """Send an email notification or write a preview when SMTP is not configured.
-
-    Args:
-        to_address: Recipient email address.
-        subject: Message subject.
-        body: Message body.
-        job_dir: Job directory for fallback preview output.
-    """
-    smtp_host = os.environ.get("PORTAL_SMTP_HOST")
-    from_address = os.environ.get(
-        "PORTAL_EMAIL_FROM", "video-processing-portal@localhost"
-    )
-    if not smtp_host:
-        (job_dir / "email_preview.txt").write_text(
-            f"To: {to_address}\nSubject: {subject}\n\n{body}\n",
-            encoding="utf-8",
-        )
-        return
-
-    message = EmailMessage()
-    message["From"] = from_address
-    message["To"] = to_address
-    message["Subject"] = subject
-    message.set_content(body)
-
-    port = int(os.environ.get("PORTAL_SMTP_PORT", "587"))
-    username = os.environ.get("PORTAL_SMTP_USER")
-    password = os.environ.get("PORTAL_SMTP_PASSWORD")
-    smtp_cls = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
-    with smtp_cls(smtp_host, port, timeout=30) as smtp:
-        if port != 465 and os.environ.get("PORTAL_SMTP_STARTTLS", "true") != "false":
-            smtp.starttls()
-        if username and password:
-            smtp.login(username, password)
-        smtp.send_message(message)
-
-
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1069,16 +1023,6 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
                 "artifacts": artifacts,
             },
         )
-        send_notification(
-            to_address=config.email,
-            subject=f"Video processing portal results ready: {config.session_id}",
-            body=(
-                f"Results are ready for session {config.session_id}.\n\n"
-                f"Result archive: {zip_path}\n"
-                f"Job log: {log_path}\n"
-            ),
-            job_dir=config.job_dir,
-        )
     except Exception as error:
         write_status(
             config.job_dir,
@@ -1088,15 +1032,5 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
                 "current_step": None,
                 "log_path": str(log_path),
             },
-        )
-        send_notification(
-            to_address=config.email,
-            subject=f"Video processing portal job failed: {config.session_id}",
-            body=(
-                f"Processing failed for session {config.session_id}.\n\n"
-                f"Error: {error}\n"
-                f"Job log: {log_path}\n"
-            ),
-            job_dir=config.job_dir,
         )
         raise
