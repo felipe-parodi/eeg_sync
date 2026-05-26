@@ -558,4 +558,6 @@ def test_make_result_zip_excludes_frames_and_intermediate(tmp_path: Path) -> Non
     assert "P001c/camera_a/tracks_2d.csv" in names
     assert "P001c/camera_a/overlay_2min.mp4" in names
     assert not any("/frames/" in n for n in names), f"frames leaked: {names}"
-    assert not any("/intermediate/" in n for n in names), f"intermediate leaked: {names}"
+    assert not any(
+        "/intermediate/" in n for n in names
+    ), f"intermediate leaked: {names}"
