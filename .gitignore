@@ -26,6 +26,16 @@ __pycache__/
 *.so
 .cache/
 
+# Tool caches
+.black_cache/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.pytest_tmp*/
+
+# Logs
+*.log
+
 # Distribution / packaging
 build/
 dist/
