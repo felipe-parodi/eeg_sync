@@ -1330,6 +1330,29 @@ async def finish_chunked_upload(
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+def _find_overlay_video(job_dir: Path) -> Path | None:
+    """Locate the first overlay video produced for this job, if any.
+
+    Reads the session id from the job's upload metadata and globs the session
+    output directory for `overlay_*.mp4`. Returns None when the file is not
+    yet present (job still running or failed before the overlay step).
+    """
+    try:
+        meta = _read_upload_meta(job_dir)
+    except (FileNotFoundError, ValueError):
+        return None
+    session_id = meta.get("session_id")
+    if not session_id:
+        return None
+    session_dir = OUTPUT_ROOT / str(session_id)
+    if not session_dir.exists():
+        return None
+    for overlay in sorted(session_dir.rglob("overlay_*.mp4")):
+        if overlay.is_file():
+            return overlay
+    return None
+
+
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 def job_detail(
     job_id: str,
@@ -1346,7 +1369,17 @@ def job_detail(
     download = ""
     if result_zip and Path(result_zip).exists():
         download = (
-            f'<p><a href="/jobs/{safe_job_id}/download">Download results zip</a></p>'
+            f'<p class="cta"><a href="/jobs/{safe_job_id}/download">'
+            "Download results zip</a></p>"
+        )
+    overlay_block = ""
+    if _find_overlay_video(job_dir) is not None:
+        overlay_block = (
+            "<h3>Overlay preview</h3>"
+            f'<video controls preload="metadata" width="640" '
+            f'src="/jobs/{safe_job_id}/overlay">'
+            "Your browser does not support embedded video."
+            "</video>"
         )
     refresh_script = ""
     if status.get("state") in {"uploading", "queued", "running"}:
@@ -1364,6 +1397,7 @@ def job_detail(
   <p><strong>Status:</strong> {state}</p>
   <p><strong>Message:</strong> {message}</p>
   {download}
+  {overlay_block}
   {log_link}
   {refresh_script}
   <p><a href="/">Back to jobs</a></p>
@@ -1383,6 +1417,19 @@ def download_job(
     if not result_zip or not Path(result_zip).exists():
         raise HTTPException(status_code=404, detail="Result archive not available")
     return FileResponse(result_zip, filename=Path(result_zip).name)
+
+
+@app.get("/jobs/{job_id}/overlay")
+def overlay_video(
+    job_id: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> FileResponse:
+    """Stream the overlay preview video for a completed job."""
+    safe_job_id = _slug(job_id)
+    overlay = _find_overlay_video(JOB_ROOT / safe_job_id)
+    if overlay is None:
+        raise HTTPException(status_code=404, detail="Overlay not available")
+    return FileResponse(overlay, media_type="video/mp4", filename=overlay.name)
 
 
 @app.get("/jobs/{job_id}/log", response_class=HTMLResponse)
