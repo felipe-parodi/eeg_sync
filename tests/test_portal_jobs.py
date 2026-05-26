@@ -299,7 +299,6 @@ def test_build_submission_metadata_preserves_raw_and_parsed_inputs() -> None:
         job_id="job-001",
         created_at="2026-05-14T13:00:00",
         safe_session_id="P001c",
-        email="researcher@example.edu",
         blocks_text="free_play,1:00,2:00,green",
         exclusions_text="1:20,1:30,experimenter entered",
         video_a_name="gopro_a.mov",
@@ -311,7 +310,7 @@ def test_build_submission_metadata_preserves_raw_and_parsed_inputs() -> None:
 
     assert metadata["portal_name"] == "Video Processing Portal"
     assert metadata["session_id"] == "P001c"
-    assert metadata["email"] == "researcher@example.edu"
+    assert "email" not in metadata
     assert metadata["raw_inputs"]["analysis_blocks_text"] == "free_play,1:00,2:00,green"
     assert metadata["raw_inputs"]["analysis_blocks_text_a"] == (
         "free_play,1:00,2:00,green"
@@ -349,7 +348,6 @@ def test_build_submission_metadata_allows_video_b_to_be_omitted() -> None:
         job_id="job-001",
         created_at="2026-05-14T13:00:00",
         safe_session_id="P001c",
-        email="researcher@example.edu",
         blocks_text="free_play,1:00,2:00,green",
         exclusions_text="",
         video_a_name="gopro_a.mov",
@@ -369,7 +367,6 @@ def test_build_submission_metadata_requires_one_video() -> None:
             job_id="job-001",
             created_at="2026-05-14T13:00:00",
             safe_session_id="P001c",
-            email="researcher@example.edu",
             blocks_text="free_play,1:00,2:00,green",
             exclusions_text="",
             video_a_name="",
@@ -392,7 +389,6 @@ def test_build_submission_metadata_rejects_oversize_upload(monkeypatch) -> None:
             job_id="job-001",
             created_at="2026-05-14T13:00:00",
             safe_session_id="P001c",
-            email="researcher@example.edu",
             blocks_text="free_play,1:00,2:00,green",
             exclusions_text="",
             video_a_name="gopro_a.mov",
@@ -462,7 +458,6 @@ def test_build_processing_steps_passes_explicit_pipeline_inputs(tmp_path: Path) 
     job_config = PortalJobConfig(
         job_id="job-001",
         session_id="P001c",
-        email="researcher@example.edu",
         video_a=tmp_path / "camera_a_rapid.mp4",
         video_b=tmp_path / "camera_b_rapid.mp4",
         job_dir=tmp_path / "job-001",
@@ -500,7 +495,6 @@ def test_build_processing_steps_supports_single_camera_a(tmp_path: Path) -> None
     job_config = PortalJobConfig(
         job_id="job-001",
         session_id="P001c",
-        email="researcher@example.edu",
         video_a=tmp_path / "camera_a_rapid.mp4",
         video_b=None,
         job_dir=tmp_path / "job-001",
@@ -532,7 +526,6 @@ def test_build_processing_steps_supports_single_camera_b_with_own_blocks(
     job_config = PortalJobConfig(
         job_id="job-001",
         session_id="P001c",
-        email="researcher@example.edu",
         video_a=None,
         video_b=tmp_path / "camera_b_rapid.mp4",
         job_dir=tmp_path / "job-001",

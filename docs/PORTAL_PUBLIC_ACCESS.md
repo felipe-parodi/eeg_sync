@@ -65,7 +65,7 @@ The result zip also includes the metadata under:
 <session_id>/portal_metadata/job.log
 ```
 
-`submission_metadata.json` records the session ID, email, original video
+`submission_metadata.json` records the session ID, original video
 filenames and sizes, raw analysis-block text, parsed analysis blocks,
 extra-person windows, post-exclusion analysis blocks, upload chunk settings, and
 processing settings such as pose backend, tracker, frame rate, compression

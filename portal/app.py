@@ -453,7 +453,6 @@ def build_submission_metadata(
     job_id: str,
     created_at: str,
     safe_session_id: str,
-    email: str,
     blocks_text: str,
     exclusions_text: str,
     video_a_name: str,
@@ -469,7 +468,6 @@ def build_submission_metadata(
         job_id: Portal job identifier.
         created_at: Timestamp for job creation.
         safe_session_id: Sanitized session identifier.
-        email: Notification email supplied by the user.
         blocks_text: Raw analysis block text for camera A from the form.
         exclusions_text: Raw extra-person window text from the form.
         video_a_name: Browser-provided filename for camera A.
@@ -541,7 +539,6 @@ def build_submission_metadata(
         "job_id": job_id,
         "created_at": created_at,
         "session_id": safe_session_id,
-        "email": email,
         "raw_inputs": {
             "analysis_blocks_text": blocks_text,
             "analysis_blocks_text_a": blocks_text_a,
@@ -663,7 +660,6 @@ def _config_from_chunked_upload(
     return PortalJobConfig(
         job_id=safe_job_id,
         session_id=meta["session_id"],
-        email=meta["email"],
         video_a=video_a_path,
         video_b=video_b_path,
         job_dir=job_dir,
@@ -842,9 +838,6 @@ def index(session_token: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
 <form id="upload-form">
   <label for="session_id">Session ID {_info_icon("Use the participant/session name that should appear on outputs.")}</label>
   <input id="session_id" name="session_id" type="text" required placeholder="P001c">
-
-  <label for="email">Notification Email {_info_icon("The portal emails this address when processing finishes or fails.")}</label>
-  <input id="email" name="email" type="email" required placeholder="researcher@example.edu">
 
   <div class="warning"><strong>Upload at least one GoPro video.</strong> Video A and Video B are both supported, but one camera can be omitted when only one recording is available.</div>
 
@@ -1148,7 +1141,6 @@ form.addEventListener("submit", async (event) => {{
 async def init_chunked_upload(
     _: Annotated[str, Depends(require_csrf)],
     session_id: Annotated[str, Form()],
-    email: Annotated[str, Form()],
     video_a_name: Annotated[str, Form()] = "",
     video_b_name: Annotated[str, Form()] = "",
     video_a_size: Annotated[int, Form()] = 0,
@@ -1192,7 +1184,6 @@ async def init_chunked_upload(
             job_id=job_id,
             created_at=datetime.now().isoformat(timespec="seconds"),
             safe_session_id=safe_session_id,
-            email=email,
             blocks_text=resolved_blocks_text_a,
             blocks_text_b=resolved_blocks_text_b,
             exclusions_text=exclusions_text,
