@@ -93,15 +93,28 @@ cd "C:\Users\Felipe Parodi\Documents\ext_repos\eeg_sync"
 .\start-portal.ps1
 ```
 
-The script prompts for the portal password, then launches the portal. On the
-first run it generates `.portal_secret_key` (gitignored) for session cookie
-signing and reuses it on every subsequent run so existing browser sessions
-survive restarts.
+The script prompts for the portal password, starts an SSH reverse tunnel via
+`localhost.run` in the background, prints the public `https://*.lhr.life` URL
+to share with collaborators, then launches the portal in the foreground. On
+the first run it generates `.portal_secret_key` (gitignored) for session
+cookie signing and reuses it on every subsequent run so existing browser
+sessions survive restarts. Stale jobs left in the "uploading" state from a
+prior run are purged on startup.
+
+The tunnel URL is fresh every run; do not bookmark it. Send the URL and
+portal password to the collaborator through a private channel.
+
+For same-machine local HTTP testing only, run with `-NoTunnel` and set
+`$env:PORTAL_COOKIE_SECURE = "false"` before launching:
+
+```powershell
+$env:PORTAL_COOKIE_SECURE = "false"
+.\start-portal.ps1 -NoTunnel
+```
 
 Do not commit `.portal_secret_key` or share the portal password in GitHub
-issues. The default cookie mode requires HTTPS, so use the tunnel URL for
-collaborator testing. For same-machine local HTTP testing only, set
-`$env:PORTAL_COOKIE_SECURE = "false"` before running the script.
+issues. The default cookie mode requires HTTPS, which is why the `lhr.life`
+tunnel (TLS-terminated) is the supported collaborator path.
 
 The portal uses one upload path: authenticated browser chunk uploads under
 `/uploads/*`. The older direct multipart `/submit` path is intentionally not
@@ -115,21 +128,6 @@ finishes.
 To run without the script (e.g., from CI or a managed service), set
 `PORTAL_PASSWORD` and `PORTAL_SECRET_KEY` in the environment and invoke
 `video-processing-portal` directly.
-
-Leave that terminal running. In a second terminal, expose it with
-`localhost.run`:
-
-```powershell
-ssh -o StrictHostKeyChecking=no -R 80:127.0.0.1:8080 nokey@localhost.run
-```
-
-The command prints a temporary URL such as:
-
-```text
-https://9613cd5b45daf2.lhr.life
-```
-
-Send that URL and the password to the collaborator.
 
 ## LLM Launch Steps
 

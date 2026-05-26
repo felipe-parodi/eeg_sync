@@ -67,6 +67,45 @@ def test_portal_password_and_secret_must_be_configured(monkeypatch) -> None:
         portal_app.portal_secret_key()
 
 
+def test_cleanup_stale_uploads_removes_only_uploading_jobs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    job_root = tmp_path / "jobs"
+    upload_root = tmp_path / "uploads"
+    job_root.mkdir()
+    upload_root.mkdir()
+
+    stale_id = "20260101_000000_PXXX_stale"
+    finished_id = "20260101_000001_PXXX_done"
+    for job_id, state in [(stale_id, "uploading"), (finished_id, "completed")]:
+        job_dir = job_root / job_id
+        job_dir.mkdir()
+        write_status(job_dir, {"state": state, "message": "x"})
+        upload_dir = upload_root / job_id
+        upload_dir.mkdir()
+        (upload_dir / "chunk_0001.part").write_bytes(b"partial")
+
+    monkeypatch.setattr(portal_app, "JOB_ROOT", job_root)
+    monkeypatch.setattr(portal_app, "UPLOAD_ROOT", upload_root)
+
+    removed = portal_app.cleanup_stale_uploads()
+
+    assert removed == 1
+    assert not (job_root / stale_id).exists()
+    assert not (upload_root / stale_id).exists()
+    assert (job_root / finished_id).exists()
+    assert (upload_root / finished_id).exists()
+
+
+def test_cleanup_stale_uploads_handles_missing_job_root(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path / "does_not_exist")
+    monkeypatch.setattr(portal_app, "UPLOAD_ROOT", tmp_path / "uploads")
+
+    assert portal_app.cleanup_stale_uploads() == 0
+
+
 def test_login_sets_expiring_secure_session_cookie(monkeypatch) -> None:
     monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
     monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
