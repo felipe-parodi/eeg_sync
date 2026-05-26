@@ -93,14 +93,25 @@ cd "C:\Users\Felipe Parodi\Documents\ext_repos\eeg_sync"
 .\start-portal.ps1
 ```
 
-The script prompts for the portal password, starts an SSH reverse tunnel via
-`localhost.run` in the background, prints the public `https://*.lhr.life` URL
-to share with collaborators, then launches the portal in the foreground. On
-the first run it generates `.portal_secret_key` (gitignored) for session
-cookie signing and reuses it on every subsequent run so existing browser
-sessions survive restarts. **Every job from a prior run is wiped on startup**
-(uploads, completed downloads, and failed-job logs alike). Restart only when
-no in-flight job results need to be preserved.
+The script prompts for the portal password, starts a public tunnel in the
+background, prints the URL to share with collaborators, then launches the
+portal in the foreground. Tunnel selection:
+
+- **Prefers `cloudflared`** (Cloudflare Quick Tunnel, `*.trycloudflare.com`).
+  The URL is stable for the lifetime of the cloudflared process, so it does
+  not rotate mid-session. Install from
+  https://github.com/cloudflare/cloudflared/releases.
+- **Falls back to `ssh` + `localhost.run`** (`*.lhr.life`) if cloudflared is
+  not installed. Anonymous `lhr.life` tunnels rotate roughly hourly; a
+  collaborator connected past that point will need a refreshed URL.
+- **Falls back to local-only** if neither tool is available.
+
+On the first run the script generates `.portal_secret_key` (gitignored)
+for session cookie signing and reuses it on every subsequent run so
+existing browser sessions survive restarts.
+**Every job from a prior run is wiped on startup** (uploads, completed
+downloads, and failed-job logs alike). Restart only when no in-flight
+job results need to be preserved.
 
 The tunnel URL is fresh every run; do not bookmark it. Send the URL and
 portal password to the collaborator through a private channel.
@@ -114,8 +125,9 @@ $env:PORTAL_COOKIE_SECURE = "false"
 ```
 
 Do not commit `.portal_secret_key` or share the portal password in GitHub
-issues. The default cookie mode requires HTTPS, which is why the `lhr.life`
-tunnel (TLS-terminated) is the supported collaborator path.
+issues. The default cookie mode requires HTTPS, which is why the tunnel
+(TLS-terminated by Cloudflare or localhost.run) is the supported
+collaborator path.
 
 The portal uses one upload path: authenticated browser chunk uploads under
 `/uploads/*`. The older direct multipart `/submit` path is intentionally not
