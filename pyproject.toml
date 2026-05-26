@@ -93,6 +93,9 @@ exclude = "third_party"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --tb=short"
+markers = [
+    "smoke: end-to-end tests that run real inference. Enable with RUN_SMOKE_TESTS=1.",
+]
 
 [tool.coverage.run]
 source = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis"]
