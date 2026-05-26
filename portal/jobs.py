@@ -82,7 +82,7 @@ class PortalJobConfig:
     image_width: int = PORTAL_DEFAULT_IMAGE_WIDTH
     image_height: int = PORTAL_DEFAULT_IMAGE_HEIGHT
     max_persons: int = PORTAL_DEFAULT_MAX_PERSONS
-    device: str = "auto"
+    device: str = "cuda"
     model_path: str = PORTAL_DEFAULT_MODEL_PATH
     overlay_seconds: float = PORTAL_DEFAULT_OVERLAY_SECONDS
 
