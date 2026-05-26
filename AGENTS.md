@@ -27,9 +27,17 @@ pip install -e ".[dev,video]"             # with dev tools + video stack
 conda env create -f environment.yml       # full conda env (includes ffmpeg)
 
 # Tests
-pytest -q                                 # all tests, quiet
+pytest -q                                 # all tests, quiet (smoke tests skip)
 pytest tests/test_sync_eeg_vid.py -v      # single module
 pytest tests/test_sync_eeg_vid.py::test_find_sync_pulse_from_csv -v  # single test
+
+# End-to-end smoke tests (run the real pipeline on a real compressed video).
+# Skipped by default. Set RUN_SMOKE_TESTS=1 and optionally point SMOKE_VIDEO_PATH
+# at a compressed mp4 outside the repo:
+#   PowerShell:
+#     $env:RUN_SMOKE_TESTS = "1"
+#     $env:SMOKE_VIDEO_PATH = "C:\path\to\sample.mp4"   # optional
+#     uv run pytest tests/test_smoke_end_to_end.py
 
 # Lint & format
 ruff check .                              # lint
