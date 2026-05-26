@@ -9,6 +9,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import uuid
@@ -82,10 +83,43 @@ def validate_startup_configuration() -> None:
     portal_secret_key()
 
 
+def cleanup_stale_uploads() -> int:
+    """Remove jobs that never finished uploading.
+
+    Returns:
+        Number of stale jobs removed.
+
+    Note:
+        Server restarts drop all in-memory upload session state (chunk
+        receipts, expected sizes), so a job left in the "uploading" state
+        from a prior run can never resume. Purge both the job directory and
+        the matching upload-chunk directory so the dashboard stays clean.
+    """
+    if not JOB_ROOT.exists():
+        return 0
+    removed = 0
+    for status_path in JOB_ROOT.glob("*/status.json"):
+        job_dir = status_path.parent
+        try:
+            status = read_status(job_dir)
+        except Exception:
+            continue
+        if status.get("state") != "uploading":
+            continue
+        upload_dir = UPLOAD_ROOT / job_dir.name
+        shutil.rmtree(job_dir, ignore_errors=True)
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        removed += 1
+    return removed
+
+
 @asynccontextmanager
 async def portal_lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Validate portal configuration before accepting requests."""
+    """Validate portal configuration and purge stale uploads on startup."""
     validate_startup_configuration()
+    removed = cleanup_stale_uploads()
+    if removed:
+        print(f"Removed {removed} stale upload(s) from a previous run.")
     yield
 
 
