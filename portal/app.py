@@ -700,7 +700,12 @@ def _run_with_job_lock(job_dir: Path, action: Callable[[], None]) -> None:
 
 
 def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) -> None:
-    """Assemble chunked uploads and run the portal pipeline."""
+    """Assemble chunked uploads and run the portal pipeline.
+
+    Runs as a FastAPI BackgroundTask, so any unhandled exception is logged by
+    starlette as a noisy ASGI traceback. Catch every failure, record it on
+    the job's status.json, and log a single concise line for the operator.
+    """
     try:
 
         def action() -> None:
@@ -731,7 +736,11 @@ def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) ->
                 "current_step": None,
             },
         )
-        raise
+        log_path = job_dir / "job.log"
+        print(
+            f"Job {safe_job_id} failed. See {log_path} for the full subprocess log.",
+            flush=True,
+        )
 
 
 def _job_rows() -> str:

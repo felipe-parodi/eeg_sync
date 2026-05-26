@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZipFile
@@ -104,6 +105,30 @@ def test_cleanup_stale_uploads_handles_missing_job_root(
     monkeypatch.setattr(portal_app, "UPLOAD_ROOT", tmp_path / "uploads")
 
     assert portal_app.cleanup_stale_uploads() == 0
+
+
+def test_run_chunked_portal_job_records_failure_and_does_not_raise(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    job_dir = tmp_path / "job"
+    upload_dir = tmp_path / "upload"
+    job_dir.mkdir()
+    upload_dir.mkdir()
+    safe_job_id = "20260101_000000_PXXX_test"
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated subprocess failure")
+
+    monkeypatch.setattr(portal_app, "_read_upload_meta", boom)
+
+    portal_app.run_chunked_portal_job(safe_job_id, upload_dir, job_dir)
+
+    status = json.loads((job_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert "simulated subprocess failure" in status["message"]
+    captured = capsys.readouterr()
+    assert safe_job_id in captured.out
+    assert "failed" in captured.out.lower()
 
 
 def test_login_sets_expiring_secure_session_cookie(monkeypatch) -> None:
