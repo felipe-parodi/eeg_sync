@@ -104,9 +104,7 @@ def test_purge_all_jobs_removes_every_job_regardless_of_state(
     assert loose_log.exists()
 
 
-def test_purge_all_jobs_handles_missing_job_root(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_purge_all_jobs_handles_missing_job_root(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path / "does_not_exist")
     monkeypatch.setattr(portal_app, "UPLOAD_ROOT", tmp_path / "uploads")
 
