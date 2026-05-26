@@ -98,8 +98,9 @@ The script prompts for the portal password, starts an SSH reverse tunnel via
 to share with collaborators, then launches the portal in the foreground. On
 the first run it generates `.portal_secret_key` (gitignored) for session
 cookie signing and reuses it on every subsequent run so existing browser
-sessions survive restarts. Stale jobs left in the "uploading" state from a
-prior run are purged on startup.
+sessions survive restarts. **Every job from a prior run is wiped on startup**
+(uploads, completed downloads, and failed-job logs alike). Restart only when
+no in-flight job results need to be preserved.
 
 The tunnel URL is fresh every run; do not bookmark it. Send the URL and
 portal password to the collaborator through a private channel.

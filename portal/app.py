@@ -83,28 +83,23 @@ def validate_startup_configuration() -> None:
     portal_secret_key()
 
 
-def cleanup_stale_uploads() -> int:
-    """Remove jobs that never finished uploading.
+def purge_all_jobs() -> int:
+    """Delete every job directory and matching upload-chunk directory.
 
     Returns:
-        Number of stale jobs removed.
+        Number of job directories removed.
 
     Note:
-        Server restarts drop all in-memory upload session state (chunk
-        receipts, expected sizes), so a job left in the "uploading" state
-        from a prior run can never resume. Purge both the job directory and
-        the matching upload-chunk directory so the dashboard stays clean.
+        Restarting the portal is treated as a clean slate: no job state,
+        completed downloads, or failed-job logs survive. Only direct
+        subdirectories under JOB_ROOT/UPLOAD_ROOT are removed; loose log
+        files (tunnel, server) are left alone.
     """
     if not JOB_ROOT.exists():
         return 0
     removed = 0
-    for status_path in JOB_ROOT.glob("*/status.json"):
-        job_dir = status_path.parent
-        try:
-            status = read_status(job_dir)
-        except Exception:
-            continue
-        if status.get("state") != "uploading":
+    for job_dir in JOB_ROOT.iterdir():
+        if not job_dir.is_dir():
             continue
         upload_dir = UPLOAD_ROOT / job_dir.name
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -115,11 +110,11 @@ def cleanup_stale_uploads() -> int:
 
 @asynccontextmanager
 async def portal_lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Validate portal configuration and purge stale uploads on startup."""
+    """Validate portal configuration and wipe all jobs on startup."""
     validate_startup_configuration()
-    removed = cleanup_stale_uploads()
+    removed = purge_all_jobs()
     if removed:
-        print(f"Removed {removed} stale upload(s) from a previous run.")
+        print(f"Purged {removed} job(s) from a previous run.")
     yield
 
 
