@@ -184,3 +184,11 @@ def test_run_portal_job_end_to_end_on_compressed_video(tmp_path: Path) -> None:
     ).exists(), f"tracks_2d.csv missing under {camera_dir}.\njob.log:\n{log_excerpt}"
     assert (camera_dir / "pose_3d.csv").exists()
     assert (camera_dir / "manifest.json").exists()
+    # Downstream stages: filter -> smooth -> metrics -> overlay video. Each is
+    # a separate subprocess, so a regression in any one breaks one of these.
+    assert (camera_dir / "tracks_2d_filtered.csv").exists()
+    assert (camera_dir / "tracks_2d_smooth.csv").exists()
+    assert (camera_dir / "pose_metrics_summary.json").exists()
+    overlay = camera_dir / "overlay_2min.mp4"
+    assert overlay.exists(), f"overlay video missing under {camera_dir}"
+    assert overlay.stat().st_size > 0, "overlay video is empty"
