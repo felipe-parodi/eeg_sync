@@ -245,3 +245,161 @@ def test_filter_tracks_treats_adjacent_blocks_as_half_open(tmp_path):
 
     assert filtered["timestamp_s"].tolist().count(11.0) == 2
     assert len(filtered) == 8
+
+
+# ---------------------------------------------------------------------------
+# Tests: bbox-area continuity re-link
+# ---------------------------------------------------------------------------
+
+
+def _swap_tracks_df_with_crossover(
+    n_frames: int = 60,
+    crossover_frame: int = 30,
+    parent_id: int = 10,
+    child_id: int = 20,
+    parent_size: float = 220.0,
+    child_size: float = 90.0,
+    fps: float = 30.0,
+) -> pd.DataFrame:
+    """Synthetic tracks where IDs swap at ``crossover_frame``.
+
+    Before ``crossover_frame``: parent_id has parent_size bbox, child_id has
+    child_size bbox. After ``crossover_frame``: the IDs swap.
+    """
+    rows = []
+    for f in range(n_frames):
+        if f < crossover_frame:
+            big_id, small_id = parent_id, child_id
+        else:
+            big_id, small_id = child_id, parent_id
+        for tid, size in ((big_id, parent_size), (small_id, child_size)):
+            rows.append(
+                {
+                    "frame_idx": f,
+                    "timestamp_s": f / fps,
+                    "track_id": tid,
+                    "track_label": f"person_{tid:02d}",
+                    "bbox_x1": 100.0,
+                    "bbox_y1": 100.0,
+                    "bbox_x2": 100.0 + size,
+                    "bbox_y2": 100.0 + size,
+                    "track_confidence": 0.9,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_filter_tracks_relinks_id_swap(tmp_path):
+    """When ByteTrack swaps parent/child IDs mid-block, the filter corrects it.
+
+    Before the fix, post-swap frames where original_id == parent_id (now
+    actually the child) would be labeled "parent". After re-link, role
+    follows bbox size at every frame.
+    """
+    from video_analysis.track_filter import filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+
+    # 10s block, crossover at 5s — anchor window (default 4s) sees only the
+    # pre-crossover assignment, so the size signal stays clean.
+    df = _swap_tracks_df_with_crossover(
+        n_frames=300, crossover_frame=150, parent_size=220.0, child_size=90.0
+    )
+    df.to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[BlockDef("test_block", "0:00", "0:10")],
+        source_fps=30.0,
+        n_keep=2,
+    )
+    summary = filter_tracks(cfg)
+
+    assert summary["blocks"][0]["relink_swaps"], "expected at least one swap range"
+
+    filtered = pd.read_csv(cam_dir / "tracks_2d_filtered.csv")
+    parent_rows = filtered[filtered["track_id"] == 0]
+    child_rows = filtered[filtered["track_id"] == 1]
+
+    parent_areas = (parent_rows["bbox_x2"] - parent_rows["bbox_x1"]) * (
+        parent_rows["bbox_y2"] - parent_rows["bbox_y1"]
+    )
+    child_areas = (child_rows["bbox_x2"] - child_rows["bbox_x1"]) * (
+        child_rows["bbox_y2"] - child_rows["bbox_y1"]
+    )
+    # After re-link, every parent row should carry the larger bbox area.
+    assert parent_areas.min() > child_areas.max()
+
+
+def test_filter_tracks_relink_propagates_to_pose(tmp_path):
+    """The same swap correction must be applied to pose_3d_filtered.csv."""
+    from video_analysis.track_filter import filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+
+    df = _swap_tracks_df_with_crossover(n_frames=300, crossover_frame=150)
+    df.to_csv(cam_dir / "tracks_2d.csv", index=False)
+    # Pose CSV: one keypoint per (frame, track) carrying a track-identifying
+    # coordinate so we can check the swap got applied.
+    pose_rows = []
+    for _, r in df.iterrows():
+        pose_rows.append(
+            {
+                "frame_idx": int(r["frame_idx"]),
+                "timestamp_s": float(r["timestamp_s"]),
+                "track_id": int(r["track_id"]),
+                "kp_idx": 0,
+                "x": float(r["bbox_x2"]) - float(r["bbox_x1"]),  # carries size
+                "y": 0.0,
+                "z": 0.0,
+                "confidence": 0.9,
+            }
+        )
+    pd.DataFrame(pose_rows).to_csv(cam_dir / "pose_3d.csv", index=False)
+
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[BlockDef("test_block", "0:00", "0:10")],
+        source_fps=30.0,
+        n_keep=2,
+    )
+    filter_tracks(cfg)
+
+    filtered_pose = pd.read_csv(cam_dir / "pose_3d_filtered.csv")
+    parent_x = filtered_pose[filtered_pose["track_id"] == 0]["x"]
+    child_x = filtered_pose[filtered_pose["track_id"] == 1]["x"]
+    # x carries bbox size; after re-link parent_x should always be larger.
+    assert parent_x.min() > child_x.max()
+
+
+def test_filter_tracks_no_relink_when_size_signal_too_weak(tmp_path):
+    """If parent and child have similar bbox sizes, relink should not act."""
+    from video_analysis.track_filter import filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+
+    # Two tracks with very similar areas (110 vs 100) — below the 1.3 ratio
+    # gate. Even with a synthetic crossover, the filter shouldn't intervene.
+    df = _swap_tracks_df_with_crossover(
+        n_frames=300, crossover_frame=150, parent_size=110.0, child_size=100.0
+    )
+    df.to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[BlockDef("test_block", "0:00", "0:10")],
+        source_fps=30.0,
+        n_keep=2,
+    )
+    summary = filter_tracks(cfg)
+
+    assert summary["blocks"][0]["relink_swaps"] == []
