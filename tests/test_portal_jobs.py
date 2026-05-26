@@ -532,3 +532,32 @@ def test_make_result_zip_includes_portal_metadata(tmp_path: Path) -> None:
     with ZipFile(zip_path) as archive:
         assert "P001c/camera_a/tracks_2d.csv" in archive.namelist()
         assert "P001c/portal_metadata/submission_metadata.json" in archive.namelist()
+
+
+def test_make_result_zip_excludes_frames_and_intermediate(tmp_path: Path) -> None:
+    """Intermediate artifacts (extracted JPEGs, raw inference JSON) must not
+    be bundled into the colleague-facing zip."""
+    session_dir = tmp_path / "output" / "P001c"
+    camera_dir = session_dir / "camera_a"
+    frames_dir = camera_dir / "frames"
+    intermediate_dir = camera_dir / "intermediate"
+    frames_dir.mkdir(parents=True)
+    intermediate_dir.mkdir()
+
+    (camera_dir / "tracks_2d.csv").write_text("frame_idx,track_id\n", encoding="utf-8")
+    (camera_dir / "overlay_2min.mp4").write_bytes(b"\x00")
+    (frames_dir / "frame_000001.jpg").write_bytes(b"\xff\xd8\xff")
+    (frames_dir / "frame_index.csv").write_text("frame_idx\n1\n", encoding="utf-8")
+    (intermediate_dir / "inference_raw.json").write_text("{}", encoding="utf-8")
+
+    zip_path = tmp_path / "job" / "P001c_results.zip"
+    make_result_zip(session_output_dir=session_dir, zip_path=zip_path)
+
+    with ZipFile(zip_path) as archive:
+        names = archive.namelist()
+    assert "P001c/camera_a/tracks_2d.csv" in names
+    assert "P001c/camera_a/overlay_2min.mp4" in names
+    assert not any("/frames/" in n for n in names), f"frames leaked: {names}"
+    assert not any(
+        "/intermediate/" in n for n in names
+    ), f"intermediate leaked: {names}"

@@ -890,12 +890,21 @@ def run_command_step(step: CommandStep, cwd: Path, log_path: Path) -> None:
         )
 
 
+RESULT_ZIP_EXCLUDED_DIRS = frozenset({"frames", "intermediate"})
+
+
 def make_result_zip(
     session_output_dir: Path,
     zip_path: Path,
     extra_files: Iterable[tuple[Path, Path]] | None = None,
 ) -> None:
     """Create a zip archive of the session outputs.
+
+    Skips intermediate artifacts the colleague never opens: extracted
+    JPEG frames under any ``frames/`` directory and the raw inference
+    JSON under any ``intermediate/`` directory. These can be hundreds
+    of MB at 8 fps over a 10-minute block; the per-frame information
+    is already encoded in the CSVs that *are* included.
 
     Args:
         session_output_dir: Directory to package.
@@ -907,8 +916,12 @@ def make_result_zip(
         zip_path.unlink()
     with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for path in session_output_dir.rglob("*"):
-            if path.is_file():
-                zf.write(path, path.relative_to(session_output_dir.parent))
+            if not path.is_file():
+                continue
+            rel = path.relative_to(session_output_dir)
+            if any(part in RESULT_ZIP_EXCLUDED_DIRS for part in rel.parts):
+                continue
+            zf.write(path, path.relative_to(session_output_dir.parent))
         for source_path, archive_path in extra_files or []:
             if source_path.exists():
                 zf.write(source_path, archive_path)

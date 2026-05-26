@@ -156,7 +156,6 @@ def test_run_portal_job_end_to_end_on_compressed_video(tmp_path: Path) -> None:
     config = PortalJobConfig(
         job_id=job_id,
         session_id=session_id,
-        email="",
         video_a=staged_video,
         video_b=None,
         job_dir=job_dir,
