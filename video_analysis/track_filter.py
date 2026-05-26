@@ -34,6 +34,12 @@ class TrackFilterConfig:
     blocks: List[BlockDef] = field(default_factory=list)
     source_fps: float = 30.0
     n_keep: int = 2
+    # Area-continuity re-link: detect frames where the tracker appears to have
+    # swapped the parent/child ID and correct them in place before role
+    # assignment. Set anchor_seconds <= 0 to disable.
+    relink_anchor_seconds: float = 4.0
+    relink_min_run_seconds: float = 0.5
+    relink_min_size_ratio: float = 1.3
 
 
 def _parse_time(time_str: str) -> float:
@@ -56,6 +62,113 @@ def _bbox_area(row: pd.Series) -> float:
     w = max(0.0, float(row["bbox_x2"]) - float(row["bbox_x1"]))
     h = max(0.0, float(row["bbox_y2"]) - float(row["bbox_y1"]))
     return w * h
+
+
+def _detect_track_swaps(
+    block: pd.DataFrame,
+    track_a: int,
+    track_b: int,
+    anchor_seconds: float,
+    min_run_seconds: float,
+    min_size_ratio: float,
+) -> List[Tuple[float, float]]:
+    """Detect timestamp ranges where two tracks look like they have swapped.
+
+    Strategy: anchor each track's "true" bbox area from the first
+    ``anchor_seconds`` of frames where it appears. For every subsequent
+    frame in which both tracks are present, the assignment is "swapped" if
+    re-pairing the two area observations with the opposite anchor produces
+    a lower total absolute-area error than the original pairing. Single-
+    frame flips are ignored; only runs of at least ``min_run_seconds``
+    are kept.
+
+    Args:
+        block: Track rows for one analysis block (raw, not yet role-remapped).
+        track_a: Original tracker id for the apparently larger person.
+        track_b: Original tracker id for the apparently smaller person.
+        anchor_seconds: Window at the start of each track used to fix its
+            anchor bbox area.
+        min_run_seconds: Minimum sustained swap duration to act on.
+        min_size_ratio: If the two anchors are within this ratio of each
+            other (e.g. 1.3 means within 30%), the size signal is too weak
+            to discriminate — skip detection entirely.
+
+    Returns:
+        List of ``(start_s, end_s)`` timestamp ranges (inclusive on both
+        ends) over which ``track_a`` and ``track_b`` should be swapped.
+    """
+    sub = block[block["track_id"].isin([track_a, track_b])].copy()
+    if sub.empty:
+        return []
+    sub["_area"] = sub.apply(_bbox_area, axis=1)
+
+    def _anchor(tid: int) -> float:
+        rows = sub[sub["track_id"] == tid].sort_values("timestamp_s")
+        if rows.empty:
+            return float("nan")
+        t0 = rows["timestamp_s"].iloc[0]
+        window = rows[rows["timestamp_s"] <= t0 + anchor_seconds]
+        return float(window["_area"].mean())
+
+    anchor_a = _anchor(track_a)
+    anchor_b = _anchor(track_b)
+    if pd.isna(anchor_a) or pd.isna(anchor_b):
+        return []
+    larger = max(anchor_a, anchor_b)
+    smaller = min(anchor_a, anchor_b)
+    if smaller <= 0 or larger / smaller < min_size_ratio:
+        return []
+
+    paired = sub.pivot_table(
+        index="timestamp_s",
+        columns="track_id",
+        values="_area",
+        aggfunc="first",
+    ).dropna(subset=[track_a, track_b])
+    if paired.empty:
+        return []
+
+    orig_cost = (paired[track_a] - anchor_a).abs() + (paired[track_b] - anchor_b).abs()
+    swap_cost = (paired[track_a] - anchor_b).abs() + (paired[track_b] - anchor_a).abs()
+    is_swapped = swap_cost < orig_cost
+
+    runs: List[Tuple[float, float]] = []
+    run_start: float | None = None
+    prev_ts: float | None = None
+    timestamps = paired.index.tolist()
+    for ts in timestamps:
+        if bool(is_swapped.loc[ts]):
+            if run_start is None:
+                run_start = float(ts)
+            prev_ts = float(ts)
+        else:
+            if run_start is not None and prev_ts is not None:
+                if prev_ts - run_start >= min_run_seconds:
+                    runs.append((run_start, prev_ts))
+            run_start = None
+            prev_ts = None
+    if run_start is not None and prev_ts is not None:
+        if prev_ts - run_start >= min_run_seconds:
+            runs.append((run_start, prev_ts))
+
+    return runs
+
+
+def _apply_track_swaps(
+    df: pd.DataFrame,
+    track_a: int,
+    track_b: int,
+    swap_ranges: List[Tuple[float, float]],
+) -> None:
+    """In-place: swap ``track_a`` and ``track_b`` ids over the given ranges."""
+    if not swap_ranges:
+        return
+    for start_s, end_s in swap_ranges:
+        in_range = (df["timestamp_s"] >= start_s) & (df["timestamp_s"] <= end_s)
+        flip_a = in_range & (df["track_id"] == track_a)
+        flip_b = in_range & (df["track_id"] == track_b)
+        df.loc[flip_a, "track_id"] = track_b
+        df.loc[flip_b, "track_id"] = track_a
 
 
 def _rank_tracks_by_persistence(
@@ -149,6 +262,7 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
         raise FileNotFoundError(f"Tracks CSV not found: {tracks_path}")
 
     tracks_df = pd.read_csv(tracks_path)
+    pose_df = pd.read_csv(pose_path) if pose_path.exists() else None
     blocks = config.blocks or []
 
     # Build block time ranges and track mappings.
@@ -156,9 +270,43 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
     # Collect (start_s, end_s, {old_id: new_id}) per block.
     block_remaps: List[Tuple[float, float, Dict[int, int]]] = []
 
+    relink_enabled = config.relink_anchor_seconds > 0
+
     for blk in blocks:
         start_s = _parse_time(blk.start_time)
         end_s = _parse_time(blk.end_time)
+
+        # Re-link ID swaps within this block using bbox-area continuity. We
+        # operate on the top-2 tracks (parent/child); larger n_keep falls back
+        # to the original identification logic without re-linking.
+        swap_ranges: List[Tuple[float, float]] = []
+        if relink_enabled and config.n_keep >= 2:
+            pre_top = identify_top_tracks_by_time(tracks_df, start_s, end_s, n_keep=2)
+            if len(pre_top) == 2:
+                tid_large = pre_top[0][0]
+                tid_small = pre_top[1][0]
+                block_view = tracks_df[
+                    (tracks_df["timestamp_s"] >= start_s)
+                    & (tracks_df["timestamp_s"] < end_s)
+                ]
+                swap_ranges = _detect_track_swaps(
+                    block_view,
+                    track_a=tid_large,
+                    track_b=tid_small,
+                    anchor_seconds=config.relink_anchor_seconds,
+                    min_run_seconds=config.relink_min_run_seconds,
+                    min_size_ratio=config.relink_min_size_ratio,
+                )
+                if swap_ranges:
+                    _apply_track_swaps(tracks_df, tid_large, tid_small, swap_ranges)
+                    if pose_df is not None:
+                        _apply_track_swaps(pose_df, tid_large, tid_small, swap_ranges)
+                    total = sum(end - start for start, end in swap_ranges)
+                    print(
+                        f"[filter] {blk.name}: re-linked tracks {tid_large}<->{tid_small} "
+                        f"across {len(swap_ranges)} swap(s), {total:.2f}s total"
+                    )
+
         top = identify_top_tracks_by_time(tracks_df, start_s, end_s, config.n_keep)
 
         remap: Dict[int, int] = {}
@@ -167,6 +315,9 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
             "start_s": start_s,
             "end_s": end_s,
             "tracks": [],
+            "relink_swaps": [
+                {"start_s": float(s), "end_s": float(e)} for s, e in swap_ranges
+            ],
         }
 
         for role_idx, (tid, role, avg_area) in enumerate(top):
@@ -221,9 +372,9 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
         ),
     }
 
-    # Also filter pose CSV if it exists.
-    if pose_path.exists():
-        pose_df = pd.read_csv(pose_path)
+    # Also filter pose CSV if it exists. Uses the in-memory copy that already
+    # has the same re-link swaps applied as tracks_df.
+    if pose_df is not None:
         filtered_pose_rows = []
         for start_s, end_s, remap in block_remaps:
             block_pose = pose_df[
