@@ -64,8 +64,13 @@ function Start-CloudflareTunnel {
     param([string]$Port, [string]$LogPath, [string]$ErrLogPath)
 
     Write-Host "Starting public tunnel via Cloudflare (trycloudflare.com) ..."
+    # `--config NUL` makes cloudflared ignore any existing ~/.cloudflared/config.yml.
+    # Without this, a pre-existing named-tunnel config (with its own ingress rules,
+    # e.g., a catch-all `http_status:404`) silently overrides the quick tunnel and
+    # the URL returns 404 for every path.
     $proc = Start-Process -FilePath 'cloudflared' -ArgumentList @(
-        'tunnel', '--no-autoupdate', '--url', "http://localhost:$Port"
+        'tunnel', '--config', 'NUL', '--no-autoupdate',
+        '--url', "http://localhost:$Port"
     ) -RedirectStandardOutput $LogPath `
       -RedirectStandardError $ErrLogPath `
       -NoNewWindow -PassThru
