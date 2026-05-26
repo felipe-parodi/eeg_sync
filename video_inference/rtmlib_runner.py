@@ -219,7 +219,7 @@ def run_rtmlib_pose_on_images(config: RtmlibRunnerConfig) -> Dict[str, Any]:
 
         tracker_name = config.tracker_name.lower()
         if tracker_name == "bytetrack":
-            rf_tracker = sv.ByteTrack(track_buffer=60)
+            rf_tracker = sv.ByteTrack(lost_track_buffer=60)
         else:
             raise ValueError(
                 f"Unsupported tracker_name '{config.tracker_name}' for "

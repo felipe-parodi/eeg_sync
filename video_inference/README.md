@@ -17,7 +17,7 @@ For an end-to-end colleague-facing walkthrough including the post-inference clea
 | Tracker | Behaviour |
 |---|---|
 | `--tracker-backend internal` | Two-person heuristic with IoU continuity. Only suitable when `--max-persons 2` and detections are clean. |
-| `--tracker-backend roboflow --tracker-name bytetrack` | ByteTrack with `track_buffer=60` frames. Recommended for `--max-persons > 2` and any session with possible occlusions. |
+| `--tracker-backend roboflow --tracker-name bytetrack` | ByteTrack with `lost_track_buffer=60` frames. Recommended for `--max-persons > 2` and any session with possible occlusions. |
 
 The output ID slot is bounded by `--max-persons`; ByteTrack's internal IDs are recycled into stable `0..max_persons-1` slots.
 

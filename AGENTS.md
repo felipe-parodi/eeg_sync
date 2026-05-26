@@ -66,7 +66,7 @@ All public symbols are re-exported from `sync_eeg_vid.__init__`, so `from sync_e
 Pipeline stages run in sequence: **compress -> extract frames -> infer -> track -> schema export -> validate**.
 
 - **`pipeline.py`:** Orchestrator CLI (`video-infer run`). Wires together all stages per camera. Supports three backends: `sam3d`, `ultralytics`, `rtmlib`.
-- **`ultralytics_runner.py`:** YOLOv11 2D pose backend. Two tracking modes: internal (parent/child heuristic by bbox area) and external (Roboflow ByteTrack with `track_buffer=60` and ID slot recycling).
+- **`ultralytics_runner.py`:** YOLOv11 2D pose backend. Two tracking modes: internal (parent/child heuristic by bbox area) and external (Roboflow ByteTrack with `lost_track_buffer=60` and ID slot recycling).
 - **`rtmlib_runner.py`:** RTMLib pose backend (2D `Body` and 3D `Wholebody3d`) via onnxruntime / opencv / openvino. `--rtmlib-3d` toggles the 3D model. The runner bypasses upstream `PoseTracker` (which returned the wrong tuple arity for `RTMPose3d`) and calls the solution class directly per frame.
 - **`sam3d_runner.py`:** SAM-3D-Body true-3D pose backend. Patches upstream CUDA hardcoding for CPU fallback. Imports from `third_party/sam-3d-body/` submodule. Override path via `EEG_SYNC_SAM3D_ROOT` env var.
 - **`tracking.py`:** `TwoPersonTrackerState` with IoU-based temporal continuity. Frame 0 uses area prior (parent = largest bbox), subsequent frames use IoU matching.
@@ -171,7 +171,7 @@ Three valid sources of parent/child track IDs, in order of preference:
 
 1. **`video-filter-tracks` (recommended for the colleague workflow).** Block-aware: top-N most persistent tracks per `session_blocks[i]` keep, parent=0/child=1 assigned by mean bbox area within that block. Produces `tracks_2d_filtered.csv` / `pose_3d_filtered.csv`.
 2. **`video-annotate-tracks` + `video-correct-tracks`.** Interactive override when auto-assignment is wrong (e.g. parent physically smaller, experimenter in frame, parent-child swap). Writes `track_corrections.json` → applied to `*_corrected.csv`.
-3. **Inference-time tracker.** `--tracker-backend internal` uses the two-person heuristic (parent = largest bbox at frame 0, IoU continuity after). `--tracker-backend roboflow --tracker-name bytetrack` uses ByteTrack with `track_buffer=60` and recycles IDs into stable `0..max_persons-1` slots.
+3. **Inference-time tracker.** `--tracker-backend internal` uses the two-person heuristic (parent = largest bbox at frame 0, IoU continuity after). `--tracker-backend roboflow --tracker-name bytetrack` uses ByteTrack with `lost_track_buffer=60` and recycles IDs into stable `0..max_persons-1` slots.
 
 Configured per inference run via `--max-persons` and `--enforce-exact-person-count`. Downstream metrics CLIs accept `--tracks-input` / `--pose-input` to pick which stage's CSV to read from.
 

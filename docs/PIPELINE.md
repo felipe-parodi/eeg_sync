@@ -107,7 +107,7 @@ video-infer run \
 | Tracker | Behaviour |
 |---|---|
 | `--tracker-backend internal` | Two-person heuristic: parent = largest bbox at frame 0, then IoU continuity. Only suitable when `--max-persons 2` and detections are clean. |
-| `--tracker-backend roboflow --tracker-name bytetrack` | ByteTrack with `track_buffer=60` (frames). Recommended for `--max-persons > 2` or any session with possible occlusions. |
+| `--tracker-backend roboflow --tracker-name bytetrack` | ByteTrack with `lost_track_buffer=60` (frames). Recommended for `--max-persons > 2` or any session with possible occlusions. |
 
 ### Per-camera outputs
 
