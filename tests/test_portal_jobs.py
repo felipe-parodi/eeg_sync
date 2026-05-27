@@ -451,12 +451,14 @@ def test_build_processing_steps_passes_explicit_pipeline_inputs(tmp_path: Path) 
     names = [step.name for step in steps]
     joined = "\n".join(" ".join(step.argv) for step in steps)
 
-    assert names[:4] == [
+    assert names[:5] == [
         "pose inference",
         "filter tracks camera_a",
+        "interpolate tracks camera_a",
         "smooth tracks camera_a",
         "pose metrics camera_a",
     ]
+    # The interpolate step reads the filtered CSVs (gap-fill happens here).
     assert "--pose-input pose_3d_filtered.csv" in joined
     assert "--tracks-input tracks_2d_filtered.csv" in joined
     assert "--pose-input pose_3d_smooth.csv" in joined
@@ -636,11 +638,45 @@ def test_build_phase2_returns_per_camera_steps_without_anchors(tmp_path: Path) -
     names = [s.name for s in steps]
     assert "filter tracks camera_a" in names
     assert "filter tracks camera_b" in names
+    assert "interpolate tracks camera_a" in names
     assert "smooth tracks camera_a" in names
     assert "overlay video camera_a free_play" in names
     # Without anchors, no --anchors-json flag anywhere
     joined = "\n".join(" ".join(s.argv) for s in steps)
     assert "--anchors-json" not in joined
+
+
+def test_build_phase2_interpolates_between_filter_and_smooth(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    config = _job_config_two_cameras(tmp_path)
+    config.video_b = None  # camera A only, keeps the ordering assertion clear
+    config.frame_rate = 8.0
+    steps = build_phase2_steps(config)
+    names = [s.name for s in steps]
+
+    # Interpolation runs after the filter assigns roles and before smoothing,
+    # so the gap-fill operates on the parent/child tracks and feeds the EMA.
+    assert (
+        names.index("filter tracks camera_a")
+        < names.index("interpolate tracks camera_a")
+        < names.index("smooth tracks camera_a")
+    )
+
+    by_name = {s.name: s.argv for s in steps}
+    interp_argv = by_name["interpolate tracks camera_a"]
+    # Reads the filtered CSVs, writes the interpolated CSVs at the analysis fps.
+    assert "tracks_2d_filtered.csv" in interp_argv
+    assert "pose_3d_filtered.csv" in interp_argv
+    assert "tracks_2d_interpolated.csv" in interp_argv
+    assert "pose_3d_interpolated.csv" in interp_argv
+    assert "8.0" in interp_argv  # --target-fps matches config.frame_rate
+
+    # Smoothing now consumes the interpolated CSVs, not the filtered ones.
+    smooth_argv = by_name["smooth tracks camera_a"]
+    assert "pose_3d_interpolated.csv" in smooth_argv
+    assert "tracks_2d_interpolated.csv" in smooth_argv
+    assert "pose_3d_filtered.csv" not in smooth_argv
 
 
 def test_build_phase2_renders_one_overlay_per_block(tmp_path: Path) -> None:
