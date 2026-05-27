@@ -1088,7 +1088,8 @@ After stage 2, `track_id` is canonical: **`0` = parent, `1` = child**
 |---|---|---|
 | `frame_idx`, `timestamp_s`, `track_id`, `track_label` | | Same as above. |
 | `keypoint_name` | str | `kp_000`…`kp_016`, the 17 COCO body keypoints (see below). |
-| `x_m,y_m,z_m` | float | Estimated keypoint position in meters. `z_m` is a monocular depth estimate; treat it as approximate and check `keypoint_confidence`. |
+| `x_m,y_m` | float | Keypoint position in **image pixels** (top-left origin). The `_m` suffix is a naming artifact; these are 2D pixel coordinates, not meters. |
+| `z_m` | float | Always `0`. The pose model is 2D; this is a placeholder column for pipeline compatibility, not a depth estimate. |
 | `keypoint_confidence` | float | Per-keypoint confidence, 0–1. Low-confidence joints are less reliable. |
 
 COCO-17 keypoint order (`kp_000`→nose, increasing index):
@@ -1127,7 +1128,7 @@ headline table for each block.
 
 - `pose_proximity.png` / `.svg` — torso distance over time and per-block comparison.
 - `pose_synchrony.png` / `.svg` — synchrony strength and lead/follow per block.
-- `overlay_<block>.mp4` — a ~{int(config.overlay_seconds)} s clip per block with boxes and skeletons drawn, to eyeball tracking quality.
+- `overlay_<block>.mp4` — a ~{int(config.overlay_seconds)} s clip per block with boxes and skeletons drawn, to eyeball tracking quality. Only keypoints with confidence ≥ 0.2 are drawn (and a skeleton bone only when both of its endpoints clear 0.2), so low-confidence joints are intentionally omitted; the CSVs still contain every keypoint.
 - SVGs are editable vector versions of the PNGs.
 
 ### `session_summary.json` and `portal_metadata/`

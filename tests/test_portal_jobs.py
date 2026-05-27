@@ -629,6 +629,13 @@ def test_build_results_readme_documents_files_schema_and_loading(
     assert "0 = parent" in readme
     # A concrete load snippet for humans and LLMs.
     assert "pd.read_csv" in readme
+    # Coordinates are image pixels, not meters, and z is a 0 placeholder
+    # (the pose model is 2D). Guards against the earlier mislabel.
+    assert "not meters" in readme
+    assert "placeholder" in readme
+    assert "position in meters" not in readme
+    # Overlay hides low-confidence joints below the 0.2 draw threshold.
+    assert "0.2" in readme
 
 
 # ---------------------------------------------------------------------------
