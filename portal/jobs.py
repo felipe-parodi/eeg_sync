@@ -13,14 +13,20 @@ from typing import Any, Iterable, Sequence
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4"}
 CHUNK_CAMERA_IDS = {"camera_a", "camera_b"}
-PORTAL_DEFAULT_FRAME_RATE = 8.0
+# 6 fps balances temporal resolution against inference cost: it still yields
+# ~30 samples per 5 s synchrony window (plenty for the cross-correlation) while
+# cutting frames vs 8 fps, and phase-2 interpolation fills the grid in between.
+PORTAL_DEFAULT_FRAME_RATE = 6.0
 PORTAL_DEFAULT_IMAGE_WIDTH = 854
 PORTAL_DEFAULT_IMAGE_HEIGHT = 480
 # Two detections per frame: the parent and the child. Extra-person windows
 # (e.g. an experimenter in the room) are excluded from the analysis blocks
 # before inference, so a third tracked person is noise we do not want to keep.
 PORTAL_DEFAULT_MAX_PERSONS = 2
-PORTAL_DEFAULT_MODEL_PATH = "yolo11m-pose.pt"
+# The larger L pose model localizes keypoints more accurately and with higher
+# confidence than the M model, which reduces per-frame jitter and leaves fewer
+# joints below the overlay's 0.2 draw threshold.
+PORTAL_DEFAULT_MODEL_PATH = "yolo11l-pose.pt"
 # Length of each per-block QC overlay clip. One clip is rendered per analysis
 # block (capped at this length), so the colleague sees tracking quality for
 # every block rather than only the first.
