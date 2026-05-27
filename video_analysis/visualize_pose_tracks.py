@@ -47,7 +47,10 @@ class VisualizationConfig:
     input_json: str = "intermediate/inference_raw.json"
     frames_dir: str = "frames"
     output_fps: float = 12.0
-    keypoint_conf_thresh: float = 0.2
+    # Draw every keypoint by default. Smoothing/interpolation has already
+    # updated positions, and filled keypoints are flagged and drawn muted, so
+    # gating on the (stale) detector confidence would needlessly hide joints.
+    keypoint_conf_thresh: float = 0.0
     max_frames: Optional[int] = None
     start_frame: int = 0
     draw_bbox: bool = True
@@ -70,6 +73,11 @@ def _parse_time(time_str: str) -> float:
 
 def _color_for_track(track_id: int) -> Tuple[int, int, int]:
     return TRACK_COLORS.get(track_id, (180, 180, 180))
+
+
+def _dim_color(color: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """Blend a track color toward light gray for filled (interpolated) joints."""
+    return tuple(int(0.4 * channel + 0.6 * 170) for channel in color)
 
 
 def _draw_person(
@@ -99,7 +107,11 @@ def _draw_person(
         )
 
     keypoints = person.get("keypoints_3d", [])
-    parsed_points: List[Optional[Tuple[int, int, float]]] = []
+    # Each parsed point is (x, y, conf, filled). ``filled`` marks a keypoint
+    # whose position was interpolated/infilled rather than observed; it is
+    # drawn muted (hollow dot, thin dimmed bone) so a complete skeleton is
+    # shown while observed vs filled stays distinguishable.
+    parsed_points: List[Optional[Tuple[int, int, float, bool]]] = []
     for keypoint in keypoints:
         if not isinstance(keypoint, Sequence) or len(keypoint) < 2:
             parsed_points.append(None)
@@ -107,7 +119,8 @@ def _draw_person(
         x = int(float(keypoint[0]))
         y = int(float(keypoint[1]))
         conf = float(keypoint[3]) if len(keypoint) >= 4 else 1.0
-        parsed_points.append((x, y, conf))
+        filled = bool(keypoint[4]) if len(keypoint) >= 5 else False
+        parsed_points.append((x, y, conf, filled))
 
     for edge_start, edge_end in COCO17_EDGES:
         if edge_start >= len(parsed_points) or edge_end >= len(parsed_points):
@@ -118,14 +131,37 @@ def _draw_person(
             continue
         if point_a[2] < keypoint_conf_thresh or point_b[2] < keypoint_conf_thresh:
             continue
-        cv2.line(image, (point_a[0], point_a[1]), (point_b[0], point_b[1]), color, 2)
+        edge_filled = point_a[3] or point_b[3]
+        cv2.line(
+            image,
+            (point_a[0], point_a[1]),
+            (point_b[0], point_b[1]),
+            _dim_color(color) if edge_filled else color,
+            1 if edge_filled else 2,
+        )
 
     for point in parsed_points:
         if point is None or point[2] < keypoint_conf_thresh:
             continue
-        cv2.circle(
-            image, (point[0], point[1]), 3, color, thickness=-1, lineType=cv2.LINE_AA
-        )
+        if point[3]:
+            # Filled: hollow, dimmed dot.
+            cv2.circle(
+                image,
+                (point[0], point[1]),
+                3,
+                _dim_color(color),
+                thickness=1,
+                lineType=cv2.LINE_AA,
+            )
+        else:
+            cv2.circle(
+                image,
+                (point[0], point[1]),
+                3,
+                color,
+                thickness=-1,
+                lineType=cv2.LINE_AA,
+            )
 
 
 def _load_frames_from_csv(
@@ -185,12 +221,14 @@ def _load_frames_from_csv(
         for _, t_row in t_rows.iterrows():
             tid = int(t_row["track_id"])
             person_pose = p_rows[p_rows["track_id"] == tid].sort_values("keypoint_name")
+            has_interp = "interpolated" in person_pose.columns
             keypoints_3d = [
                 [
                     float(r["x_m"]),
                     float(r["y_m"]),
                     float(r["z_m"]),
                     float(r["keypoint_confidence"]),
+                    bool(r["interpolated"]) if has_interp else False,
                 ]
                 for _, r in person_pose.iterrows()
             ]
@@ -355,7 +393,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--frames-dir", default="frames", type=str)
     parser.add_argument("--output-fps", default=12.0, type=float)
-    parser.add_argument("--keypoint-conf-thresh", default=0.2, type=float)
+    parser.add_argument("--keypoint-conf-thresh", default=0.0, type=float)
     parser.add_argument("--max-frames", default=None, type=int)
     parser.add_argument("--start-frame", default=0, type=int)
     parser.add_argument(

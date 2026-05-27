@@ -634,8 +634,9 @@ def test_build_results_readme_documents_files_schema_and_loading(
     assert "not meters" in readme
     assert "placeholder" in readme
     assert "position in meters" not in readme
-    # Overlay hides low-confidence joints below the 0.2 draw threshold.
-    assert "0.2" in readme
+    # Overlay draws every keypoint; filled ones are shown muted.
+    assert "interpolated" in readme
+    assert "muted" in readme
 
 
 # ---------------------------------------------------------------------------

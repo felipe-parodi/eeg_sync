@@ -73,3 +73,44 @@ def test_render_pose_track_video_writes_output(tmp_path: Path):
     assert summary["rendered_frames"] == 2
     assert output_video.exists()
     assert output_video.stat().st_size > 0
+
+
+def test_observed_keypoint_is_solid_filled_keypoint_is_hollow():
+    """Observed joints draw a solid dot; interpolated joints draw a hollow one."""
+    pytest.importorskip("cv2")
+    from video_analysis.visualize_pose_tracks import _draw_person
+
+    def center_pixel(filled: bool) -> int:
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+        person = {
+            "track_id": 0,
+            "track_label": "parent",
+            # One keypoint at (50, 50): [x, y, z, conf, filled].
+            "keypoints_3d": [[50, 50, 0, 0.9, filled]],
+        }
+        _draw_person(image, person, keypoint_conf_thresh=0.0, draw_bbox=False)
+        return int(image[50, 50].sum())
+
+    # Observed: center pixel is painted (solid dot).
+    assert center_pixel(filled=False) > 0
+    # Filled: center pixel is empty (hollow outline only).
+    assert center_pixel(filled=True) == 0
+
+
+def test_show_all_default_draws_zero_confidence_keypoints():
+    """With the default threshold (0.0), even a 0-confidence joint is drawn."""
+    pytest.importorskip("cv2")
+    from video_analysis.visualize_pose_tracks import VisualizationConfig, _draw_person
+
+    assert (
+        VisualizationConfig(camera_dir="x", output_video="y").keypoint_conf_thresh
+        == 0.0
+    )
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    person = {
+        "track_id": 0,
+        "track_label": "parent",
+        "keypoints_3d": [[50, 50, 0, 0.0, False]],  # zero confidence
+    }
+    _draw_person(image, person, keypoint_conf_thresh=0.0, draw_bbox=False)
+    assert int(image[50, 50].sum()) > 0

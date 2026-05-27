@@ -1140,7 +1140,7 @@ headline table for each block.
 
 - `pose_proximity.png` / `.svg` — torso distance over time and per-block comparison.
 - `pose_synchrony.png` / `.svg` — synchrony strength and lead/follow per block.
-- `overlay_<block>.mp4` — a ~{int(config.overlay_seconds)} s clip per block with boxes and skeletons drawn, to eyeball tracking quality. Only keypoints with confidence ≥ 0.2 are drawn (and a skeleton bone only when both of its endpoints clear 0.2), so low-confidence joints are intentionally omitted; the CSVs still contain every keypoint.
+- `overlay_<block>.mp4` — a ~{int(config.overlay_seconds)} s clip per block with boxes and skeletons drawn, to eyeball tracking quality. Every keypoint is drawn; keypoints that were gap-filled or low-confidence-infilled (`interpolated = True`) are shown muted (hollow dot, thin dimmed bone) so you can tell them from directly observed joints.
 - SVGs are editable vector versions of the PNGs.
 
 ### `session_summary.json` and `portal_metadata/`
