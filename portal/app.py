@@ -44,6 +44,7 @@ from .jobs import (
     mark_chunk_received,
     parse_timecode,
     read_status,
+    resume_portal_job_phase2,
     run_portal_job,
     split_blocks_for_exclusions,
     validate_direct_chunked_upload,
@@ -734,6 +735,44 @@ def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) ->
         )
 
 
+def resume_portal_job_phase2_background(safe_job_id: str, job_dir: Path) -> None:
+    """Background task: continue a portal job after annotations arrive.
+
+    Mirrors ``run_chunked_portal_job``'s shape — runs under the GPU job
+    lock and converts any failure into a status entry plus a one-line log
+    so the operator can see what happened without an ASGI traceback.
+    """
+    try:
+
+        def action() -> None:
+            meta = _read_upload_meta(job_dir)
+            upload_dir = UPLOAD_ROOT / safe_job_id
+            config = _config_from_chunked_upload(
+                safe_job_id=safe_job_id,
+                upload_dir=upload_dir,
+                job_dir=job_dir,
+                meta=meta,
+            )
+            resume_portal_job_phase2(config, REPO_ROOT)
+
+        _run_with_job_lock(job_dir, action)
+    except Exception as error:
+        write_status(
+            job_dir,
+            {
+                "state": "failed",
+                "message": str(error),
+                "current_step": None,
+                "phase": 2,
+            },
+        )
+        log_path = job_dir / "job.log"
+        print(
+            f"Job {safe_job_id} phase 2 failed. See {log_path}.",
+            flush=True,
+        )
+
+
 def _job_rows() -> str:
     rows = []
     for status_path in sorted(JOB_ROOT.glob("*/status.json"), reverse=True):
@@ -1390,6 +1429,302 @@ def job_log(
     text = log_path.read_text(encoding="utf-8", errors="replace")
     escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return _html_page("Job Log", f"<pre>{escaped}</pre>")
+
+
+def _read_anchor_manifests(job_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    """Load every per-camera anchor manifest under a job directory."""
+    anchors_root = job_dir / "anchors"
+    manifests: dict[str, list[dict[str, Any]]] = {}
+    if not anchors_root.exists():
+        return manifests
+    for camera_dir in sorted(anchors_root.iterdir()):
+        if not camera_dir.is_dir():
+            continue
+        manifest_path = camera_dir / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            manifests[camera_dir.name] = payload
+    return manifests
+
+
+def _convert_anchor_submission_to_filter_format(
+    submission_entries: list[dict[str, Any]],
+    manifest: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert UI annotations into the schema video-filter-tracks reads.
+
+    UI:   ``{anchor_idx, parent_track_id, child_track_id}`` or
+          ``{anchor_idx, skipped: true}``.
+    Filter expects: ``{frame_idx, parent_track_id, child_track_id, skipped}``.
+    """
+    manifest_by_idx = {int(m["anchor_idx"]): m for m in manifest}
+    out: list[dict[str, Any]] = []
+    for entry in submission_entries:
+        anchor_idx = int(entry["anchor_idx"])
+        if anchor_idx not in manifest_by_idx:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown anchor_idx {anchor_idx}",
+            )
+        anchor_meta = manifest_by_idx[anchor_idx]
+        frame_idx = int(anchor_meta["frame_idx"])
+        if entry.get("skipped"):
+            out.append({"frame_idx": frame_idx, "skipped": True})
+            continue
+        if "parent_track_id" not in entry or "child_track_id" not in entry:
+            raise HTTPException(
+                status_code=400,
+                detail=f"anchor_idx {anchor_idx}: missing parent/child track ids",
+            )
+        parent_tid = int(entry["parent_track_id"])
+        child_tid = int(entry["child_track_id"])
+        valid_tids = {int(t["track_id"]) for t in anchor_meta["tracks"]}
+        if parent_tid not in valid_tids or child_tid not in valid_tids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"anchor_idx {anchor_idx}: track id not in this frame's tracks"
+                ),
+            )
+        if parent_tid == child_tid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"anchor_idx {anchor_idx}: parent and child must differ",
+            )
+        out.append(
+            {
+                "frame_idx": frame_idx,
+                "parent_track_id": parent_tid,
+                "child_track_id": child_tid,
+            }
+        )
+    return out
+
+
+@app.get("/jobs/{job_id}/anchors/{camera_id}/{filename}")
+def anchor_image(
+    job_id: str,
+    camera_id: str,
+    filename: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> FileResponse:
+    """Serve one rendered anchor JPEG."""
+    safe_job_id = _slug(job_id)
+    safe_camera = _slug(camera_id)
+    safe_filename = _slug(filename.replace(".jpg", "")) + ".jpg"
+    candidate = JOB_ROOT / safe_job_id / "anchors" / safe_camera / safe_filename
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Anchor image not found")
+    return FileResponse(candidate, media_type="image/jpeg")
+
+
+@app.get("/jobs/{job_id}/annotate", response_class=HTMLResponse)
+def annotate_job(
+    job_id: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> HTMLResponse:
+    """Render the parent/child annotation page for a job."""
+    safe_job_id = _slug(job_id)
+    job_dir = JOB_ROOT / safe_job_id
+    manifests = _read_anchor_manifests(job_dir)
+    if not manifests:
+        raise HTTPException(
+            status_code=404, detail="No anchor frames available for this job"
+        )
+    # The annotate page is GET-only HTML; the form's POST uses the existing
+    # require_csrf machinery via the CSRF_TOKEN constant injected into the
+    # inline script (computed below from the active session).
+    sections: list[str] = []
+    for camera_id, manifest in manifests.items():
+        cards: list[str] = []
+        for entry in manifest:
+            anchor_idx = int(entry["anchor_idx"])
+            img_filename = html.escape(str(entry["image_filename"]), quote=True)
+            ts = float(entry.get("timestamp_s", 0.0))
+            buttons: list[str] = []
+            for track in entry.get("tracks", []):
+                tid = int(track["track_id"])
+                bgr = track.get("color_bgr", [0, 0, 0])
+                # convert BGR list to CSS rgb()
+                r, g, b = int(bgr[2]), int(bgr[1]), int(bgr[0])
+                buttons.append(
+                    f'<button type="button" class="track-btn" '
+                    f'data-anchor="{anchor_idx}" data-camera="{camera_id}" '
+                    f'data-parent="{tid}" '
+                    f'style="border: 3px solid rgb({r},{g},{b}); '
+                    f'background: rgba({r},{g},{b},0.12);">'
+                    f"Track {tid} is parent"
+                    f"</button>"
+                )
+            buttons.append(
+                f'<button type="button" class="skip-btn" '
+                f'data-anchor="{anchor_idx}" data-camera="{camera_id}">'
+                "Skip (neither is the parent here)"
+                "</button>"
+            )
+            cards.append(
+                f'<figure class="anchor-card" '
+                f'data-anchor="{anchor_idx}" data-camera="{camera_id}">'
+                f'<img src="/jobs/{safe_job_id}/anchors/{camera_id}/{img_filename}" '
+                f'alt="anchor {anchor_idx}" loading="lazy">'
+                f'<figcaption>frame {entry["frame_idx"]} '
+                f"(t={ts:.2f}s)</figcaption>"
+                f'<div class="anchor-buttons">{"".join(buttons)}</div>'
+                f'<div class="anchor-state muted">unlabeled</div>'
+                f"</figure>"
+            )
+        sections.append(
+            f'<section class="camera-anchors">'
+            f"<h3>{html.escape(camera_id)}</h3>"
+            f'<div class="anchor-grid">{"".join(cards)}</div>'
+            f"</section>"
+        )
+    page_body = (
+        f"<h2>Label parent vs child — {html.escape(safe_job_id)}</h2>"
+        "<p class='muted'>For each frame, click the box around the parent. "
+        "If neither tracked person is the parent (e.g., an experimenter is "
+        "visible), click Skip. You don't have to label every frame, but more "
+        "anchors give better coverage.</p>"
+        f"<form id='annotate-form' method='POST' "
+        f"action='/jobs/{safe_job_id}/annotations' "
+        "data-empty-allowed='no'>"
+        f"{''.join(sections)}"
+        "<p><button type='submit' class='cta'>"
+        "Submit annotations and continue processing</button></p>"
+        "</form>"
+        "<script>"
+        "(function(){"
+        "const state={};"
+        "function setBtnState(card, choice){"
+        "  card.querySelectorAll('button').forEach(b=>b.classList.remove('chosen'));"
+        "  if(choice) choice.classList.add('chosen');"
+        "  card.querySelector('.anchor-state').textContent="
+        "    choice ? (choice.classList.contains('skip-btn') ? 'skipped' :"
+        "             'parent='+choice.dataset.parent) : 'unlabeled';"
+        "}"
+        "document.querySelectorAll('.anchor-card').forEach(card=>{"
+        "  card.querySelectorAll('.track-btn').forEach(btn=>{"
+        "    btn.addEventListener('click',()=>{"
+        "      const cam=btn.dataset.camera, idx=btn.dataset.anchor, "
+        "            parent=parseInt(btn.dataset.parent,10);"
+        "      const others=Array.from(card.querySelectorAll('.track-btn'))"
+        "        .map(b=>parseInt(b.dataset.parent,10)).filter(t=>t!==parent);"
+        "      state[cam]=state[cam]||{};"
+        "      state[cam][idx]={anchor_idx:parseInt(idx,10),"
+        "                       parent_track_id:parent,"
+        "                       child_track_id:others[0]};"
+        "      setBtnState(card,btn);"
+        "    });"
+        "  });"
+        "  const skip=card.querySelector('.skip-btn');"
+        "  if(skip){"
+        "    skip.addEventListener('click',()=>{"
+        "      const cam=skip.dataset.camera, idx=skip.dataset.anchor;"
+        "      state[cam]=state[cam]||{};"
+        "      state[cam][idx]={anchor_idx:parseInt(idx,10),skipped:true};"
+        "      setBtnState(card,skip);"
+        "    });"
+        "  }"
+        "});"
+        "document.getElementById('annotate-form').addEventListener('submit',async ev=>{"
+        "  ev.preventDefault();"
+        "  const payload={};"
+        "  Object.keys(state).forEach(cam=>{"
+        "    payload[cam]=Object.values(state[cam]);"
+        "  });"
+        "  const res=await fetch(ev.target.action,{"
+        "    method:'POST',"
+        "    headers:{'Content-Type':'application/json','x-csrf-token':CSRF_TOKEN},"
+        "    body:JSON.stringify({annotations:payload})"
+        "  });"
+        "  if(res.ok){window.location='/jobs/'+"
+        f"'{safe_job_id}'"
+        ";}"
+        "  else{const t=await res.text(); alert('Submit failed: '+t);}"
+        "});"
+        "})();"
+        "</script>"
+    )
+    csrf = csrf_token_for_session(_require_session_or_redirect_passthrough())
+    page_body = page_body.replace("CSRF_TOKEN", f'"{csrf}"', 1)
+    return _html_page(f"Annotate {safe_job_id}", page_body)
+
+
+@app.post("/jobs/{job_id}/annotations")
+async def submit_annotations(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    _csrf: Annotated[str, Depends(require_csrf)],
+) -> JSONResponse:
+    """Accept the colleague's anchor labels, then trigger phase 2."""
+    safe_job_id = _slug(job_id)
+    job_dir = JOB_ROOT / safe_job_id
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    manifests = _read_anchor_manifests(job_dir)
+    if not manifests:
+        raise HTTPException(
+            status_code=400, detail="No anchor frames to label for this job"
+        )
+    body = await request.json()
+    annotations = body.get("annotations") or {}
+    if not isinstance(annotations, dict):
+        raise HTTPException(status_code=400, detail="annotations must be a JSON object")
+
+    for camera_id, entries in annotations.items():
+        if camera_id not in manifests:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown camera: {camera_id}",
+            )
+        if not isinstance(entries, list):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{camera_id} annotations must be a list",
+            )
+        converted = _convert_anchor_submission_to_filter_format(
+            entries, manifests[camera_id]
+        )
+        out_path = job_dir / "anchors" / _slug(camera_id) / "anchors.json"
+        out_path.write_text(json.dumps(converted, indent=2), encoding="utf-8")
+
+    write_status(
+        job_dir,
+        {
+            "state": "queued",
+            "message": "Annotations received; phase 2 queued.",
+            "current_step": "phase 2 queued",
+            "phase": 2,
+        },
+    )
+    background_tasks.add_task(resume_portal_job_phase2_background, safe_job_id, job_dir)
+    return JSONResponse({"job_id": safe_job_id, "status_url": f"/jobs/{safe_job_id}"})
+
+
+def _require_session_or_redirect_passthrough() -> str:
+    """Return the current session token without re-validating.
+
+    Used only by the annotate page where we need the CSRF token inline in
+    the HTML. The page itself is already auth-gated by ``annotate_job``'s
+    Depends(require_auth).
+    """
+    # Find any active session token. The annotate endpoint already
+    # passed Depends(require_auth) so at least one valid session exists in
+    # SESSION_TOKENS for this caller; pick the most recently created.
+    now = time.time()
+    candidates = [
+        (token, state)
+        for token, state in SESSION_TOKENS.items()
+        if state.expires_at > now
+    ]
+    if not candidates:
+        # Defensive: should not happen because require_auth ran upstream.
+        raise HTTPException(status_code=401, detail="No active session")
+    candidates.sort(key=lambda item: item[1].expires_at, reverse=True)
+    return candidates[0][0]
 
 
 def main() -> None:

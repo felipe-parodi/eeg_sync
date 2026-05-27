@@ -561,3 +561,231 @@ def test_make_result_zip_excludes_frames_and_intermediate(tmp_path: Path) -> Non
     assert not any(
         "/intermediate/" in n for n in names
     ), f"intermediate leaked: {names}"
+
+
+# ---------------------------------------------------------------------------
+# Tests: phase split + anchor extraction + annotation flow (D2b)
+# ---------------------------------------------------------------------------
+
+
+def _job_config_two_cameras(tmp_path: Path) -> PortalJobConfig:
+    return PortalJobConfig(
+        job_id="job-001",
+        session_id="P001c",
+        video_a=tmp_path / "camera_a_rapid.mp4",
+        video_b=tmp_path / "camera_b_rapid.mp4",
+        job_dir=tmp_path / "job-001",
+        output_root=tmp_path / "output",
+        session_config_path=tmp_path / "job-001" / "session_config.json",
+        blocks=[
+            SessionBlock(name="free_play", start_s=100.0, end_s=220.0, color="green")
+        ],
+    )
+
+
+def test_build_phase1_returns_only_pose_inference(tmp_path: Path) -> None:
+    from portal.jobs import build_phase1_steps
+
+    steps = build_phase1_steps(_job_config_two_cameras(tmp_path))
+    assert [s.name for s in steps] == ["pose inference"]
+
+
+def test_build_phase2_returns_per_camera_steps_without_anchors(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    steps = build_phase2_steps(_job_config_two_cameras(tmp_path))
+    names = [s.name for s in steps]
+    assert "filter tracks camera_a" in names
+    assert "filter tracks camera_b" in names
+    assert "smooth tracks camera_a" in names
+    assert "overlay video camera_a" in names
+    # Without anchors, no --anchors-json flag anywhere
+    joined = "\n".join(" ".join(s.argv) for s in steps)
+    assert "--anchors-json" not in joined
+
+
+def test_build_phase2_injects_anchors_json_per_camera(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    anchors_path_a = tmp_path / "anchors_a.json"
+    anchors_path_b = tmp_path / "anchors_b.json"
+    steps = build_phase2_steps(
+        _job_config_two_cameras(tmp_path),
+        anchors_json_by_camera={
+            "camera_a": anchors_path_a,
+            "camera_b": anchors_path_b,
+        },
+    )
+    by_name = {s.name: s.argv for s in steps}
+    assert "--anchors-json" in by_name["filter tracks camera_a"]
+    assert str(anchors_path_a) in by_name["filter tracks camera_a"]
+    assert "--anchors-json" in by_name["filter tracks camera_b"]
+    assert str(anchors_path_b) in by_name["filter tracks camera_b"]
+    # Other steps should not get the flag.
+    assert "--anchors-json" not in by_name["smooth tracks camera_a"]
+
+
+def test_build_processing_steps_is_phase1_plus_phase2(tmp_path: Path) -> None:
+    from portal.jobs import (
+        build_phase1_steps,
+        build_phase2_steps,
+        build_processing_steps,
+    )
+
+    cfg = _job_config_two_cameras(tmp_path)
+    full = build_processing_steps(cfg)
+    expected = build_phase1_steps(cfg) + build_phase2_steps(cfg)
+    assert [s.name for s in full] == [s.name for s in expected]
+
+
+def test_resolve_anchors_json_paths_finds_per_camera(tmp_path: Path) -> None:
+    from portal.jobs import resolve_anchors_json_paths
+
+    cfg = _job_config_two_cameras(tmp_path)
+    (cfg.job_dir / "anchors" / "camera_a").mkdir(parents=True)
+    (cfg.job_dir / "anchors" / "camera_a" / "anchors.json").write_text(
+        "[]", encoding="utf-8"
+    )
+    paths = resolve_anchors_json_paths(cfg)
+    assert "camera_a" in paths
+    assert paths["camera_a"].exists()
+    # camera_b's anchors.json was never written
+    assert "camera_b" not in paths
+
+
+def test_extract_job_anchor_frames_calls_extractor_per_camera(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from portal import jobs as portal_jobs
+
+    cfg = _job_config_two_cameras(tmp_path)
+    # The extractor reads tracks_2d.csv; create stubs so the per-camera
+    # branches both fire.
+    for cam in ("camera_a", "camera_b"):
+        (cfg.session_output_dir / cam).mkdir(parents=True)
+        (cfg.session_output_dir / cam / "tracks_2d.csv").write_text(
+            "frame_idx,timestamp_s,track_id\n", encoding="utf-8"
+        )
+
+    seen: list[dict] = []
+
+    def fake_extract(tracks_csv, source_video, output_dir, n_anchors, **_kwargs):
+        seen.append(
+            {
+                "tracks_csv": str(tracks_csv),
+                "source_video": str(source_video),
+                "output_dir": str(output_dir),
+                "n_anchors": n_anchors,
+            }
+        )
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        # Pretend we extracted n_anchors frames
+        return [
+            SimpleNamespace(
+                anchor_idx=i,
+                frame_idx=i * 10,
+                timestamp_s=float(i),
+                image_filename=f"anchor_{i:02d}.jpg",
+                tracks=[],
+            )
+            for i in range(1, n_anchors + 1)
+        ]
+
+    monkeypatch.setattr(
+        "video_analysis.anchor_frames.extract_anchor_frames", fake_extract
+    )
+
+    summary = portal_jobs.extract_job_anchor_frames(cfg, n_anchors=4)
+
+    assert summary == {
+        "camera_a": {
+            "count": 4,
+            "dir": str(cfg.job_dir / "anchors" / "camera_a"),
+        },
+        "camera_b": {
+            "count": 4,
+            "dir": str(cfg.job_dir / "anchors" / "camera_b"),
+        },
+    }
+    assert {entry["source_video"] for entry in seen} == {
+        str(cfg.video_a),
+        str(cfg.video_b),
+    }
+
+
+def test_convert_anchor_submission_validates_and_remaps(tmp_path: Path) -> None:
+    from portal.app import _convert_anchor_submission_to_filter_format
+
+    manifest = [
+        {
+            "anchor_idx": 1,
+            "frame_idx": 100,
+            "tracks": [{"track_id": 5}, {"track_id": 7}],
+        },
+        {
+            "anchor_idx": 2,
+            "frame_idx": 200,
+            "tracks": [{"track_id": 5}, {"track_id": 7}],
+        },
+    ]
+    submission = [
+        {"anchor_idx": 1, "parent_track_id": 5, "child_track_id": 7},
+        {"anchor_idx": 2, "skipped": True},
+    ]
+    converted = _convert_anchor_submission_to_filter_format(submission, manifest)
+    assert converted == [
+        {"frame_idx": 100, "parent_track_id": 5, "child_track_id": 7},
+        {"frame_idx": 200, "skipped": True},
+    ]
+
+
+def test_convert_anchor_submission_rejects_unknown_track_id() -> None:
+    from portal.app import _convert_anchor_submission_to_filter_format
+
+    manifest = [
+        {
+            "anchor_idx": 1,
+            "frame_idx": 100,
+            "tracks": [{"track_id": 5}, {"track_id": 7}],
+        }
+    ]
+    submission = [{"anchor_idx": 1, "parent_track_id": 99, "child_track_id": 7}]
+    with pytest.raises(portal_app.HTTPException) as error:
+        _convert_anchor_submission_to_filter_format(submission, manifest)
+    assert error.value.status_code == 400
+
+
+def test_convert_anchor_submission_rejects_unknown_anchor_idx() -> None:
+    from portal.app import _convert_anchor_submission_to_filter_format
+
+    manifest = [
+        {
+            "anchor_idx": 1,
+            "frame_idx": 100,
+            "tracks": [{"track_id": 5}, {"track_id": 7}],
+        }
+    ]
+    submission = [{"anchor_idx": 99, "parent_track_id": 5, "child_track_id": 7}]
+    with pytest.raises(portal_app.HTTPException) as error:
+        _convert_anchor_submission_to_filter_format(submission, manifest)
+    assert error.value.status_code == 400
+
+
+def test_anchor_image_endpoint_404s_when_missing(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
+    (tmp_path / "job-001").mkdir()
+    with pytest.raises(portal_app.HTTPException) as error:
+        portal_app.anchor_image("job-001", "camera_a", "anchor_01.jpg", None)
+    assert error.value.status_code == 404
+
+
+def test_anchor_image_endpoint_serves_jpeg(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
+    anchor_dir = tmp_path / "job-001" / "anchors" / "camera_a"
+    anchor_dir.mkdir(parents=True)
+    anchor_path = anchor_dir / "anchor_01.jpg"
+    anchor_path.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
+
+    response = portal_app.anchor_image("job-001", "camera_a", "anchor_01.jpg", None)
+    assert response.media_type == "image/jpeg"
+    assert Path(response.path).name == "anchor_01.jpg"
