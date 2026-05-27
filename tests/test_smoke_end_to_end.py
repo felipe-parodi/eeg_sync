@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -245,3 +246,10 @@ def test_run_portal_job_end_to_end_on_compressed_video(tmp_path: Path) -> None:
     overlay = camera_dir / "overlay_smoke.mp4"
     assert overlay.exists(), f"overlay video missing under {camera_dir}"
     assert overlay.stat().st_size > 0, "overlay video is empty"
+
+    # The results zip ships a top-level README describing every file.
+    result_zip = Path(final_status["result_zip"])
+    assert result_zip.exists(), f"result zip missing at {result_zip}"
+    with zipfile.ZipFile(result_zip) as archive:
+        names = archive.namelist()
+    assert f"{session_id}/README.md" in names, f"README missing from zip: {names}"

@@ -18,6 +18,7 @@ from portal.jobs import (
     SessionBlock,
     build_ffmpeg_compression_command,
     build_processing_steps,
+    build_results_readme,
     final_upload_path_for,
     make_result_zip,
     mark_chunk_received,
@@ -600,6 +601,32 @@ def test_make_result_zip_excludes_frames_and_intermediate(tmp_path: Path) -> Non
     assert not any(
         "/intermediate/" in n for n in names
     ), f"intermediate leaked: {names}"
+
+
+def test_build_results_readme_documents_files_schema_and_loading(
+    tmp_path: Path,
+) -> None:
+    readme = build_results_readme(_job_config_two_cameras(tmp_path))
+
+    # Session header and the block it documents.
+    assert "# P001c" in readme
+    assert "free_play" in readme
+    # Points analysts at the final, analysis-ready files.
+    assert "pose_3d_smooth.csv" in readme
+    assert "tracks_2d_smooth.csv" in readme
+    # Documents the full processing lineage including interpolation.
+    assert "tracks_2d_interpolated.csv" in readme
+    # Schema details a reader needs to interpret columns.
+    assert "torso_distance_px" in readme
+    assert "peak_lag_s" in readme
+    assert "Positive = child follows parent" in readme
+    # COCO keypoint mapping so kp_000.. are meaningful.
+    assert "kp_000" in readme
+    assert "nose" in readme
+    # Canonical role ids after filtering.
+    assert "0 = parent" in readme
+    # A concrete load snippet for humans and LLMs.
+    assert "pd.read_csv" in readme
 
 
 # ---------------------------------------------------------------------------
