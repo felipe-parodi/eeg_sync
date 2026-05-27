@@ -722,6 +722,32 @@ def build_phase2_steps(
                     name=f"filter tracks {camera_id}",
                     argv=filter_argv,
                 ),
+                # Fill short detection gaps before smoothing: reindex each
+                # track onto a regular frame grid and linearly interpolate the
+                # bbox and pose across gaps. The interpolator caps the fill at
+                # 3x the median frame step, so brief drop-outs (the flicker)
+                # are bridged but long occlusions/exits stay empty. Smoothing
+                # then runs on the gap-filled series.
+                CommandStep(
+                    name=f"interpolate tracks {camera_id}",
+                    argv=[
+                        python,
+                        "-m",
+                        "video_analysis.interpolate",
+                        "--camera-dir",
+                        str(camera_dir),
+                        "--target-fps",
+                        str(config.frame_rate),
+                        "--tracks-input",
+                        "tracks_2d_filtered.csv",
+                        "--pose-input",
+                        "pose_3d_filtered.csv",
+                        "--tracks-output",
+                        "tracks_2d_interpolated.csv",
+                        "--pose-output",
+                        "pose_3d_interpolated.csv",
+                    ],
+                ),
                 CommandStep(
                     name=f"smooth tracks {camera_id}",
                     argv=[
@@ -731,9 +757,9 @@ def build_phase2_steps(
                         "--camera-dir",
                         str(camera_dir),
                         "--pose-input",
-                        "pose_3d_filtered.csv",
+                        "pose_3d_interpolated.csv",
                         "--tracks-input",
-                        "tracks_2d_filtered.csv",
+                        "tracks_2d_interpolated.csv",
                         "--pose-output",
                         "pose_3d_smooth.csv",
                         "--tracks-output",
