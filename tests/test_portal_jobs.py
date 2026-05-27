@@ -729,21 +729,29 @@ def test_build_phase2_renders_one_overlay_per_block(tmp_path: Path) -> None:
         s.name: s.argv for s in steps if s.name.startswith("overlay video")
     }
 
-    # One overlay step per block, named per block.
+    # The long block gets a first- and a last-window clip; the short block
+    # (under one window) gets only the full-block clip.
     assert set(overlay_steps) == {
         "overlay video camera_a free_play",
+        "overlay video camera_a free_play (end)",
         "overlay video camera_a clap_synchrony",
     }
 
     free_play_argv = overlay_steps["overlay video camera_a free_play"]
     assert any(arg.endswith("overlay_free_play.mp4") for arg in free_play_argv)
-    # 300s block, 30s cap -> 100s..130s window.
+    # 300s block, 30s cap -> first window 100s..130s.
     assert "1:40" in free_play_argv  # start 100s
     assert "2:10" in free_play_argv  # end 130s (capped)
 
+    end_argv = overlay_steps["overlay video camera_a free_play (end)"]
+    assert any(arg.endswith("overlay_free_play_end.mp4") for arg in end_argv)
+    # Last window of the 100s..400s block: 370s..400s.
+    assert "6:10" in end_argv  # start 370s
+    assert "6:40" in end_argv  # end 400s
+
     clap_argv = overlay_steps["overlay video camera_a clap_synchrony"]
     assert any(arg.endswith("overlay_clap_synchrony.mp4") for arg in clap_argv)
-    # 15s block (< 30s cap) renders in full: 500s..515s.
+    # 15s block (< 30s cap) renders in full once: 500s..515s, no separate end.
     assert "8:20" in clap_argv  # start 500s
     assert "8:35" in clap_argv  # end 515s (full block)
 
