@@ -311,6 +311,12 @@ def test_build_submission_metadata_preserves_raw_and_parsed_inputs() -> None:
     assert metadata["processing"]["pose_model"] == PORTAL_DEFAULT_MODEL_PATH
 
 
+def test_portal_caps_detections_at_two_persons() -> None:
+    # Parent + child only. Extra-person windows remove the experimenter from
+    # the analysis blocks before inference, so a third detection is noise.
+    assert PORTAL_DEFAULT_MAX_PERSONS == 2
+
+
 def test_build_submission_metadata_allows_video_b_to_be_omitted() -> None:
     metadata = build_submission_metadata(
         job_id="job-001",
@@ -656,6 +662,45 @@ def test_build_phase2_injects_anchors_json_per_camera(tmp_path: Path) -> None:
     assert str(anchors_path_b) in by_name["filter tracks camera_b"]
     # Other steps should not get the flag.
     assert "--anchors-json" not in by_name["smooth tracks camera_a"]
+
+
+def test_annotate_page_track_buttons_use_dark_readable_text(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
+    monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
+    portal_app.SESSION_TOKENS.clear()
+    portal_app.create_session_token()
+
+    camera_dir = tmp_path / "job-001" / "anchors" / "camera_a"
+    camera_dir.mkdir(parents=True)
+    (camera_dir / "manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "anchor_idx": 0,
+                    "image_filename": "anchor_000.jpg",
+                    "frame_idx": 10,
+                    "timestamp_s": 1.25,
+                    "tracks": [
+                        {"track_id": 1, "color_bgr": [0, 255, 0]},  # green
+                        {"track_id": 2, "color_bgr": [0, 165, 255]},  # orange
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    response = portal_app.annotate_job("job-001", None)
+    text = response.body.decode("utf-8")
+
+    # The track buttons sit on a light tinted background; the global button
+    # rule paints text white, which is unreadable there. Each track button
+    # must override to dark text.
+    assert "background: rgba(0,255,0,0.12); color: #17202a;" in text
+    assert "background: rgba(255,165,0,0.12); color: #17202a;" in text
 
 
 def test_build_processing_steps_is_phase1_plus_phase2(tmp_path: Path) -> None:

@@ -16,7 +16,10 @@ CHUNK_CAMERA_IDS = {"camera_a", "camera_b"}
 PORTAL_DEFAULT_FRAME_RATE = 8.0
 PORTAL_DEFAULT_IMAGE_WIDTH = 854
 PORTAL_DEFAULT_IMAGE_HEIGHT = 480
-PORTAL_DEFAULT_MAX_PERSONS = 3
+# Two detections per frame: the parent and the child. Extra-person windows
+# (e.g. an experimenter in the room) are excluded from the analysis blocks
+# before inference, so a third tracked person is noise we do not want to keep.
+PORTAL_DEFAULT_MAX_PERSONS = 2
 PORTAL_DEFAULT_MODEL_PATH = "yolo11m-pose.pt"
 PORTAL_DEFAULT_OVERLAY_SECONDS = 120.0
 
