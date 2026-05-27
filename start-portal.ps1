@@ -68,8 +68,15 @@ function Start-CloudflareTunnel {
     # Without this, a pre-existing named-tunnel config (with its own ingress rules,
     # e.g., a catch-all `http_status:404`) silently overrides the quick tunnel and
     # the URL returns 404 for every path.
+    #
+    # `--protocol http2` forces the edge transport off QUIC (UDP). cloudflared's
+    # default QUIC transport stalls large POST bodies on Windows: GET requests
+    # (login, the form, status polls) ride QUIC fine, but chunk uploads hang
+    # until Cloudflare's 100 s edge timeout returns a 524, with the tunnel
+    # logging "Incoming request ended abruptly: context canceled". HTTP/2 runs
+    # over TCP and uploads complete normally. Same quick tunnel, same URL.
     $proc = Start-Process -FilePath 'cloudflared' -ArgumentList @(
-        'tunnel', '--config', 'NUL', '--no-autoupdate',
+        'tunnel', '--config', 'NUL', '--no-autoupdate', '--protocol', 'http2',
         '--url', "http://localhost:$Port"
     ) -RedirectStandardOutput $LogPath `
       -RedirectStandardError $ErrLogPath `
