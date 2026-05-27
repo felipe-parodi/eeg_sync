@@ -56,7 +56,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 UPLOAD_ROOT = REPO_ROOT / "video_inference" / "data" / "portal_uploads"
 JOB_ROOT = REPO_ROOT / "video_inference" / "output" / "portal_jobs"
 OUTPUT_ROOT = REPO_ROOT / "video_inference" / "output"
-CHUNK_SIZE_BYTES = 50 * 1024 * 1024
+# Upload chunk size. Sized so that one HTTP chunk completes well under the
+# Cloudflare Quick Tunnel 100 s edge timeout even on slow campus uplinks:
+# 8 MB takes ~13 s at 5 Mbps, ~64 s at 1 Mbps. Larger chunks (50 MB+) hit
+# Cloudflare 524 on anything slower than ~5 Mbps.
+CHUNK_SIZE_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_JOB_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024
 DEFAULT_SESSION_TTL_SECONDS = 8 * 60 * 60
 LOGIN_RATE_LIMIT_ATTEMPTS = 5
