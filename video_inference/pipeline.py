@@ -376,6 +376,7 @@ def run_camera_pipeline(
             enforce_exact_person_count=config.enforce_exact_person_count,
             keep_empty_frames=config.keep_empty_frames,
             person_class_id=config.person_class_id,
+            frame_rate=config.frame_rate,
         )
         selected_infer_fn = infer_fn or run_ultralytics_pose_on_images
         if config.max_persons == 2 and config.tracker_backend == "internal":
@@ -397,6 +398,7 @@ def run_camera_pipeline(
             enforce_exact_person_count=config.enforce_exact_person_count,
             tracker_backend=config.tracker_backend,
             tracker_name=config.tracker_name,
+            frame_rate=config.frame_rate,
         )
         selected_infer_fn = infer_fn or run_rtmlib_pose_on_images
         if config.max_persons == 2 and config.tracker_backend == "internal":

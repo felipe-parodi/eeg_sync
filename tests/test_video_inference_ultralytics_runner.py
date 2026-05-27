@@ -222,3 +222,47 @@ def test_run_ultralytics_pose_recycles_slots_for_new_tracker_ids(tmp_path, monke
     assert persons_per_frame == [1, 1, 1, 1, 1, 1]
     for frame in payload["frames"]:
         assert frame["persons"][0]["track_id"] in {0, 1}
+
+
+def test_run_ultralytics_pose_forwards_frame_rate_to_bytetrack(tmp_path, monkeypatch):
+    """ByteTrack's lost_track_buffer is interpreted via frame_rate/30. If
+    we don't forward our actual fps, an 8 fps job gets 7.5 s of tolerance
+    instead of 2 s, encouraging cross-person ID re-association during
+    occlusion."""
+    image_folder = tmp_path / "frames"
+    image_folder.mkdir(parents=True, exist_ok=True)
+    for frame_idx in range(2):
+        (image_folder / f"frame_{frame_idx:06d}.jpg").write_bytes(b"x")
+    output_json = tmp_path / "inference_raw.json"
+
+    seen_kwargs: list[dict] = []
+
+    class _CapturingByteTrack(_FakeByteTrack):
+        def __init__(self, **kwargs):
+            seen_kwargs.append(kwargs)
+            super().__init__(**kwargs)
+
+    fake_ultralytics = types.SimpleNamespace(YOLO=_FakeYOLO)
+    fake_supervision = types.SimpleNamespace(
+        Detections=_FakeDetections,
+        ByteTrack=_CapturingByteTrack,
+    )
+    monkeypatch.setitem(sys.modules, "ultralytics", fake_ultralytics)
+    monkeypatch.setitem(sys.modules, "supervision", fake_supervision)
+
+    cfg = UltraRunnerConfig(
+        model_path="fake.pt",
+        image_folder=str(image_folder),
+        output_json=str(output_json),
+        device="cpu",
+        conf=0.1,
+        tracker_backend="roboflow",
+        tracker_name="bytetrack",
+        max_persons=2,
+        frame_rate=8.0,
+    )
+    run_ultralytics_pose_on_images(cfg)
+
+    assert len(seen_kwargs) == 1
+    assert seen_kwargs[0].get("frame_rate") == 8.0
+    assert seen_kwargs[0].get("lost_track_buffer") == 60
