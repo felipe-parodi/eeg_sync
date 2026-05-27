@@ -185,7 +185,7 @@ def test_run_portal_job_end_to_end_on_compressed_video(tmp_path: Path) -> None:
         blocks_by_camera={"camera_a": blocks},
         include_gaze=False,
         frame_rate=2.0,
-        max_persons=3,
+        max_persons=2,
         device="auto",
     )
     write_status(job_dir, {"state": "queued", "message": "smoke test"})

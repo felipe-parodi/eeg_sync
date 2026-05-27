@@ -1575,7 +1575,7 @@ def annotate_job(
                     f'data-anchor="{anchor_idx}" data-camera="{camera_id}" '
                     f'data-parent="{tid}" '
                     f'style="border: 3px solid rgb({r},{g},{b}); '
-                    f'background: rgba({r},{g},{b},0.12);">'
+                    f'background: rgba({r},{g},{b},0.12); color: #17202a;">'
                     f"Track {tid} is parent"
                     f"</button>"
                 )
