@@ -307,9 +307,15 @@ def test_run_ultralytics_pose_accepts_boxmot_tracker_backend(tmp_path, monkeypat
             _FakeBotSort.next_id += len(dets)
             return _TrackResults(rows)
 
-    class _FakeReID:
-        def __init__(self, **kwargs):
+    class _FakeReIDBackend:
+        def warmup(self):
             pass
+
+    class _FakeReID:
+        # Real boxmot ReID exposes the embedding backend on ``.model``; the
+        # tracker holds the backend, not the wrapper.
+        def __init__(self, **kwargs):
+            self.model = _FakeReIDBackend()
 
     botsort_mod = types.ModuleType("boxmot.trackers.botsort.botsort")
     botsort_mod.BotSort = _FakeBotSort

@@ -106,13 +106,19 @@ class BoxmotBotSortAdapter:
         from boxmot.reid.core.reid import ReID
         from boxmot.trackers.botsort.botsort import BotSort
 
-        reid_model = ReID(
+        # boxmot's BotSort calls ``reid_model.get_features(...)`` directly.
+        # ``ReID(...)`` is a high-level wrapper; the actual backend with
+        # ``get_features`` is ``ReID(...).model``. See boxmot's own
+        # ``create_tracker`` in ``boxmot/trackers/tracker_zoo.py``.
+        reid_backend = ReID(
             path=self.reid_weights,
             device=self.device,
             half=self.half,
-        )
+        ).model
+        if hasattr(reid_backend, "warmup"):
+            reid_backend.warmup()
         self._tracker = BotSort(
-            reid_model=reid_model,
+            reid_model=reid_backend,
             with_reid=True,
             track_buffer=int(self.lost_track_buffer),
             frame_rate=int(self.frame_rate),

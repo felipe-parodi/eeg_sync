@@ -112,9 +112,17 @@ def _install_fake_boxmot(monkeypatch, *, det_inds, track_ids):
                 rows.append([0, 0, 1, 1, tid, 0.9, 0, di])
             return _TrackResults(rows)
 
+    class _ReIDBackend:
+        def warmup(self):
+            pass
+
     class _ReID:
+        # Mirrors the real boxmot ReID layout: ``.model`` is the backend
+        # that exposes ``get_features`` / ``warmup``; the wrapper itself
+        # is not what the tracker holds.
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            self.model = _ReIDBackend()
 
     botsort_mod = types.ModuleType("boxmot.trackers.botsort.botsort")
     botsort_mod.BotSort = _BotSort
