@@ -38,6 +38,11 @@ class UltraRunnerConfig:
     enforce_exact_person_count: bool = False
     keep_empty_frames: bool = True
     person_class_id: int = 0
+    # Frame rate at which inference is being run. Forwarded to motion-based
+    # trackers so their lost-track buffer is interpreted in seconds, not at
+    # the supervision default of 30 fps. Wrong here = 7.5 s of tolerance at
+    # 8 fps when the user expected 2 s.
+    frame_rate: float = 30.0
 
 
 def _greedy_nms(
@@ -299,7 +304,9 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
 
         tracker_name = config.tracker_name.lower()
         if tracker_name == "bytetrack":
-            rf_tracker = sv.ByteTrack(lost_track_buffer=60)
+            rf_tracker = sv.ByteTrack(
+                lost_track_buffer=60, frame_rate=float(config.frame_rate)
+            )
         else:
             raise ValueError(
                 f"Unsupported tracker_name '{config.tracker_name}' for roboflow backend. "
