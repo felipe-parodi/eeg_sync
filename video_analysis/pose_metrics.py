@@ -259,22 +259,21 @@ def plot_synchrony(
     ax_xcorr.set_title("Movement synchrony")
     ax_xcorr.set_ylim(0, 1)
 
-    # Right: mean lag per block
+    # Right: mean lag per block. No error bars: per-window peak-lag scatter is
+    # dominated by noise when synchrony is weak (the cross-correlation peak
+    # wanders across the +/-2 s search range), so its standard deviation swamps
+    # the mean and is not informative. Show the block-mean lag only.
     lag_means = []
-    lag_stds = []
     for name in block_names:
         block_data = xcorr_df[xcorr_df["block"] == name]["peak_lag_s"]
         lag_means.append(float(block_data.mean()))
-        lag_stds.append(float(block_data.std()))
 
     bar_colors = ["#e57373" if m > 0 else "#64B5F6" for m in lag_means]
     ax_lag.bar(
         x,
         lag_means,
-        yerr=lag_stds,
         color=bar_colors,
         alpha=0.7,
-        capsize=5,
         edgecolor="black",
         linewidth=0.5,
     )
