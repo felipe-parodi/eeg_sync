@@ -271,15 +271,15 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
     if config.max_persons < 1:
         raise ValueError("max_persons must be >= 1")
 
-    if config.tracker_backend not in {"internal", "roboflow"}:
+    if config.tracker_backend not in {"internal", "roboflow", "boxmot"}:
         raise ValueError(
             f"Invalid tracker_backend '{config.tracker_backend}'. "
-            "Expected 'internal' or 'roboflow'."
+            "Expected one of: 'internal', 'roboflow', 'boxmot'."
         )
     if config.tracker_backend == "internal" and config.max_persons != 2:
         raise ValueError(
             "tracker_backend=internal currently supports max_persons=2 only. "
-            "Use tracker_backend=roboflow for 3+ people."
+            "Use tracker_backend=roboflow or boxmot for 3+ people."
         )
 
     ultra_device = _resolve_ultralytics_device(config.device)
