@@ -66,6 +66,7 @@ gaze-synchrony = "gaze_analysis.synchrony:main"
 gaze-plot = "gaze_analysis.plotting:main"
 video-pose-metrics = "video_analysis.pose_metrics:main"
 video-gaze-metrics = "video_analysis.gaze_metrics:main"
+video-anchor-frames = "video_analysis.anchor_frames:main"
 video-gaze-snapshots = "video_analysis.gaze_snapshots:main"
 
 [tool.hatch.build.targets.wheel]
