@@ -18,7 +18,10 @@ PORTAL_DEFAULT_IMAGE_WIDTH = 854
 PORTAL_DEFAULT_IMAGE_HEIGHT = 480
 PORTAL_DEFAULT_MAX_PERSONS = 3
 PORTAL_DEFAULT_MODEL_PATH = "yolo11m-pose.pt"
-PORTAL_DEFAULT_OVERLAY_SECONDS = 120.0
+# Length of each per-block QC overlay clip. One clip is rendered per analysis
+# block (capped at this length), so the colleague sees tracking quality for
+# every block rather than only the first.
+PORTAL_DEFAULT_OVERLAY_SECONDS = 30.0
 
 
 @dataclass
@@ -690,10 +693,6 @@ def build_phase2_steps(
         camera_blocks = blocks_for_camera(config, camera_id)
         blocks_arg = build_blocks_arg(camera_blocks)
         camera_dir = session_dir / camera_id
-        overlay_start = camera_blocks[0].start_s
-        overlay_end = min(
-            camera_blocks[0].end_s, overlay_start + config.overlay_seconds
-        )
 
         filter_argv = [
             python,
@@ -754,8 +753,20 @@ def build_phase2_steps(
                         "pose_3d_smooth.csv",
                     ],
                 ),
+            ]
+        )
+
+        # One short overlay per analysis block. Each clip is capped at
+        # config.overlay_seconds so the colleague gets a quick QC sample of
+        # every block (free_play, clap-synchrony, storybook, ...) instead of
+        # a single clip of only the first block. Blocks shorter than the cap
+        # render in full.
+        for block in camera_blocks:
+            overlay_start = block.start_s
+            overlay_end = min(block.end_s, overlay_start + config.overlay_seconds)
+            steps.append(
                 CommandStep(
-                    name=f"overlay video {camera_id}",
+                    name=f"overlay video {camera_id} {block.name}",
                     argv=[
                         python,
                         "-m",
@@ -763,7 +774,7 @@ def build_phase2_steps(
                         "--camera-dir",
                         str(camera_dir),
                         "--output-video",
-                        str(camera_dir / "overlay_2min.mp4"),
+                        str(camera_dir / f"overlay_{block.name}.mp4"),
                         "--pose-csv",
                         "pose_3d_smooth.csv",
                         "--tracks-csv",
@@ -773,9 +784,8 @@ def build_phase2_steps(
                         "--end-time",
                         format_seconds_for_cli(overlay_end),
                     ],
-                ),
-            ]
-        )
+                )
+            )
 
         if config.include_gaze:
             steps.extend(

@@ -578,7 +578,7 @@ def test_make_result_zip_excludes_frames_and_intermediate(tmp_path: Path) -> Non
     intermediate_dir.mkdir()
 
     (camera_dir / "tracks_2d.csv").write_text("frame_idx,track_id\n", encoding="utf-8")
-    (camera_dir / "overlay_2min.mp4").write_bytes(b"\x00")
+    (camera_dir / "overlay_free_play.mp4").write_bytes(b"\x00")
     (frames_dir / "frame_000001.jpg").write_bytes(b"\xff\xd8\xff")
     (frames_dir / "frame_index.csv").write_text("frame_idx\n1\n", encoding="utf-8")
     (intermediate_dir / "inference_raw.json").write_text("{}", encoding="utf-8")
@@ -589,7 +589,7 @@ def test_make_result_zip_excludes_frames_and_intermediate(tmp_path: Path) -> Non
     with ZipFile(zip_path) as archive:
         names = archive.namelist()
     assert "P001c/camera_a/tracks_2d.csv" in names
-    assert "P001c/camera_a/overlay_2min.mp4" in names
+    assert "P001c/camera_a/overlay_free_play.mp4" in names
     assert not any("/frames/" in n for n in names), f"frames leaked: {names}"
     assert not any(
         "/intermediate/" in n for n in names
@@ -631,10 +631,44 @@ def test_build_phase2_returns_per_camera_steps_without_anchors(tmp_path: Path) -
     assert "filter tracks camera_a" in names
     assert "filter tracks camera_b" in names
     assert "smooth tracks camera_a" in names
-    assert "overlay video camera_a" in names
+    assert "overlay video camera_a free_play" in names
     # Without anchors, no --anchors-json flag anywhere
     joined = "\n".join(" ".join(s.argv) for s in steps)
     assert "--anchors-json" not in joined
+
+
+def test_build_phase2_renders_one_overlay_per_block(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    config = _job_config_two_cameras(tmp_path)
+    # Two blocks for camera A: a long one (capped) and a short one (full).
+    long_block = SessionBlock(name="free_play", start_s=100.0, end_s=400.0)
+    short_block = SessionBlock(name="clap_synchrony", start_s=500.0, end_s=515.0)
+    config.blocks_by_camera = {"camera_a": [long_block, short_block]}
+    config.video_b = None  # camera A only, keeps the assertion focused
+
+    steps = build_phase2_steps(config)
+    overlay_steps = {
+        s.name: s.argv for s in steps if s.name.startswith("overlay video")
+    }
+
+    # One overlay step per block, named per block.
+    assert set(overlay_steps) == {
+        "overlay video camera_a free_play",
+        "overlay video camera_a clap_synchrony",
+    }
+
+    free_play_argv = overlay_steps["overlay video camera_a free_play"]
+    assert any(arg.endswith("overlay_free_play.mp4") for arg in free_play_argv)
+    # 300s block, 30s cap -> 100s..130s window.
+    assert "1:40" in free_play_argv  # start 100s
+    assert "2:10" in free_play_argv  # end 130s (capped)
+
+    clap_argv = overlay_steps["overlay video camera_a clap_synchrony"]
+    assert any(arg.endswith("overlay_clap_synchrony.mp4") for arg in clap_argv)
+    # 15s block (< 30s cap) renders in full: 500s..515s.
+    assert "8:20" in clap_argv  # start 500s
+    assert "8:35" in clap_argv  # end 515s (full block)
 
 
 def test_build_phase2_injects_anchors_json_per_camera(tmp_path: Path) -> None:
