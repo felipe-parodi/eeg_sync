@@ -1069,11 +1069,15 @@ The other CSVs are earlier stages kept for transparency and debugging:
 |---|---|---|---|
 | 1. raw | `tracks_2d.csv` | `pose_3d.csv` | Every detection from every tracked person, before role assignment. |
 | 2. filtered | `tracks_2d_filtered.csv` | `pose_3d_filtered.csv` | Restricted to the two people (parent, child) inside the analysis blocks, using your anchor labels. |
-| 3. interpolated | `tracks_2d_interpolated.csv` | `pose_3d_interpolated.csv` | Short detection gaps (a few frames) linearly filled so boxes/joints do not flicker. Long gaps are left empty. |
+| 3. interpolated | `tracks_2d_interpolated.csv` | `pose_3d_interpolated.csv` | Detection gaps up to 1 s linearly filled so boxes/joints do not flicker. Longer gaps are left empty. Filled rows are flagged in the `interpolated` column. |
 | 4. smooth | `tracks_2d_smooth.csv` | `pose_3d_smooth.csv` | Stage 3 + temporal EMA smoothing. **Use these.** |
 
 After stage 2, `track_id` is canonical: **`0` = parent, `1` = child**
 (`track_label` column says so explicitly).
+
+From stage 3 on, the `interpolated` column is `True` for any row whose
+position was filled (gap-bridged or low-confidence-infilled) rather than
+directly observed — useful if you want to analyze only observed frames.
 
 ## File schemas
 
@@ -1087,6 +1091,7 @@ After stage 2, `track_id` is canonical: **`0` = parent, `1` = child**
 | `track_label` | str | `parent` or `child` (or `unknown` before filtering). |
 | `bbox_x1,bbox_y1,bbox_x2,bbox_y2` | float | Bounding box corners in **image pixels** (top-left origin). |
 | `track_confidence` | float | Detection confidence, 0–1. |
+| `interpolated` | bool | `True` if this row was gap-filled rather than observed (stage 3+ only). |
 
 ### `pose_3d*.csv` — one row per person per keypoint per frame
 
@@ -1097,6 +1102,7 @@ After stage 2, `track_id` is canonical: **`0` = parent, `1` = child**
 | `x_m,y_m` | float | Keypoint position in **image pixels** (top-left origin). The `_m` suffix is a naming artifact; these are 2D pixel coordinates, not meters. |
 | `z_m` | float | Always `0`. The pose model is 2D; this is a placeholder column for pipeline compatibility, not a depth estimate. |
 | `keypoint_confidence` | float | Per-keypoint confidence, 0–1. Low-confidence joints are less reliable. |
+| `interpolated` | bool | `True` if this keypoint was gap-filled or low-confidence-infilled rather than observed (stage 3+ only). |
 
 COCO-17 keypoint order (`kp_000`→nose, increasing index):
 

@@ -297,6 +297,44 @@ def test_infill_fills_short_low_conf_runs():
     np.testing.assert_array_almost_equal(middle, [12.5, 15.0, 17.5])
 
 
+def test_infill_flags_filled_keypoints_as_interpolated():
+    """Infilled rows are flagged interpolated; observed rows are not."""
+    df = _make_pose_df(
+        x_values=[10.0, 999.0, 20.0],
+        confidences=[0.9, 0.05, 0.9],
+    )
+    out = infill_low_confidence_keypoints(df, conf_threshold=0.3, max_infill_run=3)
+
+    assert "interpolated" in out.columns
+    mid = out[out["timestamp_s"] == 1.0].iloc[0]
+    assert bool(mid["interpolated"]) is True
+    assert mid["x_m"] == 15.0  # linear interp between 10 and 20
+    ends = out[out["timestamp_s"].isin([0.0, 2.0])]
+    assert not ends["interpolated"].any()
+
+
+def test_smooth_camera_outputs_propagates_interpolated_column(tmp_path: Path):
+    """The interpolated flag survives infill + smoothing into the smooth CSV."""
+    camera_dir = tmp_path / "camera_a"
+    camera_dir.mkdir()
+    # Interpolator output carries an interpolated column; mark frame 2 filled.
+    pose = _make_pose_df(x_values=[0.0, 0.0, 10.0, 10.0, 10.0])
+    pose["interpolated"] = [False, False, True, False, False]
+    tracks = _make_tracks_df(x1_values=[0.0, 0.0, 10.0, 10.0, 10.0])
+    tracks["interpolated"] = [False, False, True, False, False]
+    pose.to_csv(camera_dir / "pose_3d_interpolated.csv", index=False)
+    tracks.to_csv(camera_dir / "tracks_2d_interpolated.csv", index=False)
+
+    smooth_camera_outputs(SmoothingConfig(camera_dir=str(camera_dir), tau=0.5))
+
+    pose_smooth = pd.read_csv(camera_dir / "pose_3d_smooth.csv")
+    tracks_smooth = pd.read_csv(camera_dir / "tracks_2d_smooth.csv")
+    assert "interpolated" in pose_smooth.columns
+    assert "interpolated" in tracks_smooth.columns
+    assert bool(pose_smooth.iloc[2]["interpolated"]) is True
+    assert bool(tracks_smooth.iloc[2]["interpolated"]) is True
+
+
 # --- CLI integration ---
 
 

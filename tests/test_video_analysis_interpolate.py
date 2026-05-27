@@ -170,3 +170,61 @@ def test_interpolation_does_not_fill_large_gaps():
         assert t not in result_ts, f"t={t} should NOT be in result (gap centre)"
     # Total output rows should be fewer than the full 12 target timestamps.
     assert len(result) < 12, f"Gap should reduce output, got {len(result)} rows"
+
+
+def test_interpolate_flags_filled_rows_as_interpolated():
+    """Filled grid points are flagged interpolated; observed rows are not."""
+    tracks_df = pd.DataFrame(
+        {
+            "frame_idx": [0, 2],
+            "timestamp_s": [0.0, 2.0],
+            "track_id": [0, 0],
+            "track_label": ["parent", "parent"],
+            "bbox_x1": [10.0, 30.0],
+            "bbox_y1": [0.0, 0.0],
+            "bbox_x2": [20.0, 40.0],
+            "bbox_y2": [50.0, 50.0],
+            "track_confidence": [0.9, 0.9],
+        }
+    )
+    target_ts = np.arange(0.0, 2.5, 1.0)  # 0, 1, 2
+    out = interpolate_tracks_2d(
+        tracks_df, target_ts, target_fps=1.0, max_gap_seconds=1.0
+    )
+
+    assert "interpolated" in out.columns
+    observed = out[out["timestamp_s"].isin([0.0, 2.0])]
+    filled = out[out["timestamp_s"] == 1.0]
+    assert not observed["interpolated"].any()
+    assert filled["interpolated"].all()
+    assert filled.iloc[0]["bbox_x1"] == 20.0  # linear midpoint of 10 and 30
+
+
+def test_interpolate_max_gap_seconds_controls_fill_extent():
+    """A larger max_gap_seconds bridges a gap the smaller one leaves empty."""
+    tracks_df = pd.DataFrame(
+        {
+            "frame_idx": [0, 5],
+            "timestamp_s": [0.0, 5.0],
+            "track_id": [0, 0],
+            "track_label": ["parent", "parent"],
+            "bbox_x1": [10.0, 60.0],
+            "bbox_y1": [0.0, 0.0],
+            "bbox_x2": [20.0, 70.0],
+            "bbox_y2": [50.0, 50.0],
+            "track_confidence": [0.9, 0.9],
+        }
+    )
+    # 4-frame interior gap (t=1..4); t=2 is well beyond a 1 s cap from either end.
+    target_ts = np.arange(0.0, 5.5, 1.0)
+
+    tight = interpolate_tracks_2d(
+        tracks_df, target_ts, target_fps=1.0, max_gap_seconds=1.0
+    )
+    wide = interpolate_tracks_2d(
+        tracks_df, target_ts, target_fps=1.0, max_gap_seconds=5.0
+    )
+
+    assert 2.0 not in set(tight["timestamp_s"])  # 1 s cap leaves the centre empty
+    assert 2.0 in set(wide["timestamp_s"])  # 5 s cap bridges it
+    assert wide[wide["timestamp_s"] == 2.0]["interpolated"].all()
