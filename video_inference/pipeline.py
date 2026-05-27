@@ -511,7 +511,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--tracker-backend",
         default="internal",
-        choices=["internal", "roboflow"],
+        choices=["internal", "roboflow", "boxmot"],
     )
     run_parser.add_argument("--tracker-name", default="bytetrack", type=str)
     run_parser.add_argument("--max-persons", default=2, type=int)

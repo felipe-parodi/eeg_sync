@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from .device import resolve_device
+from .trackers import TrackerAdapter, make_tracker
 from .tracking import (
     AssignedDetection,
     TwoPersonTrackerState,
@@ -291,27 +292,21 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
     source_tracker_id_by_output_id: Dict[int, int] = {}
     last_seen_frame_by_output_id: Dict[int, int] = {}
 
-    rf_tracker = None
-    sv = None
-    if config.tracker_backend == "roboflow":
+    tracker_adapter: Optional[TrackerAdapter] = None
+    if config.tracker_backend != "internal":
         try:
-            import supervision as sv  # type: ignore
+            tracker_adapter = make_tracker(
+                backend=config.tracker_backend,
+                name=config.tracker_name,
+                frame_rate=float(config.frame_rate),
+                device=ultra_device,
+            )
         except ImportError as error:
             raise ImportError(
-                "tracker_backend=roboflow requires `supervision`. "
-                "Install with: pip install supervision"
+                f"tracker_backend={config.tracker_backend!r} dependency not "
+                "installed. For 'roboflow'+'bytetrack': pip install supervision. "
+                "For 'boxmot'+'botsort': pip install boxmot."
             ) from error
-
-        tracker_name = config.tracker_name.lower()
-        if tracker_name == "bytetrack":
-            rf_tracker = sv.ByteTrack(
-                lost_track_buffer=60, frame_rate=float(config.frame_rate)
-            )
-        else:
-            raise ValueError(
-                f"Unsupported tracker_name '{config.tracker_name}' for roboflow backend. "
-                "Currently supported: bytetrack"
-            )
 
     image_list = list(images)
     batch_size = max(1, config.batch_size)
@@ -385,18 +380,17 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
                 )
 
             persons = []
-            if rf_tracker is not None and sv is not None:
-                rf_detections = sv.Detections(
-                    xyxy=np.asarray([det["bbox"] for det in detections], dtype=float),
-                    confidence=np.asarray(
+            if tracker_adapter is not None:
+                tracked_ids_list = tracker_adapter.assign(
+                    detections_xyxy=np.asarray(
+                        [det["bbox"] for det in detections], dtype=float
+                    ),
+                    confidences=np.asarray(
                         [float(det["confidence"]) for det in detections], dtype=float
                     ),
-                    class_id=np.zeros(len(detections), dtype=int),
+                    image=result.orig_img,
                 )
-                tracked = rf_tracker.update_with_detections(rf_detections)
-                tracked_ids = getattr(tracked, "tracker_id", None)
-                if tracked_ids is not None:
-                    tracked_ids_list = np.asarray(tracked_ids).tolist()
+                if tracked_ids_list:
                     active_output_slots: Set[int] = set()
                     for detection_index, source_track_id in enumerate(tracked_ids_list):
                         if detection_index >= len(detections):

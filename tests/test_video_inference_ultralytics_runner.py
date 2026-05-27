@@ -166,6 +166,7 @@ class _FakeYOLO:
             types.SimpleNamespace(
                 boxes=_FakeBoxes(),
                 keypoints=_FakeKeypoints(),
+                orig_img=np.zeros((480, 640, 3), dtype=np.uint8),
             )
             for _ in range(n)
         ]
