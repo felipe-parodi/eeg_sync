@@ -229,6 +229,39 @@ def test_job_detail_escapes_status_message(tmp_path: Path, monkeypatch) -> None:
     assert "&lt;b&gt;failed&lt;/b&gt;" in text
 
 
+def test_job_detail_links_to_annotation_when_awaiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
+    job_dir = tmp_path / "job-001"
+    write_status(
+        job_dir,
+        {
+            "state": "awaiting_annotation",
+            "message": "Label which detection is the parent on each anchor frame.",
+            "annotate_url": "/jobs/job-001/annotate",
+        },
+    )
+
+    response = portal_app.job_detail("job-001", None)
+    text = response.body.decode("utf-8")
+
+    assert 'href="/jobs/job-001/annotate"' in text
+
+
+def test_job_detail_no_annotation_link_when_not_awaiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
+    job_dir = tmp_path / "job-001"
+    write_status(job_dir, {"state": "running", "message": "Tracking poses."})
+
+    response = portal_app.job_detail("job-001", None)
+    text = response.body.decode("utf-8")
+
+    assert "/annotate" not in text
+
+
 def test_build_submission_metadata_preserves_raw_and_parsed_inputs() -> None:
     metadata = build_submission_metadata(
         job_id="job-001",

@@ -349,6 +349,15 @@ def _html_page(title: str, body: str) -> HTMLResponse:
       font-weight: 700;
       cursor: pointer;
     }}
+    .button-link {{
+      display: inline-block;
+      border-radius: 4px;
+      background: #176b87;
+      color: white;
+      padding: 11px 16px;
+      font-weight: 700;
+      text-decoration: none;
+    }}
     .top-actions {{
       display: flex;
       justify-content: flex-end;
@@ -1383,6 +1392,13 @@ def job_detail(
             f'<p class="cta"><a href="/jobs/{safe_job_id}/download">'
             "Download results zip</a></p>"
         )
+    annotate = ""
+    if status.get("state") == "awaiting_annotation":
+        annotate = (
+            '<p class="cta"><a class="button-link" '
+            f'href="/jobs/{safe_job_id}/annotate">'
+            "Label parent vs child to continue</a></p>"
+        )
     refresh_script = ""
     if status.get("state") in {"uploading", "queued", "running"}:
         refresh_script = (
@@ -1398,6 +1414,7 @@ def job_detail(
   <h2>{display_job_id}</h2>
   <p><strong>Status:</strong> {state}</p>
   <p><strong>Message:</strong> {message}</p>
+  {annotate}
   {download}
   {log_link}
   {refresh_script}
