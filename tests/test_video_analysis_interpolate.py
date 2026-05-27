@@ -11,6 +11,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from video_analysis.interpolate import (  # noqa: E402
     InterpolationConfig,
+    _build_target_timestamps,
     interpolate_camera_outputs,
     interpolate_tracks_2d,
 )
@@ -228,3 +229,35 @@ def test_interpolate_max_gap_seconds_controls_fill_extent():
     assert 2.0 not in set(tight["timestamp_s"])  # 1 s cap leaves the centre empty
     assert 2.0 in set(wide["timestamp_s"])  # 5 s cap bridges it
     assert wide[wide["timestamp_s"] == 2.0]["interpolated"].all()
+
+
+def test_interpolate_aligns_non_representable_fps_at_large_offset():
+    """A 6 fps grid (1/6 s, not float-exact) at a large start must not collapse.
+
+    Regression: source timestamps are frame_idx / 6 while the target grid is
+    built by np.arange; at a large offset (a block starting at 829 s) the
+    accumulated arange error diverged from frame_idx / 6, so an exact-match
+    reindex dropped nearly every observed frame.
+    """
+    fps = 6.0
+    base_frame = 4974  # 829 s at 6 fps
+    n = 12
+    ts = np.array([(base_frame + k) / fps for k in range(n)])
+    tracks_df = pd.DataFrame(
+        {
+            "frame_idx": [base_frame + k for k in range(n)],
+            "timestamp_s": ts,
+            "track_id": [0] * n,
+            "track_label": ["parent"] * n,
+            "bbox_x1": [float(k) for k in range(n)],
+            "bbox_y1": [0.0] * n,
+            "bbox_x2": [10.0] * n,
+            "bbox_y2": [20.0] * n,
+            "track_confidence": [0.9] * n,
+        }
+    )
+    target = _build_target_timestamps(tracks_df, pd.DataFrame(), fps)
+    out = interpolate_tracks_2d(tracks_df, target, target_fps=fps)
+
+    # Every observed frame must survive (no float-mismatch collapse).
+    assert int((~out["interpolated"]).sum()) == n
