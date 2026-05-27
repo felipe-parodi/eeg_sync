@@ -18,6 +18,7 @@ at what to install rather than dumping an opaque traceback.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -92,12 +93,15 @@ def test_video_infer_cli_runs_end_to_end_on_compressed_video(tmp_path: Path) -> 
         "ultralytics",
         "--ultralytics-model-path",
         "yolo11m-pose.pt",
+        # Use the portal's production tracker so the smoke test catches
+        # any regression in the boxmot+botsort wiring (validation allow-
+        # lists, ReID backend layering, etc.) before a real upload does.
         "--tracker-backend",
-        "roboflow",
+        "boxmot",
         "--tracker-name",
-        "bytetrack",
+        "botsort",
         "--max-persons",
-        "4",
+        "3",
         "--frame-rate",
         "1.0",
         "--analysis-windows-camera-a",
@@ -131,12 +135,26 @@ def test_video_infer_cli_runs_end_to_end_on_compressed_video(tmp_path: Path) -> 
 
 
 def test_run_portal_job_end_to_end_on_compressed_video(tmp_path: Path) -> None:
-    """Exercise the portal's run_portal_job path against a real video."""
+    """Exercise the full portal flow: phase 1 -> anchors -> phase 2.
+
+    Mirrors how a real colleague would use the portal: upload, wait for
+    awaiting_annotation, label the rendered anchors, get the final zip.
+    The test fakes the labelling step by reading the per-camera anchor
+    manifest written by phase 1 and asserting parent/child against
+    whichever two track ids are present.
+    """
     video = _require_sample_video()
     _require_ffmpeg()
     _require_ultralytics()
 
-    from portal.jobs import PortalJobConfig, SessionBlock, run_portal_job, write_status
+    from portal.jobs import (
+        PortalJobConfig,
+        SessionBlock,
+        read_status,
+        resume_portal_job_phase2,
+        run_portal_job,
+        write_status,
+    )
 
     job_id = "smoke_job"
     session_id = "smoke"
@@ -152,7 +170,9 @@ def test_run_portal_job_end_to_end_on_compressed_video(tmp_path: Path) -> None:
     staged_video.parent.mkdir(parents=True)
     shutil.copy2(video, staged_video)
 
-    blocks = [SessionBlock(name="smoke", start_s=0.0, end_s=2.0, color="gray")]
+    # Window must be wide enough that anchor extraction (which drops the
+    # first/last ~1 s by default) still has frames to choose from.
+    blocks = [SessionBlock(name="smoke", start_s=0.0, end_s=8.0, color="gray")]
     config = PortalJobConfig(
         job_id=job_id,
         session_id=session_id,
@@ -164,27 +184,59 @@ def test_run_portal_job_end_to_end_on_compressed_video(tmp_path: Path) -> None:
         blocks=blocks,
         blocks_by_camera={"camera_a": blocks},
         include_gaze=False,
-        frame_rate=1.0,
-        max_persons=4,
+        frame_rate=2.0,
+        max_persons=3,
         device="auto",
     )
-    # Seed initial status; run_portal_job updates it as it progresses.
     write_status(job_dir, {"state": "queued", "message": "smoke test"})
 
+    # Phase 1: pose + tracking + anchor extraction.
     run_portal_job(config, ROOT_DIR)
 
-    camera_dir = output_root / session_id / "camera_a"
-    log_path = job_dir / "job.log"
-    log_excerpt = (
-        log_path.read_text(errors="replace") if log_path.exists() else "(no job.log)"
-    )
+    status_after_phase1 = read_status(job_dir)
     assert (
-        camera_dir / "tracks_2d.csv"
-    ).exists(), f"tracks_2d.csv missing under {camera_dir}.\njob.log:\n{log_excerpt}"
+        status_after_phase1["state"] == "awaiting_annotation"
+    ), f"expected awaiting_annotation, got {status_after_phase1}"
+
+    camera_dir = output_root / session_id / "camera_a"
+    assert (camera_dir / "tracks_2d.csv").exists()
     assert (camera_dir / "pose_3d.csv").exists()
     assert (camera_dir / "manifest.json").exists()
-    # Downstream stages: filter -> smooth -> metrics -> overlay video. Each is
-    # a separate subprocess, so a regression in any one breaks one of these.
+
+    # Anchor frames + per-camera manifest landed under the job dir.
+    anchors_manifest = json.loads(
+        (job_dir / "anchors" / "camera_a" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert anchors_manifest, "expected at least one anchor frame"
+
+    # Synthesize an annotation: for every anchor that has 2 tracks, pick the
+    # first as parent and the second as child. (For a smoke test, the chosen
+    # role is arbitrary -- we only care that the anchor-aware filter runs.)
+    anchors_json = []
+    for entry in anchors_manifest:
+        tracks = entry.get("tracks", [])
+        if len(tracks) >= 2:
+            anchors_json.append(
+                {
+                    "frame_idx": int(entry["frame_idx"]),
+                    "parent_track_id": int(tracks[0]["track_id"]),
+                    "child_track_id": int(tracks[1]["track_id"]),
+                }
+            )
+    if not anchors_json:
+        pytest.skip(
+            "Sample video produced no anchors with >=2 tracks; cannot exercise "
+            "the anchor-aware filter end-to-end."
+        )
+    (job_dir / "anchors" / "camera_a" / "anchors.json").write_text(
+        json.dumps(anchors_json), encoding="utf-8"
+    )
+
+    # Phase 2: anchor-aware filter -> smooth -> metrics -> overlay -> zip.
+    resume_portal_job_phase2(config, ROOT_DIR)
+
+    final_status = read_status(job_dir)
+    assert final_status["state"] == "complete", f"expected complete, got {final_status}"
     assert (camera_dir / "tracks_2d_filtered.csv").exists()
     assert (camera_dir / "tracks_2d_smooth.csv").exists()
     assert (camera_dir / "pose_metrics_summary.json").exists()
