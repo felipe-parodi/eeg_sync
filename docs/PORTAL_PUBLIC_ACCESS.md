@@ -42,9 +42,11 @@ Upload speed is driven by the slowest part of the path:
 - browser and TLS overhead,
 - concurrent network traffic.
 
-Increasing chunk size beyond 50 MiB usually does not change the true bandwidth
-limit. Larger chunks mostly reduce request overhead, but they increase retry
-cost and are more likely to hit proxy request-size limits.
+The browser sends the upload in 8 MiB chunks. Larger chunks reduce request
+overhead but risk Cloudflare Quick Tunnel's 100 s per-request edge timeout
+(error 524) on slower uplinks — a 50 MiB chunk takes ~80 s at 5 Mbps and
+fails outright below that. 8 MiB keeps every chunk under 15 s at 5 Mbps and
+under 65 s even at 1 Mbps.
 
 ## Saved Run Metadata
 
