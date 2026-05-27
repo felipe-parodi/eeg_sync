@@ -340,8 +340,13 @@ def test_run_ultralytics_pose_accepts_boxmot_tracker_backend(tmp_path, monkeypat
         assert len(frame["persons"]) >= 1
 
 
-def test_run_ultralytics_pose_rejects_unknown_tracker_backend(tmp_path):
-    """Validation error mentions all three valid options."""
+def test_run_ultralytics_pose_rejects_unknown_tracker_backend(tmp_path, monkeypatch):
+    """Validation error mentions all three valid options. ultralytics is
+    stubbed because CI's dev extra doesn't install it, but the validation
+    we're checking runs immediately after the import so a stub is enough."""
+    monkeypatch.setitem(
+        sys.modules, "ultralytics", types.SimpleNamespace(YOLO=_FakeYOLO)
+    )
     cfg = UltraRunnerConfig(
         model_path="fake.pt",
         image_folder=str(tmp_path),
