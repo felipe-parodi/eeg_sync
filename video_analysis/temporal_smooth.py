@@ -23,6 +23,11 @@ class SmoothingConfig:
     tau: float = 0.15
     conf_threshold: float = 0.3
     conf_gate: float = 0.3
+    # Longest run of low-confidence frames to infill, in seconds (time-based so
+    # it is independent of the sampling rate). Converted to a frame count from
+    # the observed timestamp spacing. Infilled rows are flagged in the
+    # ``interpolated`` column.
+    max_infill_gap_s: float = 1.0
     pose_input: str = "pose_3d_interpolated.csv"
     tracks_input: str = "tracks_2d_interpolated.csv"
     pose_output: str = "pose_3d_smooth.csv"
@@ -240,10 +245,18 @@ def infill_low_confidence_keypoints(
     if pose_df.empty:
         return pose_df.copy()
 
+    # Always report an ``interpolated`` flag, even when the input predates the
+    # interpolation stage (e.g. a direct unit-test call).
+    out_columns = list(pose_df.columns)
+    if "interpolated" not in out_columns:
+        out_columns.append("interpolated")
+
     groups: List[pd.DataFrame] = []
     for _, group in pose_df.groupby(["track_id", "keypoint_name"], sort=False):
         group = group.copy()
         group = group.sort_values("timestamp_s").reset_index(drop=True)
+        if "interpolated" not in group.columns:
+            group["interpolated"] = False
 
         low_mask = (group["keypoint_confidence"] < conf_threshold).values
         high_mask = ~low_mask
@@ -262,11 +275,12 @@ def infill_low_confidence_keypoints(
                 conf_threshold,
                 group.loc[high_mask, "keypoint_confidence"].min(),
             )
+            group.loc[infill_mask, "interpolated"] = True
 
         groups.append(group)
 
     result = pd.concat(groups, ignore_index=True)
-    return result[pose_df.columns.tolist()]
+    return result[out_columns]
 
 
 def smooth_camera_outputs(config: SmoothingConfig) -> Dict[str, object]:
@@ -292,8 +306,18 @@ def smooth_camera_outputs(config: SmoothingConfig) -> Dict[str, object]:
     pose_df = pd.read_csv(pose_path)
     tracks_df = pd.read_csv(tracks_path)
 
+    # Convert the time-based infill gap to a frame count using the observed
+    # timestamp spacing, so the same wall-clock gap applies at any frame rate.
+    unique_ts = np.sort(pose_df["timestamp_s"].astype(float).unique())
+    median_dt = float(np.median(np.diff(unique_ts))) if unique_ts.size > 1 else 0.0
+    max_infill_run = (
+        max(1, int(round(config.max_infill_gap_s / median_dt))) if median_dt > 0 else 3
+    )
+
     # Infill low-confidence keypoints first, then smooth.
-    pose_df = infill_low_confidence_keypoints(pose_df, config.conf_threshold)
+    pose_df = infill_low_confidence_keypoints(
+        pose_df, config.conf_threshold, max_infill_run
+    )
     pose_smooth = smooth_pose_3d(pose_df, config.tau, conf_gate=config.conf_gate)
     tracks_smooth = smooth_tracks_2d(tracks_df, config.tau)
 
@@ -330,6 +354,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only smooth keypoints below this confidence; high-confidence "
         "positions pass through unchanged. 0 disables gating.",
     )
+    parser.add_argument(
+        "--max-infill-gap-s",
+        default=1.0,
+        type=float,
+        help="Longest run of low-confidence frames to infill, in seconds.",
+    )
     parser.add_argument("--pose-input", default="pose_3d_interpolated.csv", type=str)
     parser.add_argument(
         "--tracks-input", default="tracks_2d_interpolated.csv", type=str
@@ -349,6 +379,7 @@ def main() -> None:
         tau=args.tau,
         conf_threshold=args.conf_threshold,
         conf_gate=args.conf_gate,
+        max_infill_gap_s=args.max_infill_gap_s,
         pose_input=args.pose_input,
         tracks_input=args.tracks_input,
         pose_output=args.pose_output,

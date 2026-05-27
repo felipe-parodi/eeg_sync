@@ -27,6 +27,12 @@ class InterpolationConfig:
 
     camera_dir: str
     target_fps: float = 8.0
+    # Maximum gap to bridge, in seconds. Missing spans longer than this are
+    # left empty rather than straight-line guessed. Time-based (not a frame
+    # count) so it is independent of the sampling rate. Filled rows are flagged
+    # in the ``interpolated`` column. This value feeds the downstream metrics,
+    # so it is kept conservative to limit fabricated motion.
+    max_gap_seconds: float = 1.0
     tracks_input: str = "tracks_2d.csv"
     pose_input: str = "pose_3d.csv"
     tracks_output: str = "tracks_2d_interpolated.csv"
@@ -104,6 +110,11 @@ def _interpolate_group(
         max_fill = None
 
     expanded = indexed.reindex(target_timestamps)
+    # A target timestamp that had an actual observation has a non-NaN value in
+    # the first numeric column (bbox_x1 / x_m); everything else is filled by
+    # interpolation below. Record this before interpolating so the output can
+    # flag which rows are observed vs filled.
+    observed = expanded[numeric_columns[0]].notna().to_numpy()
     # On some pandas/numpy version combinations (notably Python 3.11 with
     # pandas >=2.1), limit_area="inside" triggers an internal
     # sliding_window_view call that raises ValueError when the array has
@@ -121,26 +132,16 @@ def _interpolate_group(
             limit_area="inside",
             limit=max_fill,
         )
+    expanded["interpolated"] = ~observed
     expanded["timestamp_s"] = expanded.index.astype(float)
     return expanded.reset_index(drop=True)
-
-
-def _compute_max_gap(df: pd.DataFrame, gap_factor: float = 3.0) -> float:
-    """Compute max interpolation gap as gap_factor * median observation step."""
-    unique_ts = np.sort(df["timestamp_s"].astype(float).unique())
-    if unique_ts.size < 2:
-        return 0.0
-    diffs = np.diff(unique_ts)
-    diffs = diffs[diffs > 1e-9]
-    if diffs.size == 0:
-        return 0.0
-    return float(np.median(diffs) * gap_factor)
 
 
 def interpolate_tracks_2d(
     tracks_df: pd.DataFrame,
     target_timestamps: np.ndarray,
     target_fps: float,
+    max_gap_seconds: float = 1.0,
 ) -> pd.DataFrame:
     _validate_required_columns(
         tracks_df,
@@ -156,12 +157,11 @@ def interpolate_tracks_2d(
     if tracks_df.empty or target_timestamps.size == 0:
         return tracks_df.copy()
 
-    max_gap = _compute_max_gap(tracks_df)
     rows: List[pd.DataFrame] = []
     for track_id, group in tracks_df.groupby("track_id", dropna=False):
         group = group.copy()
         out = _interpolate_group(
-            group, target_timestamps, TRACK_NUMERIC_COLUMNS, max_gap
+            group, target_timestamps, TRACK_NUMERIC_COLUMNS, max_gap_seconds
         )
         out["track_id"] = int(track_id)
         out["track_label"] = _mode_or_default(group["track_label"], "unknown")
@@ -180,6 +180,7 @@ def interpolate_tracks_2d(
             "track_id",
             "track_label",
             *TRACK_NUMERIC_COLUMNS,
+            "interpolated",
         ]
     ].sort_values(["frame_idx", "track_id"], ignore_index=True)
     return merged
@@ -189,6 +190,7 @@ def interpolate_pose_3d(
     pose_df: pd.DataFrame,
     target_timestamps: np.ndarray,
     target_fps: float,
+    max_gap_seconds: float = 1.0,
 ) -> pd.DataFrame:
     _validate_required_columns(
         pose_df,
@@ -205,13 +207,12 @@ def interpolate_pose_3d(
     if pose_df.empty or target_timestamps.size == 0:
         return pose_df.copy()
 
-    max_gap = _compute_max_gap(pose_df)
     rows: List[pd.DataFrame] = []
     grouped = pose_df.groupby(["track_id", "keypoint_name"], dropna=False)
     for (track_id, keypoint_name), group in grouped:
         group = group.copy()
         out = _interpolate_group(
-            group, target_timestamps, POSE_NUMERIC_COLUMNS, max_gap
+            group, target_timestamps, POSE_NUMERIC_COLUMNS, max_gap_seconds
         )
         out["track_id"] = int(track_id)
         out["track_label"] = _mode_or_default(group["track_label"], "unknown")
@@ -232,6 +233,7 @@ def interpolate_pose_3d(
             "track_label",
             "keypoint_name",
             *POSE_NUMERIC_COLUMNS,
+            "interpolated",
         ]
     ].sort_values(["frame_idx", "track_id", "keypoint_name"], ignore_index=True)
     return merged
@@ -262,11 +264,13 @@ def interpolate_camera_outputs(config: InterpolationConfig) -> Dict[str, object]
         tracks_df=tracks_df,
         target_timestamps=target_timestamps,
         target_fps=config.target_fps,
+        max_gap_seconds=config.max_gap_seconds,
     )
     pose_interp = interpolate_pose_3d(
         pose_df=pose_df,
         target_timestamps=target_timestamps,
         target_fps=config.target_fps,
+        max_gap_seconds=config.max_gap_seconds,
     )
 
     tracks_out = camera_dir / config.tracks_output
@@ -296,6 +300,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--camera-dir", required=True, type=str)
     parser.add_argument("--target-fps", default=8.0, type=float)
+    parser.add_argument(
+        "--max-gap-seconds",
+        default=1.0,
+        type=float,
+        help="Maximum gap to bridge, in seconds. Longer gaps are left empty.",
+    )
     parser.add_argument("--tracks-input", default="tracks_2d.csv", type=str)
     parser.add_argument("--pose-input", default="pose_3d.csv", type=str)
     parser.add_argument(
@@ -322,6 +332,7 @@ def main() -> None:
     cfg = InterpolationConfig(
         camera_dir=args.camera_dir,
         target_fps=args.target_fps,
+        max_gap_seconds=args.max_gap_seconds,
         tracks_input=args.tracks_input,
         pose_input=args.pose_input,
         tracks_output=args.tracks_output,
