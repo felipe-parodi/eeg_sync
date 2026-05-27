@@ -589,3 +589,208 @@ def test_global_anchors_fall_back_when_block_has_only_one_class(tmp_path):
     block2 = summary["blocks"][1]
     roles = sorted(t["new_id"] for t in block2["tracks"])
     assert roles == [0, 1], f"expected both roles assigned, got {roles}"
+
+
+# ---------------------------------------------------------------------------
+# Tests: user anchor-based role assignment
+# ---------------------------------------------------------------------------
+
+
+def _two_track_session_with_persistent_swap() -> pd.DataFrame:
+    """600 frames, 2 BoT-SORT tracks, raw IDs swap at frame 300.
+
+    Pre-swap (frames 0-299): track 1 is the actual parent (always at center).
+    Post-swap (frames 300-599): track 1 is the actual child (BoT-SORT
+    re-acquired after an occlusion and gave the IDs to the wrong people).
+
+    Sizes are deliberately reversed from the user's earlier session: the
+    child has the LARGER bbox throughout, so any size-based heuristic
+    would label them as parent. Anchors are the only signal that produces
+    the correct labels.
+    """
+    rows = []
+    for f in range(600):
+        # Swap at frame 301 (not 300) so that anchors at frames 150 and 450
+        # — with midpoint 300 — map every frame correctly without tie-break
+        # ambiguity. Argmin breaks ties to the earlier anchor.
+        if f <= 300:
+            parent_id, child_id = 1, 2
+        else:
+            parent_id, child_id = 2, 1
+        for tid, size in ((parent_id, 80), (child_id, 150)):
+            rows.append(
+                {
+                    "frame_idx": f,
+                    "timestamp_s": f / 30.0,
+                    "track_id": tid,
+                    "track_label": f"person_{tid:02d}",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": float(size),
+                    "bbox_y2": float(size),
+                    "track_confidence": 0.9,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_user_anchors_override_size_heuristic(tmp_path):
+    from video_analysis.track_filter import AnchorAnnotation, filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+
+    df = _two_track_session_with_persistent_swap()
+    df.to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    # Anchors at frames 150 and 450 have a midpoint of 300 = synthetic
+    # swap frame, so each frame's nearest anchor accurately reflects
+    # the current parent/child raw-id assignment.
+    anchors = [
+        AnchorAnnotation(frame_idx=150, parent_track_id=1, child_track_id=2),
+        AnchorAnnotation(frame_idx=450, parent_track_id=2, child_track_id=1),
+    ]
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[BlockDef("test", "0:00", "0:20")],
+        source_fps=30.0,
+        n_keep=2,
+        anchors=anchors,
+    )
+    summary = filter_tracks(cfg)
+
+    assert summary["role_source"] == "user_anchors"
+    filtered = pd.read_csv(cam_dir / "tracks_2d_filtered.csv")
+    parent_rows = filtered[filtered["track_id"] == 0]
+    parent_sizes = parent_rows["bbox_x2"] - parent_rows["bbox_x1"]
+    assert (parent_sizes == 80).all(), "every parent row should have the SMALLER bbox"
+    child_rows = filtered[filtered["track_id"] == 1]
+    child_sizes = child_rows["bbox_x2"] - child_rows["bbox_x1"]
+    assert (child_sizes == 150).all(), "every child row should have the LARGER bbox"
+
+
+def test_user_anchors_skip_falls_back_to_neighbours(tmp_path):
+    from video_analysis.track_filter import AnchorAnnotation, filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+
+    df = _two_track_session_with_persistent_swap()
+    df.to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    anchors = [
+        AnchorAnnotation(frame_idx=100, parent_track_id=1, child_track_id=2),
+        AnchorAnnotation(frame_idx=300, skipped=True),
+        AnchorAnnotation(frame_idx=450, parent_track_id=2, child_track_id=1),
+    ]
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[BlockDef("test", "0:00", "0:20")],
+        source_fps=30.0,
+        n_keep=2,
+        anchors=anchors,
+    )
+    summary = filter_tracks(cfg)
+
+    assert summary["role_source"] == "user_anchors"
+    assert summary["anchors_used"] == 2
+    assert summary["anchors_total"] == 3
+
+
+def test_user_anchors_drop_detections_with_unknown_ids(tmp_path):
+    """When the nearest anchor's track ids are not present in a frame
+    (BoT-SORT acquired a new id after re-emergence), those detections are
+    dropped, not silently mis-labelled."""
+    from video_analysis.track_filter import AnchorAnnotation, filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+
+    rows = []
+    for f in range(100):
+        for tid in (1, 2):
+            rows.append(
+                {
+                    "frame_idx": f,
+                    "timestamp_s": f / 30.0,
+                    "track_id": tid,
+                    "track_label": f"p{tid}",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": 100.0,
+                    "bbox_y2": 100.0,
+                    "track_confidence": 0.9,
+                }
+            )
+    for f in range(100, 200):
+        for tid in (7, 9):
+            rows.append(
+                {
+                    "frame_idx": f,
+                    "timestamp_s": f / 30.0,
+                    "track_id": tid,
+                    "track_label": f"p{tid}",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": 100.0,
+                    "bbox_y2": 100.0,
+                    "track_confidence": 0.9,
+                }
+            )
+    pd.DataFrame(rows).to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    anchors = [
+        AnchorAnnotation(frame_idx=50, parent_track_id=1, child_track_id=2),
+    ]
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[BlockDef("test", "0:00", "0:10")],
+        source_fps=30.0,
+        n_keep=2,
+        anchors=anchors,
+    )
+    filter_tracks(cfg)
+
+    filtered = pd.read_csv(cam_dir / "tracks_2d_filtered.csv")
+    pre = filtered[filtered["frame_idx"] < 100]
+    assert len(pre) == 200
+    post = filtered[filtered["frame_idx"] >= 100]
+    assert len(post) == 0
+
+
+def test_parse_anchors_file_roundtrip(tmp_path):
+    import json as _json
+
+    from video_analysis.track_filter import (
+        AnchorAnnotation,
+        parse_anchors_file,
+    )
+
+    path = tmp_path / "anchors.json"
+    path.write_text(
+        _json.dumps(
+            [
+                {"frame_idx": 10, "parent_track_id": 4, "child_track_id": 7},
+                {"frame_idx": 100, "skipped": True},
+                {
+                    "frame_idx": 200,
+                    "parent_track_id": 4,
+                    "child_track_id": 7,
+                    "skipped": False,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    parsed = parse_anchors_file(path)
+    assert parsed == [
+        AnchorAnnotation(frame_idx=10, parent_track_id=4, child_track_id=7),
+        AnchorAnnotation(frame_idx=100, skipped=True),
+        AnchorAnnotation(frame_idx=200, parent_track_id=4, child_track_id=7),
+    ]
