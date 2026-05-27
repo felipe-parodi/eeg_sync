@@ -791,36 +791,54 @@ def build_phase2_steps(
             ]
         )
 
-        # One short overlay per analysis block. Each clip is capped at
-        # config.overlay_seconds so the colleague gets a quick QC sample of
-        # every block (free_play, clap-synchrony, storybook, ...) instead of
-        # a single clip of only the first block. Blocks shorter than the cap
-        # render in full.
+        # Per analysis block, render a clip of the first config.overlay_seconds
+        # and a clip of the last config.overlay_seconds, so the colleague can
+        # eyeball tracking quality at both the start and the end of every block
+        # (free_play, clap-synchrony, storybook, ...). For a block shorter than
+        # one window the two clips would be identical, so only the first
+        # (full-block) clip is rendered.
         for block in camera_blocks:
-            overlay_start = block.start_s
-            overlay_end = min(block.end_s, overlay_start + config.overlay_seconds)
-            steps.append(
-                CommandStep(
-                    name=f"overlay video {camera_id} {block.name}",
-                    argv=[
-                        python,
-                        "-m",
-                        "video_analysis.visualize_pose_tracks",
-                        "--camera-dir",
-                        str(camera_dir),
-                        "--output-video",
-                        str(camera_dir / f"overlay_{block.name}.mp4"),
-                        "--pose-csv",
-                        "pose_3d_smooth.csv",
-                        "--tracks-csv",
-                        "tracks_2d_smooth.csv",
-                        "--start-time",
-                        format_seconds_for_cli(overlay_start),
-                        "--end-time",
-                        format_seconds_for_cli(overlay_end),
-                    ],
+            window = config.overlay_seconds
+            overlay_windows = [
+                (
+                    f"overlay_{block.name}.mp4",
+                    "",
+                    block.start_s,
+                    min(block.end_s, block.start_s + window),
                 )
-            )
+            ]
+            if block.end_s - block.start_s > window:
+                overlay_windows.append(
+                    (
+                        f"overlay_{block.name}_end.mp4",
+                        " (end)",
+                        block.end_s - window,
+                        block.end_s,
+                    )
+                )
+            for out_name, name_suffix, win_start, win_end in overlay_windows:
+                steps.append(
+                    CommandStep(
+                        name=f"overlay video {camera_id} {block.name}{name_suffix}",
+                        argv=[
+                            python,
+                            "-m",
+                            "video_analysis.visualize_pose_tracks",
+                            "--camera-dir",
+                            str(camera_dir),
+                            "--output-video",
+                            str(camera_dir / out_name),
+                            "--pose-csv",
+                            "pose_3d_smooth.csv",
+                            "--tracks-csv",
+                            "tracks_2d_smooth.csv",
+                            "--start-time",
+                            format_seconds_for_cli(win_start),
+                            "--end-time",
+                            format_seconds_for_cli(win_end),
+                        ],
+                    )
+                )
 
         if config.include_gaze:
             steps.extend(
@@ -1140,7 +1158,7 @@ headline table for each block.
 
 - `pose_proximity.png` / `.svg` — torso distance over time and per-block comparison.
 - `pose_synchrony.png` / `.svg` — synchrony strength and lead/follow per block.
-- `overlay_<block>.mp4` — a ~{int(config.overlay_seconds)} s clip per block with boxes and skeletons drawn, to eyeball tracking quality. Every keypoint is drawn; keypoints that were gap-filled or low-confidence-infilled (`interpolated = True`) are shown muted (hollow dot, thin dimmed bone) so you can tell them from directly observed joints.
+- `overlay_<block>.mp4` and `overlay_<block>_end.mp4` — ~{int(config.overlay_seconds)} s clips of the **start** and **end** of each block, with boxes and skeletons drawn, to eyeball tracking quality at both ends. (A block shorter than ~{int(config.overlay_seconds)} s yields a single full-block `overlay_<block>.mp4`.) Every keypoint is drawn; keypoints that were gap-filled or low-confidence-infilled (`interpolated = True`) are shown muted (hollow dot, thin dimmed bone) so you can tell them from directly observed joints.
 - SVGs are editable vector versions of the PNGs.
 
 ### `session_summary.json` and `portal_metadata/`
