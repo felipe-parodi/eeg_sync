@@ -11,8 +11,9 @@ import argparse
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 
@@ -23,6 +24,61 @@ class BlockDef:
     name: str
     start_time: str  # "MM:SS" or "MM:SS.ff"
     end_time: str
+
+
+@dataclass
+class AnchorAnnotation:
+    """User-supplied parent/child labeling at one anchor frame.
+
+    Carries the source tracker IDs (typically BoT-SORT outputs) for the
+    person the user identified as the parent and the person identified as
+    the child. ``skipped`` marks anchor frames where the user said
+    "neither tracked person here is the parent" (e.g., experimenter-only)
+    so the algorithm should ignore them and rely on neighbouring anchors.
+    """
+
+    frame_idx: int
+    parent_track_id: Optional[int] = None
+    child_track_id: Optional[int] = None
+    skipped: bool = False
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "AnchorAnnotation":
+        """Parse one anchor from a JSON object."""
+        return cls(
+            frame_idx=int(payload["frame_idx"]),
+            parent_track_id=(
+                int(payload["parent_track_id"])
+                if payload.get("parent_track_id") is not None
+                else None
+            ),
+            child_track_id=(
+                int(payload["child_track_id"])
+                if payload.get("child_track_id") is not None
+                else None
+            ),
+            skipped=bool(payload.get("skipped", False)),
+        )
+
+
+def parse_anchors_file(path: Path) -> List[AnchorAnnotation]:
+    """Read an anchors JSON file from disk.
+
+    The file holds a top-level JSON list of anchor objects. Each object:
+        {"frame_idx": int,
+         "parent_track_id": int | null,
+         "child_track_id": int | null,
+         "skipped": bool}
+
+    Raises:
+        ValueError: If the file is not a list or any entry is malformed.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"Anchors file must contain a JSON list, got {type(raw).__name__}"
+        )
+    return [AnchorAnnotation.from_dict(entry) for entry in raw]
 
 
 @dataclass
@@ -48,6 +104,13 @@ class TrackFilterConfig:
     # of the two classes.
     use_global_role_anchors: bool = True
     global_anchor_min_frames: int = 30
+    # User-supplied anchor labels. When non-empty, these override every
+    # size-based heuristic: at each frame, the nearest non-skipped anchor's
+    # parent_track_id/child_track_id is used to assign roles. Detections
+    # whose track_id matches neither are dropped. This is the right path
+    # when size cannot disambiguate parent from child (e.g., the child sits
+    # closer to the camera and reads as larger).
+    anchors: List[AnchorAnnotation] = field(default_factory=list)
 
 
 def _parse_time(time_str: str) -> float:
@@ -305,6 +368,156 @@ def _rank_tracks_by_persistence(
     return result
 
 
+def _roles_from_user_anchors(
+    df: pd.DataFrame,
+    anchors: List[AnchorAnnotation],
+) -> pd.Series:
+    """Per-row role (0=parent, 1=child) derived from user anchor annotations.
+
+    For each row in ``df``, find the nearest non-skipped anchor by
+    ``frame_idx`` and check whether the row's ``track_id`` matches that
+    anchor's parent or child track id. Rows that match neither are left
+    as NaN (the caller drops them).
+
+    Returns:
+        Float ``Series`` indexed like ``df``: 0.0 for parent, 1.0 for
+        child, NaN for "no role at this frame for this track id".
+    """
+    active = [
+        a
+        for a in anchors
+        if not a.skipped
+        and a.parent_track_id is not None
+        and a.child_track_id is not None
+    ]
+    if not active or df.empty:
+        return pd.Series([float("nan")] * len(df), index=df.index)
+
+    active.sort(key=lambda a: a.frame_idx)
+    anchor_frames = np.array([a.frame_idx for a in active], dtype=float)
+    parent_ids = np.array([a.parent_track_id for a in active], dtype=int)
+    child_ids = np.array([a.child_track_id for a in active], dtype=int)
+
+    row_frames = df["frame_idx"].to_numpy(dtype=float)
+    nearest = np.argmin(np.abs(row_frames[:, None] - anchor_frames[None, :]), axis=1)
+    row_tids = df["track_id"].to_numpy(dtype=int)
+    nearest_parent = parent_ids[nearest]
+    nearest_child = child_ids[nearest]
+
+    roles = np.full(len(df), np.nan)
+    roles[row_tids == nearest_parent] = 0.0
+    roles[row_tids == nearest_child] = 1.0
+    return pd.Series(roles, index=df.index)
+
+
+def _filter_block_by_anchor_roles(
+    df: pd.DataFrame,
+    roles: pd.Series,
+    start_s: float,
+    end_s: float,
+) -> pd.DataFrame:
+    """Slice ``df`` to one block and remap track_id to anchor-derived role."""
+    block_mask = (df["timestamp_s"] >= start_s) & (df["timestamp_s"] < end_s)
+    block_df = df[block_mask].copy()
+    if block_df.empty:
+        return block_df
+    block_roles = roles[block_mask]
+    keep = block_roles.notna()
+    kept = block_df[keep].copy()
+    kept["track_id"] = block_roles[keep].astype(int).to_numpy()
+    if "track_label" in kept.columns:
+        kept["track_label"] = kept["track_id"].map({0: "parent", 1: "child"})
+    return kept
+
+
+def _filter_tracks_with_user_anchors(
+    config: TrackFilterConfig,
+    tracks_df: pd.DataFrame,
+    pose_df: Optional[pd.DataFrame],
+    blocks: List[BlockDef],
+    camera_dir: Path,
+) -> Dict[str, Any]:
+    """User-anchor path through filter_tracks.
+
+    Bypasses every size-based heuristic: roles come directly from the
+    nearest user-labelled anchor at each frame. Frames whose detections do
+    not match either the parent or child anchor track id are dropped.
+    """
+    track_roles = _roles_from_user_anchors(tracks_df, config.anchors)
+    pose_roles = (
+        _roles_from_user_anchors(pose_df, config.anchors)
+        if pose_df is not None
+        else None
+    )
+
+    filtered_rows: List[pd.DataFrame] = []
+    filtered_pose_rows: List[pd.DataFrame] = []
+    block_summaries: List[Dict[str, Any]] = []
+
+    for blk in blocks:
+        start_s = _parse_time(blk.start_time)
+        end_s = _parse_time(blk.end_time)
+        kept = _filter_block_by_anchor_roles(tracks_df, track_roles, start_s, end_s)
+        filtered_rows.append(kept)
+        if pose_df is not None and pose_roles is not None:
+            filtered_pose_rows.append(
+                _filter_block_by_anchor_roles(pose_df, pose_roles, start_s, end_s)
+            )
+        block_summaries.append(
+            {
+                "name": blk.name,
+                "start_s": start_s,
+                "end_s": end_s,
+                "role_source": "user_anchors",
+                "kept_rows": int(len(kept)),
+                "kept_parent_rows": (
+                    int((kept.get("track_id") == 0).sum()) if not kept.empty else 0
+                ),
+                "kept_child_rows": (
+                    int((kept.get("track_id") == 1).sum()) if not kept.empty else 0
+                ),
+            }
+        )
+        print(
+            f"[filter] {blk.name}: anchor-based, kept {len(kept)} rows"
+            f" ({block_summaries[-1]['kept_parent_rows']} parent /"
+            f" {block_summaries[-1]['kept_child_rows']} child)"
+        )
+
+    if filtered_rows:
+        result_df = pd.concat(filtered_rows, ignore_index=True)
+    else:
+        result_df = pd.DataFrame(columns=tracks_df.columns)
+    out_tracks = camera_dir / "tracks_2d_filtered.csv"
+    result_df.to_csv(out_tracks, index=False)
+    print(f"[filter] wrote {out_tracks} ({len(result_df)} rows)")
+
+    summary: Dict[str, Any] = {
+        "blocks": block_summaries,
+        "tracks_output": str(out_tracks),
+        "total_rows": len(result_df),
+        "unique_frames": (
+            int(result_df["frame_idx"].nunique()) if not result_df.empty else 0
+        ),
+        "role_source": "user_anchors",
+        "anchors_used": len([a for a in config.anchors if not a.skipped]),
+        "anchors_total": len(config.anchors),
+    }
+
+    if pose_df is not None and pose_roles is not None:
+        result_pose = (
+            pd.concat(filtered_pose_rows, ignore_index=True)
+            if filtered_pose_rows
+            else pd.DataFrame(columns=pose_df.columns)
+        )
+        out_pose = camera_dir / "pose_3d_filtered.csv"
+        result_pose.to_csv(out_pose, index=False)
+        print(f"[filter] wrote {out_pose} ({len(result_pose)} rows)")
+        summary["pose_output"] = str(out_pose)
+
+    return summary
+
+
 def identify_top_tracks(
     tracks_df: pd.DataFrame,
     start_frame: int,
@@ -374,6 +587,15 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
     tracks_df = pd.read_csv(tracks_path)
     pose_df = pd.read_csv(pose_path) if pose_path.exists() else None
     blocks = config.blocks or []
+
+    # User anchors override every size-based heuristic. The portal collects
+    # these from the colleague after inference completes (anchor frames are
+    # sampled across the analysis window and the colleague clicks which
+    # detection is the parent in each).
+    if any(not a.skipped for a in config.anchors):
+        return _filter_tracks_with_user_anchors(
+            config, tracks_df, pose_df, blocks, camera_dir
+        )
 
     # Session-wide parent/child classification. Used to keep roles consistent
     # across blocks even when a single block has unusual posture (e.g., parent
@@ -566,6 +788,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--n-keep", default=2, type=int, help="Number of tracks to keep per block"
     )
+    parser.add_argument(
+        "--anchors-json",
+        default=None,
+        type=str,
+        help=(
+            "Optional path to a JSON list of user anchor labels "
+            "[{frame_idx, parent_track_id, child_track_id, skipped}, ...]. "
+            "When provided, every size-based heuristic is bypassed; roles "
+            "come directly from the nearest non-skipped anchor at each frame."
+        ),
+    )
     return parser
 
 
@@ -574,12 +807,16 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
     blocks = parse_blocks_string(args.blocks)
+    anchors: List[AnchorAnnotation] = []
+    if args.anchors_json:
+        anchors = parse_anchors_file(Path(args.anchors_json))
     cfg = TrackFilterConfig(
         session_dir=args.session_dir,
         camera=args.camera,
         blocks=blocks,
         source_fps=args.source_fps,
         n_keep=args.n_keep,
+        anchors=anchors,
     )
     summary = filter_tracks(cfg)
     print(json.dumps(summary, indent=2))
