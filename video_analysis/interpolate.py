@@ -102,14 +102,25 @@ def _interpolate_group(
         .drop_duplicates(subset=["timestamp_s"], keep="last")
         .set_index("timestamp_s")
     )
+    # Round both the source index and the target grid to the microsecond before
+    # matching. Source timestamps are frame_idx / fps; the target grid is built
+    # by np.arange. For frame rates whose period is not exactly representable in
+    # float (e.g. 1/6 s), arange accumulates error that diverges from
+    # frame_idx / fps at large timestamps, so an exact-match reindex would drop
+    # nearly every observed frame. 1 us is far below any frame spacing and far
+    # above the float drift, so rounding aligns the grids without merging frames.
+    indexed.index = np.round(indexed.index.to_numpy(dtype=float), 6)
+    indexed = indexed[~indexed.index.duplicated(keep="last")]
+    target = np.round(np.asarray(target_timestamps, dtype=float), 6)
+
     # Compute max consecutive NaN fill limit from max_gap_seconds.
-    if max_gap_seconds > 0 and len(target_timestamps) >= 2:
-        step = float(np.median(np.diff(target_timestamps)))
+    if max_gap_seconds > 0 and len(target) >= 2:
+        step = float(np.median(np.diff(target)))
         max_fill = max(1, int(max_gap_seconds / step)) if step > 0 else None
     else:
         max_fill = None
 
-    expanded = indexed.reindex(target_timestamps)
+    expanded = indexed.reindex(target)
     # A target timestamp that had an actual observation has a non-NaN value in
     # the first numeric column (bbox_x1 / x_m); everything else is filled by
     # interpolation below. Record this before interpolating so the output can
