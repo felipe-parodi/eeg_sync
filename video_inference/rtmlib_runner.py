@@ -179,13 +179,17 @@ def run_rtmlib_pose_on_images(config: RtmlibRunnerConfig) -> Dict[str, Any]:
 
     if config.tracker_backend not in {"internal", "roboflow"}:
         raise ValueError(
-            f"Invalid tracker_backend '{config.tracker_backend}'. "
-            "Expected 'internal' or 'roboflow'."
+            f"rtmlib inference backend supports tracker_backend in "
+            f"{{'internal', 'roboflow'}}, got '{config.tracker_backend}'. "
+            "For 'boxmot' (BoT-SORT + ReID), use --inference-backend ultralytics; "
+            "the rtmlib runner has not been refactored onto the shared tracker "
+            "adapter yet."
         )
     if config.tracker_backend == "internal" and config.max_persons != 2:
         raise ValueError(
             "tracker_backend=internal currently supports max_persons=2 only. "
-            "Use tracker_backend=roboflow for 3+ people."
+            "Use tracker_backend=roboflow for 3+ people, or switch to "
+            "--inference-backend ultralytics --tracker-backend boxmot."
         )
 
     rtmlib_device = _resolve_rtmlib_device(config.device)
