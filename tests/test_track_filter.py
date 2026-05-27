@@ -403,3 +403,189 @@ def test_filter_tracks_no_relink_when_size_signal_too_weak(tmp_path):
     summary = filter_tracks(cfg)
 
     assert summary["blocks"][0]["relink_swaps"] == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: session-wide parent/child role anchors
+# ---------------------------------------------------------------------------
+
+
+def _two_block_session_with_local_size_flip() -> pd.DataFrame:
+    """Two blocks where block-local size ranking would flip parent/child.
+
+    Block 1 (0-5 s): track A bigger than track B (200 vs 100).
+    Block 2 (5-10 s): track A SMALLER than track B locally (60 vs 130),
+        e.g. because the parent crouched and the child stood close to the
+        camera. But across the whole session, track A's median area is
+        still larger than track B's, so the global classifier should
+        still pick A as parent.
+    """
+    rows = []
+    for f in range(150):  # 5s at 30 fps
+        # Block 1: A is large, B is small
+        for tid, size in ((1, 200), (2, 100)):
+            rows.append(
+                {
+                    "frame_idx": f,
+                    "timestamp_s": f / 30.0,
+                    "track_id": tid,
+                    "track_label": f"person_{tid:02d}",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": float(size),
+                    "bbox_y2": float(size),
+                    "track_confidence": 0.9,
+                }
+            )
+    for f in range(150, 300):  # next 5s
+        # Block 2: A briefly smaller than B in this block
+        for tid, size in ((1, 60), (2, 130)):
+            rows.append(
+                {
+                    "frame_idx": f,
+                    "timestamp_s": f / 30.0,
+                    "track_id": tid,
+                    "track_label": f"person_{tid:02d}",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": float(size),
+                    "bbox_y2": float(size),
+                    "track_confidence": 0.9,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_global_anchors_keep_role_consistent_across_blocks(tmp_path):
+    """Block-local size ranking would flip parent/child mid-session; the
+    global anchor should keep track A as parent in both blocks because its
+    session-wide median area is larger."""
+    from video_analysis.track_filter import filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+
+    df = _two_block_session_with_local_size_flip()
+    df.to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[
+            BlockDef("first", "0:00", "0:05"),
+            BlockDef("second", "0:05", "0:10"),
+        ],
+        source_fps=30.0,
+        n_keep=2,
+    )
+    summary = filter_tracks(cfg)
+
+    # Track 1 (originally "A") should be parent (new_id=0) in BOTH blocks.
+    for blk in summary["blocks"]:
+        parent_track = next(t for t in blk["tracks"] if t["new_id"] == 0)
+        assert parent_track["original_id"] == 1, (
+            f"block {blk['name']}: parent should be track 1 (session-wide "
+            f"larger), got {parent_track['original_id']}"
+        )
+
+
+def test_global_anchors_opt_out_falls_back_to_block_local(tmp_path):
+    """When use_global_role_anchors=False, the old block-local ranking
+    is used and the parent/child roles flip on the second block."""
+    from video_analysis.track_filter import filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+
+    df = _two_block_session_with_local_size_flip()
+    df.to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[
+            BlockDef("first", "0:00", "0:05"),
+            BlockDef("second", "0:05", "0:10"),
+        ],
+        source_fps=30.0,
+        n_keep=2,
+        use_global_role_anchors=False,
+    )
+    summary = filter_tracks(cfg)
+
+    # Without global anchors, block 2's parent should be track 2 (bigger
+    # within that block) — opposite of block 1.
+    parents = [
+        next(t["original_id"] for t in blk["tracks"] if t["new_id"] == 0)
+        for blk in summary["blocks"]
+    ]
+    assert parents == [1, 2], f"expected role flip without anchors, got {parents}"
+
+
+def test_global_anchors_fall_back_when_block_has_only_one_class(tmp_path):
+    """Block where only one global class is present must still assign both
+    roles, falling back to block-local mean area for the missing one."""
+    from video_analysis.track_filter import filter_tracks
+
+    session_dir = tmp_path / "session"
+    cam_dir = session_dir / "camera_a"
+    cam_dir.mkdir(parents=True)
+
+    # Track 1 is consistently large (parent_like globally).
+    # Track 2 is consistently small (child_like globally).
+    # Track 3 has medium size but only appears in block 2 (no global class
+    # because it ties to one side — but specifically, in block 2 the parent
+    # (track 1) is absent and we must still assign role=0.
+    rows = []
+    for f in range(150):
+        for tid, size in ((1, 200), (2, 100)):
+            rows.append(
+                {
+                    "frame_idx": f,
+                    "timestamp_s": f / 30.0,
+                    "track_id": tid,
+                    "track_label": f"person_{tid:02d}",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": float(size),
+                    "bbox_y2": float(size),
+                    "track_confidence": 0.9,
+                }
+            )
+    # Block 2: only track 2 (child_like) and a new track 3 (also child-sized).
+    for f in range(150, 300):
+        for tid, size in ((2, 100), (3, 80)):
+            rows.append(
+                {
+                    "frame_idx": f,
+                    "timestamp_s": f / 30.0,
+                    "track_id": tid,
+                    "track_label": f"person_{tid:02d}",
+                    "bbox_x1": 0.0,
+                    "bbox_y1": 0.0,
+                    "bbox_x2": float(size),
+                    "bbox_y2": float(size),
+                    "track_confidence": 0.9,
+                }
+            )
+    pd.DataFrame(rows).to_csv(cam_dir / "tracks_2d.csv", index=False)
+
+    cfg = TrackFilterConfig(
+        session_dir=str(session_dir),
+        camera="camera_a",
+        blocks=[
+            BlockDef("first", "0:00", "0:05"),
+            BlockDef("second", "0:05", "0:10"),
+        ],
+        source_fps=30.0,
+        n_keep=2,
+    )
+    summary = filter_tracks(cfg)
+
+    # Block 2 should still pick a parent (role 0) and a child (role 1) — the
+    # parent role falls back to the block-local larger track.
+    block2 = summary["blocks"][1]
+    roles = sorted(t["new_id"] for t in block2["tracks"])
+    assert roles == [0, 1], f"expected both roles assigned, got {roles}"

@@ -40,6 +40,14 @@ class TrackFilterConfig:
     relink_anchor_seconds: float = 4.0
     relink_min_run_seconds: float = 0.5
     relink_min_size_ratio: float = 1.3
+    # Global parent/child classification: when True, classify every track as
+    # parent-like or child-like using the session-wide bbox-area distribution,
+    # then assign block roles by global classification instead of block-local
+    # mean area. Keeps roles consistent across blocks even when a single block
+    # has unusual posture. Block-local fallback applies if a block lacks one
+    # of the two classes.
+    use_global_role_anchors: bool = True
+    global_anchor_min_frames: int = 30
 
 
 def _parse_time(time_str: str) -> float:
@@ -171,6 +179,108 @@ def _apply_track_swaps(
         df.loc[flip_b, "track_id"] = track_a
 
 
+def _classify_tracks_by_session_size(
+    tracks_df: pd.DataFrame,
+    min_frames: int,
+) -> Dict[int, str]:
+    """Classify each track id as ``parent_like`` or ``child_like``.
+
+    Uses the session-wide median bbox area as a global threshold. Tracks whose
+    own median bbox area is at or above the global median are parent-like;
+    below it, child-like. Tracks with fewer than ``min_frames`` observed
+    frames are excluded — too noisy to anchor reliably.
+
+    Args:
+        tracks_df: All tracks across the session (pre-filter).
+        min_frames: Minimum frames a track must appear in to be classified.
+
+    Returns:
+        ``{track_id: "parent_like" | "child_like"}``. Tracks below the
+        ``min_frames`` cutoff are not present in the result.
+    """
+    if tracks_df.empty:
+        return {}
+    sub = tracks_df.copy()
+    sub["_area"] = sub.apply(_bbox_area, axis=1)
+    threshold = float(sub["_area"].median())
+    if threshold <= 0:
+        return {}
+    stats = sub.groupby("track_id").agg(
+        median_area=("_area", "median"),
+        n_frames=("frame_idx", "nunique"),
+    )
+    return {
+        int(tid): ("parent_like" if row["median_area"] >= threshold else "child_like")
+        for tid, row in stats.iterrows()
+        if row["n_frames"] >= min_frames
+    }
+
+
+def _select_block_roles_with_anchors(
+    block: pd.DataFrame,
+    track_class: Dict[int, str],
+    n_keep: int,
+) -> List[Tuple[int, str, float]]:
+    """Pick parent/child for one block, preferring session-wide classification.
+
+    Among the top-``n_keep`` most persistent tracks in the block, role=0
+    (parent) goes to the most-persistent track classified ``parent_like``
+    globally, and role=1 (child) to the most-persistent ``child_like``.
+    When one global class has no representative in the kept tracks, falls
+    back to block-local mean bbox area among the unassigned tracks. When
+    no global classification info is available at all, this degrades to
+    the pure block-local ranking that ``_rank_tracks_by_persistence``
+    implements.
+    """
+    if block.empty:
+        return []
+
+    counts = block.groupby("track_id")["frame_idx"].nunique()
+    top_ids = [int(tid) for tid in counts.nlargest(n_keep).index.tolist()]
+    if not top_ids:
+        return []
+
+    sub = block[block["track_id"].isin(top_ids)].copy()
+    sub["_area"] = sub.apply(_bbox_area, axis=1)
+    block_areas = sub.groupby("track_id")["_area"].mean()
+
+    parent_candidates = sorted(
+        [tid for tid in top_ids if track_class.get(tid) == "parent_like"],
+        key=lambda t: counts[t],
+        reverse=True,
+    )
+    child_candidates = sorted(
+        [tid for tid in top_ids if track_class.get(tid) == "child_like"],
+        key=lambda t: counts[t],
+        reverse=True,
+    )
+    chosen_parent = parent_candidates[0] if parent_candidates else None
+    chosen_child = child_candidates[0] if child_candidates else None
+
+    if chosen_parent is None and chosen_child is None:
+        # No global signal at all — fall back to pure block-local ranking.
+        sorted_ids = block_areas.sort_values(ascending=False).index.tolist()
+        if sorted_ids:
+            chosen_parent = int(sorted_ids[0])
+        if len(sorted_ids) >= 2:
+            chosen_child = int(sorted_ids[1])
+    elif chosen_parent is None:
+        remaining = [tid for tid in top_ids if tid != chosen_child]
+        if remaining:
+            chosen_parent = int(max(remaining, key=lambda t: block_areas[t]))
+    elif chosen_child is None:
+        remaining = [tid for tid in top_ids if tid != chosen_parent]
+        if remaining:
+            chosen_child = int(min(remaining, key=lambda t: block_areas[t]))
+
+    result: List[Tuple[int, str, float]] = []
+    if chosen_parent is not None:
+        result.append((int(chosen_parent), "parent", float(block_areas[chosen_parent])))
+    if chosen_child is not None:
+        result.append((int(chosen_child), "child", float(block_areas[chosen_child])))
+    return result
+
+
 def _rank_tracks_by_persistence(
     block: pd.DataFrame,
     n_keep: int,
@@ -265,6 +375,27 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
     pose_df = pd.read_csv(pose_path) if pose_path.exists() else None
     blocks = config.blocks or []
 
+    # Session-wide parent/child classification. Used to keep roles consistent
+    # across blocks even when a single block has unusual posture (e.g., parent
+    # sitting next to a standing child closer to the camera).
+    track_class: Dict[int, str] = {}
+    if config.use_global_role_anchors:
+        track_class = _classify_tracks_by_session_size(
+            tracks_df, min_frames=config.global_anchor_min_frames
+        )
+
+    def _block_view(start_s: float, end_s: float) -> pd.DataFrame:
+        return tracks_df[
+            (tracks_df["timestamp_s"] >= start_s) & (tracks_df["timestamp_s"] < end_s)
+        ]
+
+    def _pick_roles(
+        start_s: float, end_s: float, n_keep: int
+    ) -> List[Tuple[int, str, float]]:
+        return _select_block_roles_with_anchors(
+            _block_view(start_s, end_s), track_class, n_keep
+        )
+
     # Build block time ranges and track mappings.
     block_summaries: List[Dict[str, Any]] = []
     # Collect (start_s, end_s, {old_id: new_id}) per block.
@@ -281,16 +412,12 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
         # to the original identification logic without re-linking.
         swap_ranges: List[Tuple[float, float]] = []
         if relink_enabled and config.n_keep >= 2:
-            pre_top = identify_top_tracks_by_time(tracks_df, start_s, end_s, n_keep=2)
+            pre_top = _pick_roles(start_s, end_s, n_keep=2)
             if len(pre_top) == 2:
                 tid_large = pre_top[0][0]
                 tid_small = pre_top[1][0]
-                block_view = tracks_df[
-                    (tracks_df["timestamp_s"] >= start_s)
-                    & (tracks_df["timestamp_s"] < end_s)
-                ]
                 swap_ranges = _detect_track_swaps(
-                    block_view,
+                    _block_view(start_s, end_s),
                     track_a=tid_large,
                     track_b=tid_small,
                     anchor_seconds=config.relink_anchor_seconds,
@@ -307,7 +434,7 @@ def filter_tracks(config: TrackFilterConfig) -> Dict[str, Any]:
                         f"across {len(swap_ranges)} swap(s), {total:.2f}s total"
                     )
 
-        top = identify_top_tracks_by_time(tracks_df, start_s, end_s, config.n_keep)
+        top = _pick_roles(start_s, end_s, config.n_keep)
 
         remap: Dict[int, int] = {}
         summary_entry: Dict[str, Any] = {
