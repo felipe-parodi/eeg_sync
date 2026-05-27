@@ -591,17 +591,31 @@ def compress_video_if_needed(
     raise RuntimeError("All ffmpeg encoders failed: " + " | ".join(errors))
 
 
-def build_processing_steps(config: PortalJobConfig) -> list[CommandStep]:
-    """Build existing pipeline commands for a portal job.
+def build_processing_steps(
+    config: PortalJobConfig,
+    anchors_json_by_camera: dict[str, Path] | None = None,
+) -> list[CommandStep]:
+    """Build the full pipeline as a flat list of command steps.
 
-    Args:
-        config: Portal job configuration.
+    Returns phase 1 (pose inference) followed by phase 2 (filter, smooth,
+    metrics, overlay, optional gaze). Kept as a thin wrapper so existing
+    callers and tests still work; production uses the phase-split entry
+    points (``build_phase1_steps`` + ``build_phase2_steps``) so the
+    portal can pause between them for human annotation.
+    """
+    return build_phase1_steps(config) + build_phase2_steps(
+        config, anchors_json_by_camera=anchors_json_by_camera
+    )
 
-    Returns:
-        Ordered command steps.
+
+def build_phase1_steps(config: PortalJobConfig) -> list[CommandStep]:
+    """Build pre-annotation commands: pose inference + tracking only.
+
+    Phase 1 ends with ``tracks_2d.csv`` and ``pose_3d.csv`` on disk per
+    camera. The portal then extracts anchor frames from those tracks and
+    waits for the colleague to label them before phase 2 runs.
     """
     python = sys.executable
-    session_dir = config.session_output_dir
     camera_ids = active_camera_ids(config)
     pose_argv = [
         python,
@@ -650,12 +664,27 @@ def build_processing_steps(config: PortalJobConfig) -> list[CommandStep]:
             config.session_id,
         ]
     )
-    steps = [
-        CommandStep(
-            name="pose inference",
-            argv=pose_argv,
-        )
-    ]
+    return [CommandStep(name="pose inference", argv=pose_argv)]
+
+
+def build_phase2_steps(
+    config: PortalJobConfig,
+    anchors_json_by_camera: dict[str, Path] | None = None,
+) -> list[CommandStep]:
+    """Build post-annotation commands: filter -> smooth -> metrics -> overlay.
+
+    Args:
+        config: Portal job configuration.
+        anchors_json_by_camera: Optional ``{camera_id: anchors.json path}``.
+            When provided for a camera, the filter step gets
+            ``--anchors-json <path>`` so role assignment uses user labels
+            instead of size heuristics.
+    """
+    python = sys.executable
+    session_dir = config.session_output_dir
+    camera_ids = active_camera_ids(config)
+    anchors_map = anchors_json_by_camera or {}
+    steps: list[CommandStep] = []
 
     for camera_id in camera_ids:
         camera_blocks = blocks_for_camera(config, camera_id)
@@ -666,25 +695,30 @@ def build_processing_steps(config: PortalJobConfig) -> list[CommandStep]:
             camera_blocks[0].end_s, overlay_start + config.overlay_seconds
         )
 
+        filter_argv = [
+            python,
+            "-m",
+            "video_analysis.track_filter",
+            "--session-dir",
+            str(session_dir),
+            "--camera",
+            camera_id,
+            "--blocks",
+            blocks_arg,
+            "--source-fps",
+            str(config.frame_rate),
+            "--n-keep",
+            "2",
+        ]
+        anchors_path = anchors_map.get(camera_id)
+        if anchors_path is not None:
+            filter_argv.extend(["--anchors-json", str(anchors_path)])
+
         steps.extend(
             [
                 CommandStep(
                     name=f"filter tracks {camera_id}",
-                    argv=[
-                        python,
-                        "-m",
-                        "video_analysis.track_filter",
-                        "--session-dir",
-                        str(session_dir),
-                        "--camera",
-                        camera_id,
-                        "--blocks",
-                        blocks_arg,
-                        "--source-fps",
-                        str(config.frame_rate),
-                        "--n-keep",
-                        "2",
-                    ],
+                    argv=filter_argv,
                 ),
                 CommandStep(
                     name=f"smooth tracks {camera_id}",
@@ -936,6 +970,67 @@ def _iter_existing_artifacts(paths: Iterable[Path]) -> list[str]:
     return [str(path) for path in paths if path.exists()]
 
 
+PORTAL_ANCHOR_FRAMES_PER_CAMERA = 10
+
+
+def extract_job_anchor_frames(
+    config: PortalJobConfig,
+    n_anchors: int = PORTAL_ANCHOR_FRAMES_PER_CAMERA,
+) -> dict[str, Any]:
+    """Render annotation anchor frames for every active camera.
+
+    For each active camera, picks N evenly time-spaced frames from the
+    tracked output, renders each one with bbox overlays, and writes them
+    under ``<job_dir>/anchors/<camera_id>/`` along with a ``manifest.json``
+    the portal UI consumes.
+
+    Returns:
+        Per-camera summary ``{camera_id: {"count": int, "dir": str}}``.
+    """
+    from video_analysis.anchor_frames import extract_anchor_frames
+
+    anchors_root = config.job_dir / "anchors"
+    anchors_root.mkdir(parents=True, exist_ok=True)
+    summary: dict[str, Any] = {}
+    for camera_id in active_camera_ids(config):
+        tracks_csv = config.session_output_dir / camera_id / "tracks_2d.csv"
+        if not tracks_csv.exists():
+            summary[camera_id] = {"count": 0, "error": "tracks_2d.csv missing"}
+            continue
+        source_video = config.video_a if camera_id == "camera_a" else config.video_b
+        if source_video is None:
+            summary[camera_id] = {"count": 0, "error": "source video missing"}
+            continue
+        out_dir = anchors_root / camera_id
+        metadata = extract_anchor_frames(
+            tracks_csv=tracks_csv,
+            source_video=Path(source_video),
+            output_dir=out_dir,
+            n_anchors=n_anchors,
+        )
+        summary[camera_id] = {
+            "count": len(metadata),
+            "dir": str(out_dir),
+        }
+    return summary
+
+
+def resolve_anchors_json_paths(
+    config: PortalJobConfig,
+) -> dict[str, Path]:
+    """Map each active camera to its anchors.json file under the job dir.
+
+    The file is the user-submitted annotation set converted into the
+    schema ``video-filter-tracks --anchors-json`` reads.
+    """
+    paths: dict[str, Path] = {}
+    for camera_id in active_camera_ids(config):
+        candidate = config.job_dir / "anchors" / camera_id / "anchors.json"
+        if candidate.exists():
+            paths[camera_id] = candidate
+    return paths
+
+
 def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
     """Run a submitted portal job end to end.
 
@@ -987,14 +1082,78 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
         write_session_config(config)
         _write_json(config.job_dir / "job_config.json", job_config_to_dict(config))
 
-        steps = build_processing_steps(config)
+        steps = build_phase1_steps(config)
         for index, step in enumerate(steps, start=1):
             write_status(
                 config.job_dir,
                 {
                     "state": "running",
-                    "message": f"Running step {index} of {len(steps)}: {step.name}",
+                    "message": f"Phase 1 step {index} of {len(steps)}: {step.name}",
                     "current_step": step.name,
+                    "phase": 1,
+                },
+            )
+            run_command_step(step, cwd=repo_root, log_path=log_path)
+
+        # After pose+tracking, extract anchor frames per camera and pause
+        # for the colleague to label which detection is the parent. Phase 2
+        # resumes via resume_portal_job_phase2 once annotations arrive.
+        write_status(
+            config.job_dir,
+            {
+                "state": "running",
+                "message": "Preparing anchor frames for annotation.",
+                "current_step": "extract anchors",
+                "phase": 1,
+            },
+        )
+        anchor_summary = extract_job_anchor_frames(config)
+        write_status(
+            config.job_dir,
+            {
+                "state": "awaiting_annotation",
+                "message": (
+                    "Label which detection is the parent on each anchor frame."
+                ),
+                "current_step": "awaiting annotation",
+                "phase": 1,
+                "annotate_url": f"/jobs/{config.job_id}/annotate",
+                "anchor_summary": anchor_summary,
+            },
+        )
+    except Exception as error:
+        write_status(
+            config.job_dir,
+            {
+                "state": "failed",
+                "message": str(error),
+                "current_step": None,
+                "log_path": str(log_path),
+            },
+        )
+        raise
+
+
+def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
+    """Continue a portal job after the colleague has submitted annotations.
+
+    Expects ``<job_dir>/anchors/<camera>/anchors.json`` to exist for every
+    active camera that should use anchor-based role assignment. Runs the
+    filter -> smooth -> metrics -> overlay chain, then bundles the result
+    zip.
+    """
+    log_path = config.job_dir / "job.log"
+    try:
+        anchors_map = resolve_anchors_json_paths(config)
+        steps = build_phase2_steps(config, anchors_json_by_camera=anchors_map)
+        for index, step in enumerate(steps, start=1):
+            write_status(
+                config.job_dir,
+                {
+                    "state": "running",
+                    "message": f"Phase 2 step {index} of {len(steps)}: {step.name}",
+                    "current_step": step.name,
+                    "phase": 2,
                 },
             )
             run_command_step(step, cwd=repo_root, log_path=log_path)
@@ -1009,7 +1168,10 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
                     config.job_dir / "submission_metadata.json",
                     metadata_root / "submission_metadata.json",
                 ),
-                (config.job_dir / "job_config.json", metadata_root / "job_config.json"),
+                (
+                    config.job_dir / "job_config.json",
+                    metadata_root / "job_config.json",
+                ),
                 (
                     config.job_dir / "rapid_compression_summary.json",
                     metadata_root / "rapid_compression_summary.json",
