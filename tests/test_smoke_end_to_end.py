@@ -240,6 +240,8 @@ def test_run_portal_job_end_to_end_on_compressed_video(tmp_path: Path) -> None:
     assert (camera_dir / "tracks_2d_filtered.csv").exists()
     assert (camera_dir / "tracks_2d_smooth.csv").exists()
     assert (camera_dir / "pose_metrics_summary.json").exists()
-    overlay = camera_dir / "overlay_2min.mp4"
+    # One overlay clip per analysis block; the smoke job has a single block
+    # named "smoke", so the per-block overlay is overlay_smoke.mp4.
+    overlay = camera_dir / "overlay_smoke.mp4"
     assert overlay.exists(), f"overlay video missing under {camera_dir}"
     assert overlay.stat().st_size > 0, "overlay video is empty"
