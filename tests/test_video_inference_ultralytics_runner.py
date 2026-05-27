@@ -267,3 +267,90 @@ def test_run_ultralytics_pose_forwards_frame_rate_to_bytetrack(tmp_path, monkeyp
     assert len(seen_kwargs) == 1
     assert seen_kwargs[0].get("frame_rate") == 8.0
     assert seen_kwargs[0].get("lost_track_buffer") == 60
+
+
+def test_run_ultralytics_pose_accepts_boxmot_tracker_backend(tmp_path, monkeypatch):
+    """Regression: the runner's upstream validation must list 'boxmot' as a
+    valid tracker_backend so the portal default (boxmot+botsort) doesn't
+    blow up before the BoT-SORT adapter ever runs."""
+    image_folder = tmp_path / "frames"
+    image_folder.mkdir(parents=True, exist_ok=True)
+    for frame_idx in range(2):
+        (image_folder / f"frame_{frame_idx:06d}.jpg").write_bytes(b"x")
+    output_json = tmp_path / "inference_raw.json"
+
+    # Fake boxmot tracker that mimics the adapter contract: returns a
+    # TrackResults-shaped (N,8) array with det_ind back-mapping.
+    class _TrackResults(np.ndarray):
+        @property
+        def det_ind(self):
+            return np.asarray(self[:, 7], dtype=int)
+
+        @property
+        def id(self):
+            return np.asarray(self[:, 4], dtype=int)
+
+        def __new__(cls, rows):
+            arr = np.asarray(rows, dtype=np.float32).reshape(-1, 8)
+            return arr.view(cls)
+
+    class _FakeBotSort:
+        next_id = 100
+
+        def __init__(self, **kwargs):
+            pass
+
+        def update(self, dets, img):
+            rows = []
+            for i in range(len(dets)):
+                rows.append([0, 0, 1, 1, _FakeBotSort.next_id + i, 0.9, 0, i])
+            _FakeBotSort.next_id += len(dets)
+            return _TrackResults(rows)
+
+    class _FakeReID:
+        def __init__(self, **kwargs):
+            pass
+
+    botsort_mod = types.ModuleType("boxmot.trackers.botsort.botsort")
+    botsort_mod.BotSort = _FakeBotSort
+    reid_mod = types.ModuleType("boxmot.reid.core.reid")
+    reid_mod.ReID = _FakeReID
+    monkeypatch.setitem(sys.modules, "boxmot.trackers.botsort.botsort", botsort_mod)
+    monkeypatch.setitem(sys.modules, "boxmot.reid.core.reid", reid_mod)
+    monkeypatch.setitem(
+        sys.modules, "ultralytics", types.SimpleNamespace(YOLO=_FakeYOLO)
+    )
+
+    cfg = UltraRunnerConfig(
+        model_path="fake.pt",
+        image_folder=str(image_folder),
+        output_json=str(output_json),
+        device="cpu",
+        conf=0.1,
+        tracker_backend="boxmot",
+        tracker_name="botsort",
+        max_persons=3,
+        frame_rate=8.0,
+    )
+    payload = run_ultralytics_pose_on_images(cfg)
+
+    assert len(payload["frames"]) == 2
+    # Every frame got a person with a track id from the fake BoT-SORT.
+    for frame in payload["frames"]:
+        assert len(frame["persons"]) >= 1
+
+
+def test_run_ultralytics_pose_rejects_unknown_tracker_backend(tmp_path):
+    """Validation error mentions all three valid options."""
+    cfg = UltraRunnerConfig(
+        model_path="fake.pt",
+        image_folder=str(tmp_path),
+        output_json=str(tmp_path / "out.json"),
+        tracker_backend="nonsense",
+        tracker_name="bytetrack",
+        max_persons=2,
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="boxmot"):
+        run_ultralytics_pose_on_images(cfg)
