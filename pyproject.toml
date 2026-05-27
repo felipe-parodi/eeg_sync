@@ -39,6 +39,7 @@ pose3d = [
 ]
 portal = [
     "eeg-video-sync[video,pose3d,gaze]",
+    "boxmot>=18.0.0",
     "fastapi>=0.115.0",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30.0",
