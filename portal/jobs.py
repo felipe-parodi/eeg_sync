@@ -23,10 +23,25 @@ PORTAL_DEFAULT_IMAGE_HEIGHT = 480
 # (e.g. an experimenter in the room) are excluded from the analysis blocks
 # before inference, so a third tracked person is noise we do not want to keep.
 PORTAL_DEFAULT_MAX_PERSONS = 2
-# The larger L pose model localizes keypoints more accurately and with higher
-# confidence than the M model, which reduces per-frame jitter and leaves fewer
-# joints below the overlay's 0.2 draw threshold.
-PORTAL_DEFAULT_MODEL_PATH = "yolo11l-pose.pt"
+# Domain-adapted pose model. ``yolo11l-pose-fused3.pt`` is a yolo11l-pose
+# fine-tuned on 3-teacher consensus pseudo-labels (yolo11x-pose + ViTPose-Huge +
+# RTMPose, box-matched and majority-voted) from this project's own session
+# videos -- same architecture and latency as stock yolo11l-pose, but better
+# detection and keypoints on this footage (overhead, occlusion, young children).
+# It is a local artifact (gitignored *.pt); if absent we fall back to the stock
+# model, which Ultralytics downloads on demand. See
+# docs/pseudo-label-pose-train_260531.md and pose_training/.
+_PORTAL_FUSED3_WEIGHTS = Path(__file__).resolve().parents[1] / "yolo11l-pose-fused3.pt"
+PORTAL_DEFAULT_MODEL_PATH = (
+    str(_PORTAL_FUSED3_WEIGHTS)
+    if _PORTAL_FUSED3_WEIGHTS.exists()
+    else "yolo11l-pose.pt"
+)
+# Inference resolution. The fine-tuned students are trained at 960, but the
+# pipeline default is 640 -- so without this the deployed model would run at a
+# resolution it was not trained for. 960 matches training and measurably
+# improves detection (at a modest GPU cost).
+PORTAL_DEFAULT_INFER_IMGSZ = 960
 # Length of each per-block QC overlay clip. One clip is rendered per analysis
 # block (capped at this length), so the colleague sees tracking quality for
 # every block rather than only the first.
@@ -93,6 +108,7 @@ class PortalJobConfig:
     max_persons: int = PORTAL_DEFAULT_MAX_PERSONS
     device: str = "cuda"
     model_path: str = PORTAL_DEFAULT_MODEL_PATH
+    infer_imgsz: int = PORTAL_DEFAULT_INFER_IMGSZ
     overlay_seconds: float = PORTAL_DEFAULT_OVERLAY_SECONDS
 
     @property
@@ -653,6 +669,8 @@ def build_phase1_steps(config: PortalJobConfig) -> list[CommandStep]:
             str(config.max_persons),
             "--frame-rate",
             str(config.frame_rate),
+            "--imgsz",
+            str(config.infer_imgsz),
         ]
     )
     for camera_id in camera_ids:

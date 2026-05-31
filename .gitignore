@@ -6,6 +6,11 @@ data/
 video_inference/data/
 video_inference/compressed/
 video_inference/output/
+# Pose-training generated artifacts (frames, labels, datasets, run outputs)
+pose_training/data/
+pose_training/runs/
+runs/
+compressed_video/
 !tests/fixtures/**/*.json
 !session_config.json
 !templates/*.json

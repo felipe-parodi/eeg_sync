@@ -68,9 +68,15 @@ video-pose-metrics = "video_analysis.pose_metrics:main"
 video-gaze-metrics = "video_analysis.gaze_metrics:main"
 video-anchor-frames = "video_analysis.anchor_frames:main"
 video-gaze-snapshots = "video_analysis.gaze_snapshots:main"
+pose-train-preflight = "pose_training.preflight:main"
+pose-train-sample = "pose_training.sampling:main"
+pose-train-pseudo-label = "pose_training.pseudo_label:main"
+pose-train-dataset = "pose_training.dataset:main"
+pose-train-fit = "pose_training.train:main"
+pose-train-eval = "pose_training.evaluate:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis", "portal"]
+packages = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis", "portal", "pose_training"]
 
 [build-system]
 requires = ["hatchling"]
