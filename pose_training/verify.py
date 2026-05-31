@@ -10,8 +10,9 @@ in a CSV; ``summarize`` maps the blind sides back to model names and tallies.
 Usage:
     # 1. Build the set (renders pairs + a verdicts.csv to fill in)
     python -m pose_training.verify build --weights-a <fused3.pt> --weights-b <new.pt> --n 150
-    # 2. Open pose_training/data/verify/pairs/*.png, fill the 'verdict' column
-    #    of verdicts.csv with L (left better), R (right better), or T (tie).
+    # 2. Review in the browser (click or press Left / Tie / Right; auto-saves)
+    python -m pose_training.verify review
+    #    -- or hand-edit the 'verdict' column of verdicts.csv with L / R / T.
     # 3. Tally
     python -m pose_training.verify summarize
 """
@@ -20,9 +21,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import random
+import threading
+import webbrowser
+from functools import partial
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import unquote, urlparse
+
+VERDICT_FIELDS = ["id", "image", "frame_path", "left_is_a", "verdict"]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "pose_training" / "data" / "frame_manifest.csv"
@@ -50,6 +59,31 @@ def stratified_sample(
                 if len(picked) >= n:
                     break
     return picked
+
+
+def _write_records(csv_path: Path, records: List[Dict[str, Any]]) -> None:
+    """Write the verdict records back to ``csv_path`` with the fixed schema."""
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=VERDICT_FIELDS)
+        writer.writeheader()
+        for record in records:
+            writer.writerow({field: record.get(field, "") for field in VERDICT_FIELDS})
+
+
+def set_verdict(records: List[Dict[str, Any]], frame_id: Any, verdict: str) -> bool:
+    """Set the verdict (L/R/T) on the record whose id matches ``frame_id``.
+
+    Returns True if a matching record was updated, False otherwise. An empty
+    verdict clears the cell (marks the pair unjudged again).
+    """
+    normalized = str(verdict).strip().upper()
+    if normalized not in ("L", "R", "T", ""):
+        return False
+    for record in records:
+        if str(record.get("id")) == str(frame_id):
+            record["verdict"] = normalized
+            return True
+    return False
 
 
 def tally(records: List[Dict[str, Any]], name_a: str, name_b: str) -> Dict[str, int]:
@@ -130,13 +164,241 @@ def build_verify_set(
             }
         )
     csv_path = out_dir / "verdicts.csv"
-    with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=["id", "image", "frame_path", "left_is_a", "verdict"]
-        )
-        writer.writeheader()
-        writer.writerows(records)
+    _write_records(csv_path, records)
     return csv_path
+
+
+REVIEW_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pose verify - blind A/B</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font-family: system-ui, sans-serif; background:#111; color:#eee;
+         display:flex; flex-direction:column; height:100vh; }
+  header { padding:8px 16px; display:flex; align-items:center; gap:16px;
+           border-bottom:1px solid #333; }
+  #bar { flex:1; height:10px; background:#333; border-radius:5px; overflow:hidden; }
+  #fill { height:100%; width:0%; background:#4caf50; transition:width .2s; }
+  #count { font-variant-numeric: tabular-nums; white-space:nowrap; }
+  main { flex:1; display:flex; align-items:center; justify-content:center;
+         overflow:hidden; padding:8px; position:relative; }
+  img { max-width:100%; max-height:100%; object-fit:contain; border:1px solid #333; }
+  footer { padding:12px 16px; display:flex; gap:12px; align-items:center;
+           justify-content:center; border-top:1px solid #333; flex-wrap:wrap; }
+  button { font-size:16px; padding:12px 20px; border:none; border-radius:8px;
+           cursor:pointer; color:#fff; }
+  #prev,#next { background:#444; }
+  #left { background:#1565c0; }
+  #tie  { background:#616161; }
+  #right{ background:#6a1b9a; }
+  .cur { outline:3px solid #fff; }
+  kbd { background:#000; border:1px solid #555; border-radius:4px; padding:0 6px;
+        font-size:12px; }
+  #hint { opacity:.65; font-size:13px; min-width:120px; }
+  #done { display:none; position:absolute; inset:0; background:rgba(17,17,17,.95);
+          align-items:center; justify-content:center; flex-direction:column;
+          text-align:center; font-size:22px; gap:12px; padding:40px; }
+  #done code { background:#000; padding:6px 10px; border-radius:6px; font-size:16px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Blind verify</strong>
+  <div id="bar"><div id="fill"></div></div>
+  <span id="count">0 / 0</span>
+</header>
+<main>
+  <img id="img" alt="pair">
+  <div id="done">
+    <div>All pairs judged.</div>
+    <div>Tally them with:</div>
+    <code id="cmd">python -m pose_training.verify summarize</code>
+  </div>
+</main>
+<footer>
+  <button id="prev">&#x27F5; Prev</button>
+  <button id="left">Left better <kbd>1</kbd>/<kbd>&larr;</kbd></button>
+  <button id="tie">Tie <kbd>2</kbd>/<kbd>&darr;</kbd></button>
+  <button id="right">Right better <kbd>3</kbd>/<kbd>&rarr;</kbd></button>
+  <button id="next">Next &#x27F6;</button>
+  <span id="hint"></span>
+</footer>
+<script>
+let records = [], i = 0, summarizeCmd = '';
+const $ = id => document.getElementById(id);
+async function load() {
+  const state = await (await fetch('/state')).json();
+  records = state.records;
+  summarizeCmd = state.summarize_cmd || summarizeCmd;
+  $('cmd').textContent = summarizeCmd;
+  const firstUn = records.findIndex(r => !r.verdict);
+  i = firstUn === -1 ? 0 : firstUn;
+  render();
+}
+function judgedCount() { return records.filter(r => r.verdict).length; }
+function render() {
+  if (!records.length) return;
+  const r = records[i];
+  $('img').src = '/pairs/' + encodeURIComponent(r.image) + '?v=' + i;
+  const judged = judgedCount();
+  $('count').textContent = (i + 1) + ' / ' + records.length + '  -  ' + judged + ' judged';
+  $('fill').style.width = (100 * judged / records.length) + '%';
+  const map = { left:'L', tie:'T', right:'R' };
+  for (const id of ['left','tie','right'])
+    $(id).classList.toggle('cur', r.verdict === map[id]);
+  const label = { L:'Left', R:'Right', T:'Tie' };
+  $('hint').textContent = r.verdict ? ('marked: ' + label[r.verdict]) : 'unjudged';
+  $('done').style.display = records.every(x => x.verdict) ? 'flex' : 'none';
+}
+async function vote(v) {
+  const r = records[i];
+  r.verdict = v;
+  fetch('/verdict', { method:'POST', headers:{'Content-Type':'application/json'},
+                      body: JSON.stringify({ id: r.id, verdict: v }) });
+  let nxt = records.findIndex((x, k) => k > i && !x.verdict);
+  if (nxt === -1) nxt = Math.min(i + 1, records.length - 1);
+  i = nxt;
+  render();
+}
+function move(d) { i = Math.max(0, Math.min(records.length - 1, i + d)); render(); }
+$('left').onclick  = () => vote('L');
+$('tie').onclick   = () => vote('T');
+$('right').onclick = () => vote('R');
+$('prev').onclick  = () => move(-1);
+$('next').onclick  = () => move(1);
+document.addEventListener('keydown', e => {
+  if (e.key === '1' || e.key === 'ArrowLeft') vote('L');
+  else if (e.key === '2' || e.key === 'ArrowDown') vote('T');
+  else if (e.key === '3' || e.key === 'ArrowRight') vote('R');
+  else if (e.key === 'Backspace') move(-1);
+  else if (e.key === 'ArrowUp') move(1);
+});
+load();
+</script>
+</body>
+</html>
+"""
+
+
+class ReviewState:
+    """Shared, lock-guarded state for the review server (records + CSV path)."""
+
+    def __init__(
+        self, csv_path: Path, pairs_dir: Path, records: List[Dict[str, Any]], cmd: str
+    ) -> None:
+        self.csv_path = csv_path
+        self.pairs_dir = pairs_dir.resolve()
+        self.records = records
+        self.summarize_cmd = cmd
+        self.lock = threading.Lock()
+
+    def state_json(self) -> bytes:
+        """Blind client payload: only id/image/verdict (never ``left_is_a``)."""
+        records = [
+            {
+                "id": r.get("id"),
+                "image": r.get("image"),
+                "verdict": r.get("verdict", ""),
+            }
+            for r in self.records
+        ]
+        payload = {"records": records, "summarize_cmd": self.summarize_cmd}
+        return json.dumps(payload).encode("utf-8")
+
+    def save_verdict(self, frame_id: Any, verdict: str) -> bool:
+        """Update one verdict and persist the whole CSV. Thread-safe."""
+        with self.lock:
+            if not set_verdict(self.records, frame_id, verdict):
+                return False
+            _write_records(self.csv_path, self.records)
+            return True
+
+
+class _ReviewHandler(BaseHTTPRequestHandler):
+    """Serves the review UI, the pair images, and verdict writes."""
+
+    def __init__(self, *args: Any, state: ReviewState, **kwargs: Any) -> None:
+        self.state = state
+        super().__init__(*args, **kwargs)
+
+    def log_message(self, *args: Any) -> None:  # noqa: D102 -- silence stdlib logging
+        pass
+
+    def _send(self, code: int, body: bytes, content_type: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802 -- stdlib handler name
+        path = unquote(urlparse(self.path).path)
+        if path in ("/", "/index.html"):
+            self._send(200, REVIEW_HTML.encode("utf-8"), "text/html; charset=utf-8")
+        elif path == "/state":
+            self._send(200, self.state.state_json(), "application/json")
+        elif path.startswith("/pairs/"):
+            self._serve_image(Path(path).name)
+        else:
+            self._send(404, b"not found", "text/plain")
+
+    def _serve_image(self, name: str) -> None:
+        target = (self.state.pairs_dir / name).resolve()
+        if self.state.pairs_dir not in target.parents or not target.is_file():
+            self._send(404, b"not found", "text/plain")
+            return
+        self._send(200, target.read_bytes(), "image/png")
+
+    def do_POST(self) -> None:  # noqa: N802 -- stdlib handler name
+        if unquote(urlparse(self.path).path) != "/verdict":
+            self._send(404, b"not found", "text/plain")
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            ok = self.state.save_verdict(payload.get("id"), payload.get("verdict", ""))
+        except (ValueError, KeyError):
+            ok = False
+        self._send(
+            200 if ok else 400,
+            json.dumps({"ok": ok}).encode("utf-8"),
+            "application/json",
+        )
+
+
+def run_review_server(
+    out_dir: Path, name_a: str, name_b: str, port: int, open_browser: bool = True
+) -> None:
+    """Serve the blind review UI from ``out_dir`` until interrupted (Ctrl+C)."""
+    csv_path = out_dir / "verdicts.csv"
+    if not csv_path.is_file():
+        raise FileNotFoundError(
+            f"{csv_path} not found -- run 'verify build' first to create the set."
+        )
+    with csv_path.open(encoding="utf-8") as handle:
+        records = list(csv.DictReader(handle))
+    summarize_cmd = (
+        f"python -m pose_training.verify summarize "
+        f"--name-a {name_a} --name-b {name_b}"
+    )
+    state = ReviewState(csv_path, out_dir / "pairs", records, summarize_cmd)
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", port), partial(_ReviewHandler, state=state)
+    )
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    judged = sum(1 for r in records if str(r.get("verdict", "")).strip())
+    print(f"Review {len(records)} pairs at {url} ({judged} already judged).")
+    print("Click or press 1/Left, 2/Tie, 3/Right. Verdicts auto-save. Ctrl+C to stop.")
+    if open_browser:
+        threading.Thread(target=lambda: webbrowser.open(url), daemon=True).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped. Verdicts saved to", csv_path)
+    finally:
+        server.server_close()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -152,6 +414,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     build.add_argument("--n", default=150, type=int)
     build.add_argument("--seed", default=0, type=int)
     build.add_argument("--device", default="0", type=str)
+    review = sub.add_parser("review", help="Click through pairs in the browser.")
+    review.add_argument("--out-dir", default=str(DEFAULT_OUT), type=str)
+    review.add_argument("--name-a", default="model_a", type=str)
+    review.add_argument("--name-b", default="model_b", type=str)
+    review.add_argument("--port", default=8000, type=int)
+    review.add_argument(
+        "--no-open", action="store_true", help="Do not auto-open browser."
+    )
     summ = sub.add_parser("summarize", help="Tally a filled-in verdicts.csv.")
     summ.add_argument("--csv", default=str(DEFAULT_OUT / "verdicts.csv"), type=str)
     summ.add_argument("--name-a", default="model_a", type=str)
@@ -178,6 +448,14 @@ def main() -> None:
         print(
             f"Then: python -m pose_training.verify summarize --csv {csv_path} "
             f"--name-a {args.name_a} --name-b {args.name_b}"
+        )
+    elif args.command == "review":
+        run_review_server(
+            Path(args.out_dir),
+            args.name_a,
+            args.name_b,
+            args.port,
+            open_browser=not args.no_open,
         )
     else:
         with open(args.csv, encoding="utf-8") as handle:
