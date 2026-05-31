@@ -179,9 +179,17 @@ REVIEW_HTML = """<!doctype html>
          display:flex; flex-direction:column; height:100vh; }
   header { padding:8px 16px; display:flex; align-items:center; gap:16px;
            border-bottom:1px solid #333; }
-  #bar { flex:1; height:10px; background:#333; border-radius:5px; overflow:hidden; }
-  #fill { height:100%; width:0%; background:#4caf50; transition:width .2s; }
+  #bar { flex:1; height:12px; background:#333; border-radius:6px; overflow:visible;
+         position:relative; }
+  #fill { height:100%; width:0%; background:#4caf50; transition:width .2s;
+          border-radius:6px 0 0 6px; }
+  #pos { position:absolute; top:-3px; width:3px; height:18px; background:#fff;
+         border-radius:2px; transform:translateX(-1px); transition:left .15s; }
   #count { font-variant-numeric: tabular-nums; white-space:nowrap; }
+  #toast { position:fixed; left:50%; bottom:84px; transform:translateX(-50%);
+           background:#4caf50; color:#063; font-weight:600; padding:8px 16px;
+           border-radius:8px; opacity:0; transition:opacity .12s; pointer-events:none; }
+  #toast.show { opacity:.96; }
   main { flex:1; display:flex; align-items:center; justify-content:center;
          overflow:hidden; padding:8px; position:relative; }
   img { max-width:100%; max-height:100%; object-fit:contain; border:1px solid #333; }
@@ -205,13 +213,14 @@ REVIEW_HTML = """<!doctype html>
 <body>
 <header>
   <strong>Blind verify</strong>
-  <div id="bar"><div id="fill"></div></div>
+  <div id="bar"><div id="fill"></div><div id="pos"></div></div>
   <span id="count">0 / 0</span>
   <span id="badge">&#x2713; all judged &mdash; run <code id="cmd"></code></span>
 </header>
 <main>
   <img id="img" alt="pair">
 </main>
+<div id="toast"></div>
 <footer>
   <button id="prev">&#x27F5; Prev <kbd>&larr;</kbd></button>
   <button id="left">Left better <kbd>1</kbd></button>
@@ -238,8 +247,13 @@ function render() {
   const r = records[i];
   $('img').src = '/pairs/' + encodeURIComponent(r.image) + '?v=' + i;
   const judged = judgedCount();
-  $('count').textContent = (i + 1) + ' / ' + records.length + '  -  ' + judged + ' judged';
+  const left = records.length - judged;
+  $('count').textContent =
+    'pair ' + (i + 1) + ' / ' + records.length +
+    '  ·  ' + judged + ' judged  ·  ' + left + ' left';
   $('fill').style.width = (100 * judged / records.length) + '%';
+  $('pos').style.left =
+    (records.length > 1 ? (100 * i / (records.length - 1)) : 0) + '%';
   const map = { left:'L', tie:'T', right:'R' };
   for (const id of ['left','tie','right'])
     $(id).classList.toggle('cur', r.verdict === map[id]);
@@ -252,8 +266,18 @@ async function vote(v) {
   r.verdict = v;
   fetch('/verdict', { method:'POST', headers:{'Content-Type':'application/json'},
                       body: JSON.stringify({ id: r.id, verdict: v }) });
+  flash(v);  // confirm the vote registered even when the count does not change
   i = Math.min(i + 1, records.length - 1);  // advance to the next pair
   render();
+}
+let toastTimer = null;
+function flash(v) {
+  const label = { L:'Left better', R:'Right better', T:'Tie' };
+  const t = $('toast');
+  t.textContent = '\\u2713 saved: ' + label[v];
+  t.classList.add('show');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 700);
 }
 function move(d) { i = Math.max(0, Math.min(records.length - 1, i + d)); render(); }
 $('left').onclick  = () => vote('L');
