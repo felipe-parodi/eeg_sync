@@ -197,10 +197,9 @@ REVIEW_HTML = """<!doctype html>
   kbd { background:#000; border:1px solid #555; border-radius:4px; padding:0 6px;
         font-size:12px; }
   #hint { opacity:.65; font-size:13px; min-width:120px; }
-  #done { display:none; position:absolute; inset:0; background:rgba(17,17,17,.95);
-          align-items:center; justify-content:center; flex-direction:column;
-          text-align:center; font-size:22px; gap:12px; padding:40px; }
-  #done code { background:#000; padding:6px 10px; border-radius:6px; font-size:16px; }
+  #badge { display:none; gap:8px; align-items:center; color:#4caf50;
+           font-size:13px; white-space:nowrap; }
+  #badge code { background:#000; color:#eee; padding:3px 8px; border-radius:5px; }
 </style>
 </head>
 <body>
@@ -208,21 +207,17 @@ REVIEW_HTML = """<!doctype html>
   <strong>Blind verify</strong>
   <div id="bar"><div id="fill"></div></div>
   <span id="count">0 / 0</span>
+  <span id="badge">&#x2713; all judged &mdash; run <code id="cmd"></code></span>
 </header>
 <main>
   <img id="img" alt="pair">
-  <div id="done">
-    <div>All pairs judged.</div>
-    <div>Tally them with:</div>
-    <code id="cmd">python -m pose_training.verify summarize</code>
-  </div>
 </main>
 <footer>
-  <button id="prev">&#x27F5; Prev</button>
-  <button id="left">Left better <kbd>1</kbd>/<kbd>&larr;</kbd></button>
-  <button id="tie">Tie <kbd>2</kbd>/<kbd>&darr;</kbd></button>
-  <button id="right">Right better <kbd>3</kbd>/<kbd>&rarr;</kbd></button>
-  <button id="next">Next &#x27F6;</button>
+  <button id="prev">&#x27F5; Prev <kbd>&larr;</kbd></button>
+  <button id="left">Left better <kbd>1</kbd></button>
+  <button id="tie">Tie <kbd>2</kbd></button>
+  <button id="right">Right better <kbd>3</kbd></button>
+  <button id="next">Next <kbd>&rarr;</kbd> &#x27F6;</button>
   <span id="hint"></span>
 </footer>
 <script>
@@ -250,16 +245,14 @@ function render() {
     $(id).classList.toggle('cur', r.verdict === map[id]);
   const label = { L:'Left', R:'Right', T:'Tie' };
   $('hint').textContent = r.verdict ? ('marked: ' + label[r.verdict]) : 'unjudged';
-  $('done').style.display = records.every(x => x.verdict) ? 'flex' : 'none';
+  $('badge').style.display = records.every(x => x.verdict) ? 'flex' : 'none';
 }
 async function vote(v) {
   const r = records[i];
   r.verdict = v;
   fetch('/verdict', { method:'POST', headers:{'Content-Type':'application/json'},
                       body: JSON.stringify({ id: r.id, verdict: v }) });
-  let nxt = records.findIndex((x, k) => k > i && !x.verdict);
-  if (nxt === -1) nxt = Math.min(i + 1, records.length - 1);
-  i = nxt;
+  i = Math.min(i + 1, records.length - 1);  // advance to the next pair
   render();
 }
 function move(d) { i = Math.max(0, Math.min(records.length - 1, i + d)); render(); }
@@ -269,11 +262,11 @@ $('right').onclick = () => vote('R');
 $('prev').onclick  = () => move(-1);
 $('next').onclick  = () => move(1);
 document.addEventListener('keydown', e => {
-  if (e.key === '1' || e.key === 'ArrowLeft') vote('L');
-  else if (e.key === '2' || e.key === 'ArrowDown') vote('T');
-  else if (e.key === '3' || e.key === 'ArrowRight') vote('R');
-  else if (e.key === 'Backspace') move(-1);
-  else if (e.key === 'ArrowUp') move(1);
+  if (e.key === 'ArrowLeft') move(-1);        // navigate, do not vote
+  else if (e.key === 'ArrowRight') move(1);
+  else if (e.key === '1') vote('L');
+  else if (e.key === '2') vote('T');
+  else if (e.key === '3') vote('R');
 });
 load();
 </script>
