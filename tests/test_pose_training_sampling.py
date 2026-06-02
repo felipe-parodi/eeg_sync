@@ -82,3 +82,45 @@ def test_assign_splits_is_deterministic() -> None:
     first = sampling.assign_splits(participants, n_test=3, n_val=2, seed=7)
     second = sampling.assign_splits(participants, n_test=3, n_val=2, seed=7)
     assert first == second
+
+
+def test_timestamps_in_spans_stay_inside_spans() -> None:
+    spans = [(100.0, 160.0), (300.0, 360.0)]
+    stamps = sampling.timestamps_in_spans(spans, sample_fps=0.5, max_frames=100)
+    assert stamps == sorted(stamps)
+    assert all(
+        any(a <= t <= b for a, b in spans) for t in stamps
+    )  # never lands in the excluded gap (160-300)
+
+
+def test_timestamps_in_spans_respects_cap_and_proportions() -> None:
+    # 60s + 30s of footage; cap below the fps-implied count is honored.
+    spans = [(0.0, 60.0), (100.0, 130.0)]
+    stamps = sampling.timestamps_in_spans(
+        spans, sample_fps=1.0, max_frames=9, margin_frac=0.0
+    )
+    assert len(stamps) == 9  # capped at max_frames
+    # Roughly 2:1 split between the 60s and 30s spans.
+    first = [t for t in stamps if t <= 60.0]
+    assert len(first) == 6
+
+
+def test_timestamps_in_spans_empty_when_no_footage() -> None:
+    assert sampling.timestamps_in_spans([], sample_fps=1.0, max_frames=10) == []
+
+
+def test_select_indices_modes() -> None:
+    # Near-static run then a jump: hashes 0,0,0,15 (last is far).
+    hashes = [0b0000, 0b0000, 0b0000, 0b1111]
+    assert sampling.select_indices(hashes, "none", threshold=6) == [0, 1, 2, 3]
+    # Consecutive: keep first, skip the two identical, keep the far one.
+    assert sampling.select_indices(hashes, "consecutive", threshold=2) == [0, 3]
+    # Global matches the legacy dedup.
+    assert sampling.select_indices(
+        hashes, "global", threshold=2
+    ) == sampling.dedup_indices(hashes, 2)
+
+
+def test_select_indices_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError):
+        sampling.select_indices([1, 2], "bogus", threshold=1)

@@ -16,7 +16,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -24,6 +24,16 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VIDEO_DIR = REPO_ROOT / "compressed_video"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "pose_training" / "data"
+DEFAULT_TIMING_OUTPUT_DIR = REPO_ROOT / "pose_training" / "data" / "dense"
+MANIFEST_FIELDS = [
+    "frame_path",
+    "participant",
+    "angle",
+    "split",
+    "source_video",
+    "source_timestamp_s",
+    "dhash",
+]
 VALID_ANGLES = {"SHORT", "TALL"}
 HASH_SIZE = 8
 
@@ -46,6 +56,11 @@ class SamplingConfig:
     max_frames_per_video: int = 150
     margin_frac: float = 0.03
     dedup_threshold: int = 6
+    # Dedup strategy. "global" (legacy) keeps frames far from EVERY kept frame --
+    # which collapses fixed-camera, near-static session footage to a handful.
+    # "none" relies on temporal spacing alone (right for dense window sampling);
+    # "consecutive" drops only runs near the previous kept frame (frozen video).
+    dedup_mode: str = "global"
     n_test_participants: int = 3
     n_val_participants: int = 2
     jpeg_quality: int = 2
@@ -142,6 +157,33 @@ def dedup_indices(hashes: Sequence[int], threshold: int) -> List[int]:
         kept.append(index)
         kept_hashes.append(value)
     return kept
+
+
+def select_indices(hashes: Sequence[int], mode: str, threshold: int) -> List[int]:
+    """Choose which frame indices to keep under a dedup ``mode``.
+
+    Args:
+        hashes: Per-frame difference hashes in frame order.
+        mode: "none" (keep all), "consecutive" (drop frames within ``threshold``
+            of the previous kept frame), or "global" (drop frames within
+            ``threshold`` of any kept frame).
+        threshold: Hamming distance treated as a near-duplicate.
+
+    Returns:
+        Sorted indices of frames to keep.
+    """
+    if mode == "none":
+        return list(range(len(hashes)))
+    if mode == "global":
+        return dedup_indices(hashes, threshold)
+    if mode == "consecutive":
+        kept: List[int] = []
+        for index, value in enumerate(hashes):
+            if kept and hamming(value, hashes[kept[-1]]) <= threshold:
+                continue
+            kept.append(index)
+        return kept
+    raise ValueError(f"Unknown dedup mode: {mode!r}")
 
 
 def assign_splits(
@@ -291,6 +333,148 @@ def _sample_one_video(
     return rows
 
 
+def timestamps_in_spans(
+    spans: Sequence[Tuple[float, float]],
+    sample_fps: float,
+    max_frames: int,
+    margin_frac: float = 0.01,
+) -> List[float]:
+    """Spread sample timestamps across the union of spans (windows-only mode).
+
+    The total number of samples is ``min(max_frames, total_seconds *
+    sample_fps)``, allocated to each span in proportion to its length and spaced
+    evenly within it. Timestamps always fall inside a span, so frames never land
+    on the excluded 3+-person sections.
+
+    Args:
+        spans: Valid ``(start_s, end_s)`` spans for one session.
+        sample_fps: Frames per second of valid footage.
+        max_frames: Per-session cap on the number of timestamps.
+        margin_frac: Fraction of each span skipped at its head and tail.
+
+    Returns:
+        Ascending list of timestamps in seconds.
+    """
+    total = sum(end - start for start, end in spans)
+    if total <= 0:
+        return []
+    desired = min(max_frames, max(1, int(round(total * sample_fps))))
+    raw = [(end - start) / total * desired for start, end in spans]
+    counts = [int(value) for value in raw]
+    leftover = desired - sum(counts)
+    order = sorted(range(len(spans)), key=lambda i: raw[i] - counts[i], reverse=True)
+    for index in order[:leftover]:
+        counts[index] += 1
+    out: List[float] = []
+    for (start, end), count in zip(spans, counts):
+        out.extend(
+            start + t for t in evenly_spaced_timestamps(end - start, count, margin_frac)
+        )
+    return sorted(out)
+
+
+def _write_manifest(rows: Sequence[Dict[str, object]], manifest_path: Path) -> Path:
+    """Write manifest rows with the canonical schema and return the path."""
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MANIFEST_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({**row, "frame_path": str(row["frame_path"])})
+    return manifest_path
+
+
+def sample_one_session(
+    session: "object", config: SamplingConfig
+) -> List[Dict[str, object]]:
+    """Sample, extract, and dedup frames inside one session's valid spans.
+
+    Args:
+        session: A ``pose_training.timing.SessionTiming`` (video + spans).
+        config: Sampling configuration (``sample_fps``, caps, dedup, codecs).
+
+    Returns:
+        Manifest rows for the kept frames (all marked ``split='train'``).
+    """
+    spans = session.sampling_spans()
+    timestamps = timestamps_in_spans(
+        spans, config.sample_fps, config.max_frames_per_video, config.margin_frac
+    )
+    stream_dir = config.output_dir / "frames" / session.session_id
+    extracted: List[Dict[str, object]] = []
+    for index, timestamp in enumerate(timestamps):
+        out_path = stream_dir / f"{session.session_id}_{index:04d}.jpg"
+        if not extract_frame(
+            session.video_path,
+            timestamp,
+            out_path,
+            config.ffmpeg_bin,
+            config.jpeg_quality,
+        ):
+            continue
+        image = cv2.imread(str(out_path))
+        if image is None:
+            out_path.unlink(missing_ok=True)
+            continue
+        extracted.append(
+            {
+                "frame_path": out_path,
+                "participant": session.participant_id,
+                "angle": session.camera,
+                "split": "train",
+                "source_video": session.video_path.name,
+                "source_timestamp_s": round(float(timestamp), 3),
+                "dhash": dhash(image),
+            }
+        )
+    keep = set(
+        select_indices(
+            [row["dhash"] for row in extracted],
+            config.dedup_mode,
+            config.dedup_threshold,
+        )
+    )
+    rows: List[Dict[str, object]] = []
+    for index, row in enumerate(extracted):
+        if index in keep:
+            rows.append(row)
+        else:
+            Path(row["frame_path"]).unlink(missing_ok=True)
+    return rows
+
+
+def sample_sessions(sessions: Sequence["object"], config: SamplingConfig) -> Path:
+    """Window-aware, all-train sampling over timing sessions.
+
+    Only sessions with a video on disk and at least one valid span are sampled;
+    every kept frame is assigned to the train split (no leave-one-session-out).
+
+    Args:
+        sessions: ``SessionTiming`` records from ``pose_training.timing``.
+        config: Sampling configuration.
+
+    Returns:
+        Path to the written ``frame_manifest.csv``.
+
+    Raises:
+        ValueError: If no session is sampleable.
+    """
+    sampleable = [s for s in sessions if s.is_sampleable]
+    if not sampleable:
+        raise ValueError("No sampleable sessions (need a video and a valid span).")
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    all_rows: List[Dict[str, object]] = []
+    with ThreadPoolExecutor(max_workers=config.workers) as pool:
+        futures = {
+            pool.submit(sample_one_session, session, config): session
+            for session in sampleable
+        }
+        for future in as_completed(futures):
+            all_rows.extend(future.result())
+    all_rows.sort(key=lambda row: (str(row["source_video"]), str(row["frame_path"])))
+    return _write_manifest(all_rows, config.output_dir / "frame_manifest.csv")
+
+
 def sample_dataset(config: SamplingConfig) -> Path:
     """Run the full sampling stage and write ``frame_manifest.csv``.
 
@@ -334,24 +518,7 @@ def sample_dataset(config: SamplingConfig) -> Path:
             all_rows.extend(future.result())
 
     all_rows.sort(key=lambda row: (str(row["source_video"]), str(row["frame_path"])))
-    manifest_path = config.output_dir / "frame_manifest.csv"
-    with manifest_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=[
-                "frame_path",
-                "participant",
-                "angle",
-                "split",
-                "source_video",
-                "source_timestamp_s",
-                "dhash",
-            ],
-        )
-        writer.writeheader()
-        for row in all_rows:
-            writer.writerow({**row, "frame_path": str(row["frame_path"])})
-    return manifest_path
+    return _write_manifest(all_rows, config.output_dir / "frame_manifest.csv")
 
 
 def summarize_manifest(manifest_path: Path) -> str:
@@ -380,33 +547,62 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Sample and deduplicate training frames from session clips."
     )
     parser.add_argument("--video-dir", default=str(DEFAULT_VIDEO_DIR), type=str)
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), type=str)
+    parser.add_argument("--output-dir", default=None, type=str)
     parser.add_argument("--sample-fps", default=0.2, type=float)
     parser.add_argument("--max-frames-per-video", default=150, type=int)
     parser.add_argument("--dedup-threshold", default=6, type=int)
+    parser.add_argument(
+        "--dedup-mode",
+        default=None,
+        choices=["none", "consecutive", "global"],
+        help="Dedup strategy (default: none for --use-timing, global otherwise).",
+    )
     parser.add_argument("--n-test-participants", default=3, type=int)
     parser.add_argument("--n-val-participants", default=2, type=int)
     parser.add_argument("--workers", default=8, type=int)
     parser.add_argument("--seed", default=1234, type=int)
     parser.add_argument("--max-videos", default=None, type=int)
+    parser.add_argument(
+        "--use-timing",
+        action="store_true",
+        help="Window-aware, all-train sampling from the timing workbook.",
+    )
+    parser.add_argument(
+        "--xlsx",
+        default=None,
+        type=str,
+        help="Timing workbook (defaults to the bundled one) for --use-timing.",
+    )
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    default_output = (
+        DEFAULT_TIMING_OUTPUT_DIR if args.use_timing else DEFAULT_OUTPUT_DIR
+    )
+    default_dedup = "none" if args.use_timing else "global"
     config = SamplingConfig(
         video_dir=Path(args.video_dir),
-        output_dir=Path(args.output_dir),
+        output_dir=Path(args.output_dir) if args.output_dir else default_output,
         sample_fps=args.sample_fps,
         max_frames_per_video=args.max_frames_per_video,
         dedup_threshold=args.dedup_threshold,
+        dedup_mode=args.dedup_mode or default_dedup,
         n_test_participants=args.n_test_participants,
         n_val_participants=args.n_val_participants,
         workers=args.workers,
         seed=args.seed,
         max_videos=args.max_videos,
     )
-    manifest_path = sample_dataset(config)
+    if args.use_timing:
+        from .timing import DEFAULT_XLSX, load_session_timings
+
+        xlsx = Path(args.xlsx) if args.xlsx else DEFAULT_XLSX
+        sessions = load_session_timings(xlsx, config.video_dir)
+        manifest_path = sample_sessions(sessions, config)
+    else:
+        manifest_path = sample_dataset(config)
     print(f"Wrote manifest: {manifest_path}")
     print(summarize_manifest(manifest_path))
 
