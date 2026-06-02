@@ -23,19 +23,24 @@ PORTAL_DEFAULT_IMAGE_HEIGHT = 480
 # (e.g. an experimenter in the room) are excluded from the analysis blocks
 # before inference, so a third tracked person is noise we do not want to keep.
 PORTAL_DEFAULT_MAX_PERSONS = 2
-# Domain-adapted pose model. ``yolo11l-pose-fused3.pt`` is a yolo11l-pose
+# Domain-adapted pose model. ``yolo11l-pose-dense.pt`` is a yolo11l-pose
 # fine-tuned on 3-teacher consensus pseudo-labels (yolo11x-pose + ViTPose-Huge +
-# RTMPose, box-matched and majority-voted) from this project's own session
-# videos -- same architecture and latency as stock yolo11l-pose, but better
-# detection and keypoints on this footage (overhead, occlusion, young children).
-# It is a local artifact (gitignored *.pt); if absent we fall back to the stock
-# model, which Ultralytics downloads on demand. See
-# docs/pseudo-label-pose-train_260531.md and pose_training/.
-_PORTAL_FUSED3_WEIGHTS = Path(__file__).resolve().parents[1] / "yolo11l-pose-fused3.pt"
-PORTAL_DEFAULT_MODEL_PATH = (
-    str(_PORTAL_FUSED3_WEIGHTS)
-    if _PORTAL_FUSED3_WEIGHTS.exists()
-    else "yolo11l-pose.pt"
+# RTMPose, box-matched and majority-voted) sampled from the timing-windowed,
+# 2-person-only sections of all 36 session videos -- same architecture and
+# latency as stock yolo11l-pose, but better detection and keypoints on this
+# footage (overhead, occlusion, young children). It supersedes the earlier
+# ``yolo11l-pose-fused3.pt`` after winning a blind A/B on fresh (non-training)
+# frames (dense 15, fused3 7, 9 ties of 31). Both are local artifacts
+# (gitignored *.pt); we prefer dense, fall back to fused3, then to the stock
+# model (downloaded on demand). See pose_training/ and AGENTS.md.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_PORTAL_POSE_WEIGHTS = (
+    _REPO_ROOT / "yolo11l-pose-dense.pt",
+    _REPO_ROOT / "yolo11l-pose-fused3.pt",
+)
+PORTAL_DEFAULT_MODEL_PATH = next(
+    (str(path) for path in _PORTAL_POSE_WEIGHTS if path.exists()),
+    "yolo11l-pose.pt",
 )
 # Inference resolution. The fine-tuned students are trained at 960, but the
 # pipeline default is 640 -- so without this the deployed model would run at a
