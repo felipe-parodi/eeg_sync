@@ -271,24 +271,7 @@ def botsort_fixed(cache: DetCache, fit: Sequence[AnchorGold]) -> pd.DataFrame:
 
 def cache_to_frames(cache: DetCache, conf_min: float = 0.0) -> list:
     """Convert a detection cache into ``offline_assoc.FrameDetections``."""
-    from video_inference.offline_assoc import FrameDetections
-
-    frames = []
-    for i in range(cache.n_frames):
-        sl = cache.frame_dets(i)
-        keep = np.arange(sl.start, sl.stop)
-        keep = keep[cache.conf[keep] >= conf_min]
-        frames.append(
-            FrameDetections(
-                frame_idx=int(cache.frame_idx[i]),
-                timestamp_s=float(cache.timestamp_s[i]),
-                boxes=cache.boxes[keep],
-                conf=cache.conf[keep],
-                keypoints=cache.keypoints[keep],
-                embeddings=cache.embeddings[keep],
-            )
-        )
-    return frames
+    return cache.to_frames(conf_min)
 
 
 def offline_variant(

@@ -11,7 +11,6 @@ import pytest
 
 from pose_training.bench import (
     AnchorGold,
-    DetCache,
     anchor_scores,
     box_iou,
     load_anchor_gold,
@@ -19,6 +18,7 @@ from pose_training.bench import (
     split_anchors,
     two_person_rate,
 )
+from video_inference.detection_cache import DetCache
 
 
 def _assign(rows: list[tuple[int, float, str, tuple[float, float, float, float]]]):

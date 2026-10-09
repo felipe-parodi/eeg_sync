@@ -51,6 +51,13 @@ PORTAL_DEFAULT_INFER_IMGSZ = 960
 # block (capped at this length), so the colleague sees tracking quality for
 # every block rather than only the first.
 PORTAL_DEFAULT_OVERLAY_SECONDS = 30.0
+# Tracker used in phase 1. "offline" replaced BoT-SORT after a benchmark on 31
+# camera views of past portal sessions (pose_training/bench.py): frames with
+# both parent and child 0.52 -> 0.73, role accuracy on held-out anchor labels
+# 0.78 -> 0.99. See docs/pose-quality-overhaul_261009.md.
+PORTAL_TRACKER_BACKEND = "offline"
+PORTAL_TRACKER_NAME = "two_person_offline"
+DETECTION_CACHE_RELPATH = Path("intermediate") / "detections.npz"
 
 
 @dataclass
@@ -666,10 +673,12 @@ def build_phase1_steps(config: PortalJobConfig) -> list[CommandStep]:
             "ultralytics",
             "--ultralytics-model-path",
             config.model_path,
+            # Offline two-person association: caches every detection (down
+            # to conf 0.05) with an appearance embedding, then solves parent
+            # and child over the whole recording. Phase 2 re-solves it with
+            # the colleague's anchor labels. See video_inference/offline_assoc.
             "--tracker-backend",
-            "boxmot",
-            "--tracker-name",
-            "botsort",
+            PORTAL_TRACKER_BACKEND,
             "--max-persons",
             str(config.max_persons),
             "--frame-rate",
@@ -726,21 +735,32 @@ def build_phase2_steps(
         blocks_arg = build_blocks_arg(camera_blocks)
         camera_dir = session_dir / camera_id
 
-        filter_argv = [
-            python,
-            "-m",
-            "video_analysis.track_filter",
-            "--session-dir",
-            str(session_dir),
-            "--camera",
-            camera_id,
-            "--blocks",
-            blocks_arg,
-            "--source-fps",
-            str(config.frame_rate),
-            "--n-keep",
-            "2",
-        ]
+        if (camera_dir / DETECTION_CACHE_RELPATH).exists():
+            # Re-solve parent/child over the whole recording with the anchors.
+            filter_argv = [
+                python,
+                "-m",
+                "video_inference.offline_assoc",
+                "--camera-dir",
+                str(camera_dir),
+            ]
+        else:
+            # Jobs from before the offline tracker: block filter on raw tracks.
+            filter_argv = [
+                python,
+                "-m",
+                "video_analysis.track_filter",
+                "--session-dir",
+                str(session_dir),
+                "--camera",
+                camera_id,
+                "--blocks",
+                blocks_arg,
+                "--source-fps",
+                str(config.frame_rate),
+                "--n-keep",
+                "2",
+            ]
         anchors_path = anchors_map.get(camera_id)
         if anchors_path is not None:
             filter_argv.extend(["--anchors-json", str(anchors_path)])

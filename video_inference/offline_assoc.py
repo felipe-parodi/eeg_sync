@@ -982,3 +982,194 @@ def _fill_gaps(
                     _row(frame, role, frame.boxes[det], frame.conf[det], det, True)
                 )
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Pipeline integration: detection cache -> parent/child CSVs
+# ---------------------------------------------------------------------------
+
+ROLE_TRACK_ID = {"parent": 0, "child": 1}
+TRACK_COLUMNS = [
+    "frame_idx",
+    "timestamp_s",
+    "track_id",
+    "track_label",
+    "bbox_x1",
+    "bbox_y1",
+    "bbox_x2",
+    "bbox_y2",
+    "track_confidence",
+]
+POSE_COLUMNS = [
+    "frame_idx",
+    "timestamp_s",
+    "track_id",
+    "track_label",
+    "keypoint_name",
+    "x_m",
+    "y_m",
+    "z_m",
+    "keypoint_confidence",
+]
+
+
+def anchors_from_portal_labels(
+    labels: Sequence[dict], tracks: pd.DataFrame
+) -> list[AnchorBoxes]:
+    """Convert portal anchor labels (track ids) into parent/child boxes.
+
+    Args:
+        labels: Entries of the portal's ``anchors.json``: ``frame_idx`` plus
+            ``parent_track_id``/``child_track_id``, or ``skipped``.
+        tracks: The ``tracks_2d.csv`` the labels refer to.
+
+    Returns:
+        One :class:`AnchorBoxes` per usable, non-skipped label.
+    """
+    by_key = {
+        (int(r.frame_idx), int(r.track_id)): r for r in tracks.itertuples(index=False)
+    }
+    anchors: list[AnchorBoxes] = []
+    for entry in labels:
+        if entry.get("skipped"):
+            continue
+        frame = int(entry["frame_idx"])
+        parent = by_key.get((frame, int(entry.get("parent_track_id", -1))))
+        child = by_key.get((frame, int(entry.get("child_track_id", -1))))
+        if parent is None or child is None:
+            continue
+        anchors.append(
+            AnchorBoxes(
+                timestamp_s=float(parent.timestamp_s),
+                parent_box=(
+                    parent.bbox_x1,
+                    parent.bbox_y1,
+                    parent.bbox_x2,
+                    parent.bbox_y2,
+                ),
+                child_box=(child.bbox_x1, child.bbox_y1, child.bbox_x2, child.bbox_y2),
+            )
+        )
+    return anchors
+
+
+def assignment_to_tables(
+    assign: pd.DataFrame, frames: Sequence[FrameDetections]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Turn an association result into ``tracks_2d`` and ``pose_3d`` tables.
+
+    Args:
+        assign: Output of :func:`associate_two_people` run on ``frames``.
+        frames: The per-frame detections the association used.
+
+    Returns:
+        ``(tracks, pose)`` with the pipeline's CSV schemas; ``track_id`` is 0
+        for the parent and 1 for the child.
+    """
+    by_frame = {f.frame_idx: f for f in frames}
+    track_rows, pose_rows = [], []
+    for r in assign.itertuples(index=False):
+        tid = ROLE_TRACK_ID[r.role]
+        track_rows.append(
+            [r.frame_idx, r.timestamp_s, tid, r.role, r.x1, r.y1, r.x2, r.y2, r.conf]
+        )
+        kps = by_frame[r.frame_idx].keypoints[int(r.det_index)]
+        for k, (x, y, c) in enumerate(kps):
+            pose_rows.append(
+                [r.frame_idx, r.timestamp_s, tid, r.role, f"kp_{k:03d}", x, y, 0.0, c]
+            )
+    tracks = pd.DataFrame(track_rows, columns=TRACK_COLUMNS)
+    pose = pd.DataFrame(pose_rows, columns=POSE_COLUMNS)
+    return (
+        tracks.sort_values(["frame_idx", "track_id"]).reset_index(drop=True),
+        pose.sort_values(["frame_idx", "track_id", "keypoint_name"]).reset_index(
+            drop=True
+        ),
+    )
+
+
+def summarize_assignment(assign: pd.DataFrame, n_frames: int, n_anchors: int) -> dict:
+    """Plain-language coverage summary for logs and the results zip."""
+    if len(assign):
+        roles = assign.groupby("frame_idx")["role"].nunique()
+        per_role = assign["role"].value_counts().to_dict()
+        both = int((roles >= 2).sum())
+        filled = int(assign["filled"].sum())
+    else:
+        per_role, both, filled = {}, 0, 0
+    return {
+        "frames": int(n_frames),
+        "anchors_used": int(n_anchors),
+        "frames_with_parent": int(per_role.get("parent", 0)),
+        "frames_with_child": int(per_role.get("child", 0)),
+        "frames_with_both": both,
+        "share_with_both": both / n_frames if n_frames else 0.0,
+        "gap_filled_rows": filled,
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Assign parent/child identities from a camera's detection cache.
+
+    Reads ``intermediate/detections.npz`` (written by the ``offline`` tracker
+    backend), optionally the colleague's anchor labels, and writes parent/child
+    tracks and poses (``track_id`` 0 = parent, 1 = child).
+    """
+    import argparse
+    import json
+    from pathlib import Path
+
+    from video_inference.detection_cache import DetCache
+
+    parser = argparse.ArgumentParser(
+        description="Label the parent and the child across a whole recording."
+    )
+    parser.add_argument("--camera-dir", type=Path, required=True)
+    parser.add_argument("--cache", default="intermediate/detections.npz")
+    parser.add_argument(
+        "--anchors-json",
+        type=Path,
+        default=None,
+        help="Portal anchor labels. Without them, the taller person is the parent.",
+    )
+    parser.add_argument(
+        "--anchor-tracks",
+        default="tracks_2d.csv",
+        help="Tracks CSV that the anchor track ids refer to.",
+    )
+    parser.add_argument("--tracks-output", default="tracks_2d_filtered.csv")
+    parser.add_argument("--pose-output", default="pose_3d_filtered.csv")
+    parser.add_argument("--summary-output", default="two_person_summary.json")
+    args = parser.parse_args(argv)
+
+    camera_dir = args.camera_dir
+    cache_path = camera_dir / args.cache
+    if not cache_path.exists():
+        raise SystemExit(
+            f"No detection cache at {cache_path}. Run pose inference with "
+            "--tracker-backend offline first."
+        )
+    cache = DetCache.load(cache_path)
+    frames = cache.to_frames()
+    anchors: list[AnchorBoxes] = []
+    if args.anchors_json is not None and args.anchors_json.exists():
+        labels = json.loads(args.anchors_json.read_text(encoding="utf-8"))
+        tracks = pd.read_csv(camera_dir / args.anchor_tracks)
+        anchors = anchors_from_portal_labels(labels, tracks)
+    assign = associate_two_people(frames, anchors, AssocConfig())
+    tracks_df, pose_df = assignment_to_tables(assign, frames)
+    tracks_df.to_csv(camera_dir / args.tracks_output, index=False)
+    pose_df.to_csv(camera_dir / args.pose_output, index=False)
+    summary = summarize_assignment(assign, cache.n_frames, len(anchors))
+    (camera_dir / args.summary_output).write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    print(
+        f"[two-person] {camera_dir.name}: parent and child both found in "
+        f"{summary['share_with_both']:.0%} of {summary['frames']} frames "
+        f"({summary['anchors_used']} labeled anchor frames used)."
+    )
+
+
+if __name__ == "__main__":
+    main()

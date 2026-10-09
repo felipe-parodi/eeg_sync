@@ -133,6 +133,20 @@ def test_select_anchor_frames_skips_overlapping_window():
         ), f"anchor at frame {c.frame_idx} fell inside the overlap window"
 
 
+def test_select_anchor_frames_fills_all_anchors_across_block_gap():
+    """Two analysis blocks with a long gap between them: every requested
+    anchor lands on a distinct frame inside the blocks (none wasted on the gap)."""
+    first = _make_two_person_tracks(n_frames=240, fps=8.0)  # 0-30 s
+    second = _make_two_person_tracks(n_frames=240, fps=8.0)
+    second["frame_idx"] += 240
+    second["timestamp_s"] += 600.0  # second block 600-630 s
+    df = pd.concat([first, second], ignore_index=True)
+    candidates = select_anchor_frames(df, n_anchors=10)
+    assert len(candidates) == 10
+    assert len({c.frame_idx for c in candidates}) == 10
+    assert sum(c.timestamp_s < 300 for c in candidates) == 5
+
+
 def test_select_anchor_frames_returns_empty_for_empty_df():
     assert select_anchor_frames(pd.DataFrame(), n_anchors=10) == []
 

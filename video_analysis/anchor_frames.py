@@ -89,16 +89,15 @@ def select_anchor_frames(
     max_iou: float = 0.3,
     edge_margin_s: float = 1.0,
 ) -> List[AnchorCandidate]:
-    """Pick up to N evenly time-spaced frames suitable for human annotation.
+    """Pick up to N evenly spread frames suitable for human annotation.
 
     Strategy:
         1. Drop the first/last ``edge_margin_s`` seconds (often startup or
            fade-out frames).
-        2. Compute N evenly-spaced target timestamps inside the remaining
-           range.
-        3. For each target, snap to the nearest *clear* frame (exactly two
-           detections, bbox IoU < ``max_iou``). Skip targets that share a
-           snapped frame with an earlier target.
+        2. Keep only *clear* frames (exactly two detections, bbox IoU <
+           ``max_iou``).
+        3. Pick N clear frames evenly spaced by rank, so anchors spread over
+           the analyzed footage and none are lost to gaps between blocks.
         4. Sort the resulting candidates by timestamp.
 
     Returns ``< n_anchors`` candidates when there are not enough clear
@@ -136,17 +135,14 @@ def select_anchor_frames(
     if not clear:
         return []
 
-    clear_ts = np.asarray([cf[1] for cf in clear], dtype=float)
-    targets = np.linspace(t_min, t_max, n_anchors)
+    # Spread anchors evenly over the clear frames themselves (by rank), not
+    # over the wall-clock span: time targets that fall in the gap between two
+    # analysis blocks would all snap to the same frame and be wasted.
+    picks = np.unique(np.round(np.linspace(0, len(clear) - 1, n_anchors)).astype(int))
 
     candidates: List[AnchorCandidate] = []
-    seen_indices: set[int] = set()
-    for target_t in targets:
-        nearest = int(np.argmin(np.abs(clear_ts - target_t)))
-        if nearest in seen_indices:
-            continue
-        seen_indices.add(nearest)
-        frame_idx, ts, tracks = clear[nearest]
+    for nearest in picks:
+        frame_idx, ts, tracks = clear[int(nearest)]
         candidates.append(
             AnchorCandidate(frame_idx=frame_idx, timestamp_s=ts, tracks=tracks)
         )

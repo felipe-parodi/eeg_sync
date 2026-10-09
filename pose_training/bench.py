@@ -35,6 +35,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from video_inference.detection_cache import DetCache, build_detection_cache
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = REPO_ROOT / "video_inference" / "output"
 JOB_ROOT = OUTPUT_ROOT / "portal_jobs"
@@ -42,78 +44,6 @@ DEFAULT_CACHE_DIR = REPO_ROOT / "pose_training" / "data" / "bench_cache"
 DEFAULT_MODEL = REPO_ROOT / "yolo11l-pose-dense.pt"
 
 Box = tuple[float, float, float, float]
-
-
-# ---------------------------------------------------------------------------
-# Detection cache
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class DetCache:
-    """All detections for one camera, stored as flat arrays.
-
-    Detections of frame ``i`` are rows ``offsets[i]:offsets[i + 1]``.
-
-    Attributes:
-        frame_idx: Frame index per frame, shape (F,).
-        timestamp_s: Source-video timestamp per frame, shape (F,).
-        offsets: Row offsets into the detection arrays, shape (F + 1,).
-        boxes: Detection boxes in pixels (x1, y1, x2, y2), shape (N, 4).
-        conf: Detection confidence, shape (N,).
-        keypoints: COCO-17 keypoints (x, y, conf), shape (N, 17, 3).
-        embeddings: L2-normalized appearance embeddings, shape (N, D).
-        image_size: Frame (width, height) in pixels.
-    """
-
-    frame_idx: np.ndarray
-    timestamp_s: np.ndarray
-    offsets: np.ndarray
-    boxes: np.ndarray
-    conf: np.ndarray
-    keypoints: np.ndarray
-    embeddings: np.ndarray
-    image_size: tuple[int, int]
-
-    @property
-    def n_frames(self) -> int:
-        """Number of frames in the cache."""
-        return len(self.frame_idx)
-
-    def frame_dets(self, i: int) -> slice:
-        """Return the detection row slice for frame position ``i``."""
-        return slice(int(self.offsets[i]), int(self.offsets[i + 1]))
-
-    def save(self, path: Path) -> None:
-        """Save the cache to a compressed ``.npz`` file."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            path,
-            frame_idx=self.frame_idx,
-            timestamp_s=self.timestamp_s,
-            offsets=self.offsets,
-            boxes=self.boxes,
-            conf=self.conf,
-            keypoints=self.keypoints,
-            embeddings=self.embeddings,
-            image_size=np.asarray(self.image_size),
-        )
-
-    @classmethod
-    def load(cls, path: Path) -> DetCache:
-        """Load a cache written by :meth:`save`."""
-        data = np.load(path)
-        width, height = (int(v) for v in data["image_size"])
-        return cls(
-            frame_idx=data["frame_idx"],
-            timestamp_s=data["timestamp_s"],
-            offsets=data["offsets"],
-            boxes=data["boxes"],
-            conf=data["conf"],
-            keypoints=data["keypoints"],
-            embeddings=data["embeddings"],
-            image_size=(width, height),
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -378,51 +308,6 @@ def discover_cameras(job_root: Path = JOB_ROOT) -> list[BenchCamera]:
 # ---------------------------------------------------------------------------
 
 
-def batch_reid_features(
-    reid: Any, images: Sequence[np.ndarray], boxes: Sequence[np.ndarray]
-) -> np.ndarray:
-    """Compute L2-normalized ReID embeddings for all boxes of several frames at once.
-
-    Mirrors boxmot's ``get_crops`` preprocessing but runs one forward pass for
-    the whole batch instead of one per frame.
-
-    Args:
-        reid: boxmot ReID backend (``ReID(...).model``).
-        images: BGR frames.
-        boxes: Per-frame (n_i, 4) xyxy boxes.
-
-    Returns:
-        (sum n_i, D) embeddings in frame order.
-    """
-    import cv2
-    import torch
-
-    crops = []
-    for image, frame_boxes in zip(images, boxes):
-        h, w = image.shape[:2]
-        for box in frame_boxes:
-            x1, y1, x2, y2 = np.round(box).astype(int)
-            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
-            if x2 > x1 and y2 > y1:
-                crop = image[y1:y2, x1:x2]
-            else:
-                crop = np.zeros((*reid.input_shape, 3), np.uint8)
-            crop = reid.preprocess_fn(crop, reid.input_shape)
-            crops.append(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-    if not crops:
-        return np.zeros((0, 512), np.float32)
-    dtype = torch.half if reid.half else torch.float
-    with torch.no_grad():
-        batch = torch.from_numpy(np.stack(crops)).to(reid.device, dtype=dtype)
-        batch = batch.permute(0, 3, 1, 2) / 255.0
-        batch = (batch - reid.mean_array) / reid.std_array
-        feats = reid.inference_postprocess(
-            reid.forward(reid.inference_preprocess(batch))
-        )
-    feats = np.asarray(feats, dtype=np.float32)
-    return feats / np.linalg.norm(feats, axis=-1, keepdims=True)
-
-
 def build_cache(
     camera_dir: Path,
     model_path: Path = DEFAULT_MODEL,
@@ -431,7 +316,7 @@ def build_cache(
     batch_size: int = 32,
     device: str = "cuda:0",
 ) -> DetCache:
-    """Run the pose model on every extracted frame and cache all detections.
+    """Run the pose model on every extracted frame of a portal camera directory.
 
     Args:
         camera_dir: Portal camera output directory with ``frames/``.
@@ -444,70 +329,16 @@ def build_cache(
     Returns:
         The populated detection cache.
     """
-    from concurrent.futures import ThreadPoolExecutor
-
-    import cv2
-    from boxmot.reid.core.reid import ReID
-    from ultralytics import YOLO
-
-    model = YOLO(str(model_path))
-    reid = ReID(path=None, device=device, half=True).model
     index = pd.read_csv(camera_dir / "frames" / "frame_index.csv")
-    paths = [camera_dir / "frames" / name for name in index["image_name"]]
-
-    offsets = [0]
-    boxes, confs, kpts, embs = [], [], [], []
-    image_size = (0, 0)
-    chunks = [paths[s : s + batch_size] for s in range(0, len(paths), batch_size)]
-    pool = ThreadPoolExecutor(max_workers=8)
-
-    def _read(chunk: list[Path]) -> list[np.ndarray]:
-        return list(pool.map(lambda p: cv2.imread(str(p)), chunk))
-
-    pending = pool.submit(_read, chunks[0]) if chunks else None
-    for n, _chunk in enumerate(chunks):
-        images = pending.result()
-        if n + 1 < len(chunks):
-            pending = pool.submit(_read, chunks[n + 1])
-        results = model(
-            images,
-            conf=conf,
-            iou=0.7,
-            imgsz=imgsz,
-            device=device,
-            half=True,
-            verbose=False,
-            classes=[0],
-        )
-        chunk_boxes = []
-        for image, result in zip(images, results):
-            image_size = (image.shape[1], image.shape[0])
-            b = result.boxes.xyxy.cpu().numpy().astype(np.float32)
-            c = result.boxes.conf.cpu().numpy().astype(np.float32)
-            k = np.concatenate(
-                [
-                    result.keypoints.xy.cpu().numpy(),
-                    result.keypoints.conf.cpu().numpy()[..., None],
-                ],
-                axis=-1,
-            ).astype(np.float32)
-            chunk_boxes.append(b)
-            boxes.append(b)
-            confs.append(c)
-            kpts.append(k.reshape(-1, 17, 3))
-            offsets.append(offsets[-1] + len(b))
-        embs.append(batch_reid_features(reid, images, chunk_boxes))
-    pool.shutdown()
-    dim = max((e.shape[1] for e in embs if e.size), default=512)
-    return DetCache(
+    return build_detection_cache(
+        image_paths=[camera_dir / "frames" / name for name in index["image_name"]],
         frame_idx=index["frame_idx"].to_numpy(),
         timestamp_s=index["timestamp_s"].to_numpy(dtype=float),
-        offsets=np.asarray(offsets),
-        boxes=np.concatenate(boxes) if boxes else np.zeros((0, 4), np.float32),
-        conf=np.concatenate(confs) if confs else np.zeros(0, np.float32),
-        keypoints=np.concatenate(kpts) if kpts else np.zeros((0, 17, 3), np.float32),
-        embeddings=np.concatenate([e.reshape(-1, dim) for e in embs]),
-        image_size=image_size,
+        model_path=model_path,
+        conf=conf,
+        imgsz=imgsz,
+        batch_size=batch_size,
+        device=device,
     )
 
 

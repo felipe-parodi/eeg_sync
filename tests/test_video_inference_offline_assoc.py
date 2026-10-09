@@ -237,3 +237,45 @@ def test_identity_swap_inside_tracklets_is_split_and_relabeled() -> None:
     parent = out[out["role"] == "parent"].set_index("frame_idx")
     assert (parent.loc[:24, "x1"] < 200).all()
     assert (parent.loc[36:, "x1"] > 400).all()
+
+
+def test_anchors_from_portal_labels_and_tables() -> None:
+    import pandas as pd
+
+    from video_inference.offline_assoc import (
+        anchors_from_portal_labels,
+        assignment_to_tables,
+        summarize_assignment,
+    )
+
+    tracks = pd.DataFrame(
+        {
+            "frame_idx": [3, 3],
+            "timestamp_s": [0.5, 0.5],
+            "track_id": [0, 1],
+            "bbox_x1": [0.0, 500.0],
+            "bbox_y1": [0.0, 250.0],
+            "bbox_x2": [150.0, 570.0],
+            "bbox_y2": [300.0, 390.0],
+        }
+    )
+    labels = [
+        {"frame_idx": 3, "parent_track_id": 1, "child_track_id": 0},
+        {"frame_idx": 9, "skipped": True},
+    ]
+    anchors = anchors_from_portal_labels(labels, tracks)
+    assert len(anchors) == 1
+    assert anchors[0].parent_box == (500.0, 250.0, 570.0, 390.0)
+
+    seq = [
+        [_det(100, 100, 300, 0.9, PARENT_EMB), _det(500, 250, 140, 0.8, CHILD_EMB)]
+        for _ in range(5)
+    ]
+    frames = _frames(seq)
+    out = associate_two_people(frames, [], AssocConfig())
+    tr, pose = assignment_to_tables(out, frames)
+    assert list(tr["track_id"].unique()) == [0, 1]
+    assert len(pose) == len(tr) * 17
+    assert set(pose["keypoint_name"]) == {f"kp_{k:03d}" for k in range(17)}
+    summary = summarize_assignment(out, n_frames=5, n_anchors=0)
+    assert summary["frames_with_both"] == 5

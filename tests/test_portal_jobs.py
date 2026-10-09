@@ -980,3 +980,57 @@ def test_anchor_image_endpoint_serves_jpeg(monkeypatch, tmp_path: Path) -> None:
     response = portal_app.anchor_image("job-001", "camera_a", "anchor_01.jpg", None)
     assert response.media_type == "image/jpeg"
     assert Path(response.path).name == "anchor_01.jpg"
+
+
+def test_build_phase1_uses_offline_two_person_tracker(tmp_path: Path) -> None:
+    from portal.jobs import build_phase1_steps
+
+    argv = build_phase1_steps(_job_config_two_cameras(tmp_path))[0].argv
+    assert argv[argv.index("--tracker-backend") + 1] == "offline"
+    assert "botsort" not in argv
+
+
+def test_build_phase2_uses_offline_association_when_cache_exists(
+    tmp_path: Path,
+) -> None:
+    from portal.jobs import build_phase2_steps
+
+    cfg = _job_config_two_cameras(tmp_path)
+    for cam in ("camera_a", "camera_b"):
+        cache = cfg.session_output_dir / cam / "intermediate" / "detections.npz"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b"")
+    anchors_a = tmp_path / "anchors_a.json"
+    steps = build_phase2_steps(cfg, anchors_json_by_camera={"camera_a": anchors_a})
+    by_name = {s.name: s.argv for s in steps}
+    filter_a = by_name["filter tracks camera_a"]
+    assert "video_inference.offline_assoc" in filter_a
+    assert filter_a[filter_a.index("--anchors-json") + 1] == str(anchors_a)
+    filter_b = by_name["filter tracks camera_b"]
+    assert "video_inference.offline_assoc" in filter_b
+    assert "--anchors-json" not in filter_b
+
+
+def test_build_phase2_falls_back_to_track_filter_without_cache(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    steps = build_phase2_steps(_job_config_two_cameras(tmp_path))
+    by_name = {s.name: s.argv for s in steps}
+    assert "video_analysis.track_filter" in by_name["filter tracks camera_a"]
+
+
+def test_submission_metadata_records_offline_tracker() -> None:
+    metadata = build_submission_metadata(
+        job_id="job",
+        created_at="2026-10-09T00:00:00",
+        safe_session_id="P001",
+        blocks_text="free_play,0:10,0:40",
+        exclusions_text="",
+        video_a_name="a.mp4",
+        video_b_name="",
+        video_a_size=10,
+        video_b_size=0,
+        include_gaze=False,
+    )
+    assert metadata["processing"]["tracker_backend"] == "offline"
+    assert metadata["processing"]["tracker_name"] == "two_person_offline"
