@@ -2,8 +2,8 @@
 
 The deployed pose model (a fine-tuned YOLO) finds people and keypoints in one
 pass. Once identities are fixed, a heavier top-down model can re-estimate each
-person's keypoints from their box. On past portal sessions ViTPose-plus-Huge
-cut frame-to-frame keypoint jitter by a median of ~38% versus the YOLO
+person's keypoints from their box. On past portal sessions ViTPose-plus
+(Large or Huge) cut frame-to-frame keypoint jitter by ~24-38% versus the YOLO
 keypoints (same frames, same people).
 
 Top-down models have one failure mode that matters here: given the box of a
@@ -20,13 +20,16 @@ import argparse
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from video_inference.offline_assoc import keypoint_similarity
 
-DEFAULT_REFINER = "usyd-community/vitpose-plus-huge"
+# Large matches Huge on keypoint jitter (0.763 vs 0.766 of the YOLO jitter on
+# 4 past cameras) at ~60% of the time; Base gives up much of the gain (0.905).
+DEFAULT_REFINER = "usyd-community/vitpose-plus-large"
 
 # [(frame_idx, (n, 4) xyxy boxes), ...] -> per frame, one (17, 3) array
 # (x, y, score) per box. Called with a batch of frames at a time.
@@ -125,6 +128,145 @@ def refine_pose_table(
     return pose, summary
 
 
+# ViTPose input and heatmap geometry (COCO top-down): crops are 192x256 and
+# heatmaps 48x64. The math below mirrors transformers' VitPoseImageProcessor
+# (box_to_center_and_scale, get_warp_matrix, DARK decoding, transform_preds),
+# but crops with OpenCV and decodes on the GPU: the reference implementation
+# warps each crop with scipy and decodes heatmaps on the CPU, which took ~2/3
+# of the refinement time.
+_IN_W, _IN_H = 192, 256
+_MEAN = (0.485, 0.456, 0.406)
+_STD = (0.229, 0.224, 0.225)
+
+
+def _center_scale(boxes_xyxy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Box -> (center, scale/200) with the 192:256 aspect and 1.25 padding."""
+    boxes = np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4)
+    w = boxes[:, 2] - boxes[:, 0]
+    h = boxes[:, 3] - boxes[:, 1]
+    center = np.stack([boxes[:, 0] + w * 0.5, boxes[:, 1] + h * 0.5], axis=1)
+    aspect = _IN_W / _IN_H
+    h = np.where(w > aspect * h, w / aspect, h)
+    w = np.where(w < aspect * h, h * aspect, w)
+    scale = np.stack([w, h], axis=1) / 200.0 * 1.25
+    return center.astype(np.float32), scale.astype(np.float32)
+
+
+def crop_people(image_rgb: np.ndarray, boxes_xyxy: np.ndarray) -> np.ndarray:
+    """Affine-crop each person box to a 192x256 RGB patch (uint8, NHWC)."""
+    import cv2
+
+    centers, scales = _center_scale(boxes_xyxy)
+    crops = np.zeros((len(centers), _IN_H, _IN_W, 3), dtype=np.uint8)
+    out_w, out_h = _IN_W - 1.0, _IN_H - 1.0
+    for i, (center, scale) in enumerate(zip(centers, scales)):
+        roi_w, roi_h = scale * 200.0
+        sx, sy = out_w / roi_w, out_h / roi_h
+        matrix = np.array(
+            [
+                [sx, 0.0, sx * (-center[0] + 0.5 * roi_w)],
+                [0.0, sy, sy * (-center[1] + 0.5 * roi_h)],
+            ],
+            dtype=np.float32,
+        )
+        crops[i] = cv2.warpAffine(
+            image_rgb,
+            matrix,
+            (_IN_W, _IN_H),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+    return crops
+
+
+def normalize_crops(crops_nhwc: Any, device: str, dtype: Any) -> Any:
+    """uint8 NHWC crops -> ImageNet-normalized NCHW tensor on ``device``."""
+    import torch
+
+    x = (
+        crops_nhwc.to(device=device, non_blocking=True).permute(0, 3, 1, 2).float()
+        / 255.0
+    )
+    mean = torch.tensor(_MEAN, device=device).view(1, 3, 1, 1)
+    std = torch.tensor(_STD, device=device).view(1, 3, 1, 1)
+    return ((x - mean) / std).to(dtype)
+
+
+def _gaussian_blur_like_scipy(
+    heatmaps: Any, sigma: float = 0.8, radius: int = 5
+) -> Any:
+    """Separable Gaussian blur matching scipy.ndimage.gaussian_filter (mode='reflect')."""
+    import torch
+    from torch.nn import functional
+
+    offsets = torch.arange(
+        -radius, radius + 1, device=heatmaps.device, dtype=heatmaps.dtype
+    )
+    kernel = torch.exp(-0.5 * (offsets / sigma) ** 2)
+    kernel = kernel / kernel.sum()
+    n, k, h, w = heatmaps.shape
+    x = heatmaps.reshape(n * k, 1, h, w)
+    # scipy 'reflect' mirrors including the edge sample (d c b a | a b c d).
+    x = torch.cat([x[..., :radius].flip(-1), x, x[..., -radius:].flip(-1)], dim=-1)
+    x = functional.conv2d(x, kernel.view(1, 1, 1, -1))
+    x = torch.cat(
+        [x[..., :radius, :].flip(-2), x, x[..., -radius:, :].flip(-2)], dim=-2
+    )
+    x = functional.conv2d(x, kernel.view(1, 1, -1, 1))
+    return x.reshape(n, k, h, w)
+
+
+def decode_heatmaps(heatmaps: Any, boxes_xyxy: np.ndarray) -> np.ndarray:
+    """Heatmaps (N, 17, 64, 48) -> image keypoints (N, 17, 3) as (x, y, score).
+
+    Argmax plus DARK sub-pixel refinement (log-heatmap Taylor expansion), then
+    the unbiased mapping back to image coordinates, all on the heatmaps' device.
+    """
+    import torch
+    from torch.nn import functional
+
+    heat = heatmaps.float()
+    n, k, h, w = heat.shape
+    flat = heat.reshape(n, k, -1)
+    scores, idx = flat.max(dim=-1)
+    x = (idx % w).float()
+    y = torch.div(idx, w, rounding_mode="floor").float()
+    log_heat = torch.log(_gaussian_blur_like_scipy(heat).clamp(0.001, 50.0))
+    padded = functional.pad(
+        log_heat.reshape(n * k, 1, h, w), (1, 1, 1, 1), mode="replicate"
+    )
+    padded = padded.reshape(n, k, h + 2, w + 2)
+    px = x.long() + 1
+    py = y.long() + 1
+
+    def at(dx: int, dy: int) -> Any:
+        flat_idx = (py + dy) * (w + 2) + (px + dx)
+        return padded.reshape(n, k, -1).gather(-1, flat_idx.unsqueeze(-1)).squeeze(-1)
+
+    c = at(0, 0)
+    gx = 0.5 * (at(1, 0) - at(-1, 0))
+    gy = 0.5 * (at(0, 1) - at(0, -1))
+    hxx = at(1, 0) - 2 * c + at(-1, 0)
+    hyy = at(0, 1) - 2 * c + at(0, -1)
+    hxy = 0.5 * (
+        at(1, 1) - at(1, 0) - at(0, 1) + 2 * c - at(-1, 0) - at(0, -1) + at(-1, -1)
+    )
+    eps = float(np.finfo(np.float32).eps)
+    hxx_e, hyy_e = hxx + eps, hyy + eps
+    det = hxx_e * hyy_e - hxy * hxy
+    inv_xx, inv_yy, inv_xy = hyy_e / det, hxx_e / det, -hxy / det
+    x = x - (inv_xx * gx + inv_xy * gy)
+    y = y - (inv_xy * gx + inv_yy * gy)
+
+    centers, scales = _center_scale(boxes_xyxy)
+    centers_t = torch.from_numpy(centers).to(heat.device)
+    roi = torch.from_numpy(scales * 200.0).to(heat.device)
+    img_x = x * (roi[:, :1] / (w - 1.0)) + centers_t[:, :1] - roi[:, :1] * 0.5
+    img_y = y * (roi[:, 1:] / (h - 1.0)) + centers_t[:, 1:] - roi[:, 1:] * 0.5
+    return torch.stack([img_x, img_y, scores], dim=-1).cpu().numpy()
+
+
 def make_vitpose_refiner(
     frames_dir: Path,
     model_id: str = DEFAULT_REFINER,
@@ -144,15 +286,14 @@ def make_vitpose_refiner(
 
     import cv2
     import torch
-    from transformers import AutoProcessor, VitPoseForPoseEstimation
+    from transformers import VitPoseForPoseEstimation
 
     index = pd.read_csv(frames_dir / "frame_index.csv")
     names = dict(zip(index["frame_idx"].astype(int), index["image_name"]))
-    processor = AutoProcessor.from_pretrained(model_id)
     on_gpu = not str(device).startswith("cpu")
     model = VitPoseForPoseEstimation.from_pretrained(model_id).to(device).eval()
-    if on_gpu:
-        model = model.half()
+    dtype = torch.float16 if on_gpu else torch.float32
+    model = model.to(dtype)
     needs_dataset_index = "dataset_index" in inspect.signature(model.forward).parameters
 
     from concurrent.futures import ThreadPoolExecutor
@@ -166,33 +307,29 @@ def make_vitpose_refiner(
 
     def refine(batch: list[tuple[int, np.ndarray]]) -> list[list[np.ndarray]]:
         batch = [(f, np.asarray(b, dtype=float).reshape(-1, 4)) for f, b in batch]
-        keep = [i for i, (_, b) in enumerate(batch) if len(b)]
         results: list[list[np.ndarray]] = [[] for _ in batch]
+        keep = [i for i, (_, b) in enumerate(batch) if len(b)]
         if not keep:
             return results
         images = list(pool.map(_read, [batch[i][0] for i in keep]))
-        boxes_xywh = []
-        for i in keep:
-            xywh = batch[i][1].copy()
-            xywh[:, 2:] -= xywh[:, :2]
-            boxes_xywh.append(xywh.tolist())
-        inputs = processor(images, boxes=boxes_xywh, return_tensors="pt").to(device)
-        if on_gpu:
-            inputs["pixel_values"] = inputs["pixel_values"].half()
+        crops = np.concatenate(
+            [crop_people(img, batch[i][1]) for img, i in zip(images, keep)]
+        )
+        boxes = np.concatenate([batch[i][1] for i in keep])
+        pixels = normalize_crops(torch.from_numpy(crops), device, dtype)
         kwargs = {}
         if needs_dataset_index:  # ViTPose-plus: index 0 selects COCO-17
             kwargs["dataset_index"] = torch.zeros(
-                inputs["pixel_values"].shape[0], dtype=torch.int64, device=device
+                len(boxes), dtype=torch.int64, device=device
             )
         with torch.no_grad():
-            outputs = model(**inputs, **kwargs)
-        outputs.heatmaps = outputs.heatmaps.float()
-        people = processor.post_process_pose_estimation(outputs, boxes=boxes_xywh)
-        for i, frame_people in zip(keep, people):
-            results[i] = [
-                np.c_[p["keypoints"].cpu().numpy(), p["scores"].cpu().numpy()]
-                for p in frame_people
-            ]
+            heatmaps = model(pixel_values=pixels, **kwargs).heatmaps
+        keypoints = decode_heatmaps(heatmaps, boxes)
+        start = 0
+        for i in keep:
+            n = len(batch[i][1])
+            results[i] = list(keypoints[start : start + n])
+            start += n
         return results
 
     return refine
@@ -209,7 +346,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--pose-output", default="pose_3d_refined.csv")
     parser.add_argument("--summary-output", default="keypoint_refinement_summary.json")
     parser.add_argument("--model", default=DEFAULT_REFINER)
-    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args(argv)
 
     camera_dir = args.camera_dir
@@ -217,7 +354,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     pose = pd.read_csv(camera_dir / args.pose_input)
     from video_inference.device import resolve_device
 
-    device = resolve_device(args.device)  # "auto" -> cuda / mps / cpu
+    device = args.device
+    if not device.startswith("cuda:"):
+        device = resolve_device(device)  # "auto" -> cuda / mps / cpu
     if device == "cuda":
         device = "cuda:0"
     refiner = make_vitpose_refiner(

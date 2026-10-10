@@ -210,6 +210,7 @@ def build_detection_cache(
         return list(pool.map(lambda p: cv2.imread(str(p)), chunk))
 
     pending = pool.submit(_read, chunks[0]) if chunks else None
+    reid_pool = ThreadPoolExecutor(max_workers=1)
     step = max(1, len(chunks) // 10)
     for n in range(len(chunks)):
         images = pending.result()
@@ -242,10 +243,14 @@ def build_detection_cache(
             confs.append(c)
             kpts.append(k.reshape(-1, 17, 3))
             offsets.append(offsets[-1] + len(b))
-        embs.append(batch_reid_features(reid, images, chunk_boxes))
+        # ReID runs in a background thread so its CPU-side cropping overlaps
+        # with YOLO on the next batch.
+        embs.append(reid_pool.submit(batch_reid_features, reid, images, chunk_boxes))
         if progress and (n + 1) % step == 0:
             done = min(len(paths), (n + 1) * batch_size)
             print(f"[detect] {done}/{len(paths)} frames", flush=True)
+    embs = [future.result() for future in embs]
+    reid_pool.shutdown()
     pool.shutdown()
     dim = max((e.shape[1] for e in embs if e.size), default=512)
     return DetCache(

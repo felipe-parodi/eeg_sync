@@ -98,6 +98,10 @@ class CommandStep:
 
     name: str
     argv: list[str]
+    camera_id: str | None = None
+    # GPU-bound steps never overlap across cameras: two at once only contend
+    # (two ViTPose refinements took 110 s each in parallel vs 48 s alone).
+    gpu_heavy: bool = False
 
 
 @dataclass
@@ -123,6 +127,9 @@ class PortalJobConfig:
     infer_imgsz: int = PORTAL_DEFAULT_INFER_IMGSZ
     overlay_seconds: float = PORTAL_DEFAULT_OVERLAY_SECONDS
     refine_keypoints: bool = True
+    # Process camera A and camera B at the same time (the GPU is mostly
+    # idle during one camera's CPU-bound work): ~halves job wall time.
+    parallel_cameras: bool = True
 
     @property
     def session_output_dir(self) -> Path:
@@ -709,6 +716,8 @@ def build_phase1_steps(config: PortalJobConfig) -> list[CommandStep]:
             config.session_id,
         ]
     )
+    if config.parallel_cameras:
+        pose_argv.append("--parallel-cameras")
     return [CommandStep(name="pose inference", argv=pose_argv)]
 
 
@@ -730,11 +739,13 @@ def build_phase2_steps(
     camera_ids = active_camera_ids(config)
     anchors_map = anchors_json_by_camera or {}
     steps: list[CommandStep] = []
+    camera_starts: list[tuple[str, int]] = []
 
     for camera_id in camera_ids:
         camera_blocks = blocks_for_camera(config, camera_id)
         blocks_arg = build_blocks_arg(camera_blocks)
         camera_dir = session_dir / camera_id
+        camera_starts.append((camera_id, len(steps)))
 
         offline = (camera_dir / DETECTION_CACHE_RELPATH).exists()
         refine = offline and config.refine_keypoints
@@ -778,11 +789,12 @@ def build_phase2_steps(
             ]
         )
         if refine:
-            # Re-estimate each person's keypoints with ViTPose-Huge from their
-            # box (about 38% less keypoint jitter on past sessions); falls back
+            # Re-estimate each person's keypoints with ViTPose-Large from their
+            # box (~24% less keypoint jitter on past sessions); falls back
             # to the original keypoints where ViTPose disagrees on who it is.
             steps.append(
                 CommandStep(
+                    gpu_heavy=True,
                     name=f"refine keypoints {camera_id}",
                     argv=[
                         python,
@@ -913,6 +925,7 @@ def build_phase2_steps(
             steps.extend(
                 [
                     CommandStep(
+                        gpu_heavy=True,
                         name=f"gaze inference {camera_id}",
                         argv=[
                             python,
@@ -985,6 +998,10 @@ def build_phase2_steps(
                 ]
             )
 
+    bounds = camera_starts + [(None, len(steps))]
+    for (camera_id, start), (_, end) in zip(bounds, bounds[1:]):
+        for step in steps[start:end]:
+            step.camera_id = camera_id
     return steps
 
 
@@ -1054,6 +1071,88 @@ def run_command_step(step: CommandStep, cwd: Path, log_path: Path) -> None:
             check=True,
             text=True,
         )
+
+
+def run_steps(
+    steps: Sequence[CommandStep],
+    cwd: Path,
+    log_path: Path,
+    on_start: Any = None,
+    parallel_cameras: bool = False,
+) -> None:
+    """Run command steps, optionally one thread per camera.
+
+    Steps of one camera always run in order. With ``parallel_cameras`` the
+    cameras' chains run concurrently; each writes its own log section, which
+    is appended to ``log_path`` (camera A first) when the chains finish, so the
+    job log stays readable.
+
+    Args:
+        steps: Steps to run (``camera_id`` groups them).
+        cwd: Working directory for the subprocesses.
+        log_path: Job log.
+        on_start: Optional callback ``(step_number, total, step)`` called as
+            each step starts.
+        parallel_cameras: Run different cameras' chains concurrently.
+
+    Raises:
+        subprocess.CalledProcessError: The first failing step (after every
+            chain has stopped).
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    groups: dict[str | None, list[CommandStep]] = {}
+    for step in steps:
+        groups.setdefault(step.camera_id, []).append(step)
+    total = len(steps)
+    started = 0
+    lock = threading.Lock()
+
+    def notify(step: CommandStep) -> None:
+        nonlocal started
+        with lock:
+            started += 1
+            if on_start is not None:
+                on_start(started, total, step)
+
+    if not parallel_cameras or len(groups) <= 1:
+        for step in steps:
+            notify(step)
+            run_command_step(step, cwd=cwd, log_path=log_path)
+        return
+
+    part_logs = {
+        key: log_path.with_name(f"{log_path.stem}.{key or 'session'}{log_path.suffix}")
+        for key in groups
+    }
+
+    gpu_lock = threading.Lock()
+
+    def run_chain(key: str | None) -> None:
+        for step in groups[key]:
+            notify(step)
+            if step.gpu_heavy:
+                with gpu_lock:
+                    run_command_step(step, cwd=cwd, log_path=part_logs[key])
+            else:
+                run_command_step(step, cwd=cwd, log_path=part_logs[key])
+
+    errors: list[BaseException] = []
+    with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+        futures = [pool.submit(run_chain, key) for key in groups]
+        for future in futures:
+            try:
+                future.result()
+            except BaseException as error:  # noqa: BLE001 - re-raised below
+                errors.append(error)
+    with log_path.open("a", encoding="utf-8") as log_file:
+        for key, part in part_logs.items():
+            if part.exists():
+                log_file.write(part.read_text(encoding="utf-8", errors="replace"))
+                part.unlink()
+    if errors:
+        raise errors[0]
 
 
 RESULT_ZIP_EXCLUDED_DIRS = frozenset({"frames", "intermediate"})
@@ -1156,7 +1255,7 @@ The other CSVs are earlier stages kept for transparency and debugging:
 |---|---|---|---|
 | 1. raw | `tracks_2d.csv` | `pose_3d.csv` | Every detection from every tracked person, before role assignment. |
 | 2. filtered | `tracks_2d_filtered.csv` | `pose_3d_filtered.csv` | The parent and the child, identified across the whole recording using your anchor labels. |
-| 2b. refined | | `pose_3d_refined.csv` | Same people, keypoints re-estimated by a stronger pose model (ViTPose-Huge) for steadier joints. Present for new jobs. |
+| 2b. refined | | `pose_3d_refined.csv` | Same people, keypoints re-estimated by a stronger pose model (ViTPose-Large) for steadier joints. Present for new jobs. |
 | 3. interpolated | `tracks_2d_interpolated.csv` | `pose_3d_interpolated.csv` | Detection gaps up to 1 s linearly filled so boxes/joints do not flicker. Longer gaps are left empty. Filled rows are flagged in the `interpolated` column. |
 | 4. smooth | `tracks_2d_smooth.csv` | `pose_3d_smooth.csv` | Stage 3 + temporal EMA smoothing. **Use these.** |
 
@@ -1455,17 +1554,25 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
     try:
         anchors_map = resolve_anchors_json_paths(config)
         steps = build_phase2_steps(config, anchors_json_by_camera=anchors_map)
-        for index, step in enumerate(steps, start=1):
+
+        def on_start(index: int, total: int, step: CommandStep) -> None:
             write_status(
                 config.job_dir,
                 {
                     "state": "running",
-                    "message": f"Phase 2 step {index} of {len(steps)}: {step.name}",
+                    "message": f"Phase 2 step {index} of {total}: {step.name}",
                     "current_step": step.name,
                     "phase": 2,
                 },
             )
-            run_command_step(step, cwd=repo_root, log_path=log_path)
+
+        run_steps(
+            steps,
+            cwd=repo_root,
+            log_path=log_path,
+            on_start=on_start,
+            parallel_cameras=config.parallel_cameras,
+        )
 
         zip_path = config.job_dir / f"{config.session_id}_results.zip"
         metadata_root = Path(config.session_id) / "portal_metadata"

@@ -488,3 +488,45 @@ def test_run_camera_pipeline_uses_ultralytics_backend_config(tmp_path: Path):
     assert summary.schema_valid
     assert seen["runner_class"] == "UltraRunnerConfig"
     assert seen["model_path"] == "yolo11n-pose.pt"
+
+
+def test_run_pipeline_parallel_cameras_keeps_order(tmp_path: Path):
+    """--parallel-cameras runs cameras concurrently but reports them A then B."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from video_inference import pipeline as pipeline_module
+
+    video_a = tmp_path / "a.mp4"
+    video_b = tmp_path / "b.mp4"
+    video_a.write_text("a", encoding="utf-8")
+    video_b.write_text("b", encoding="utf-8")
+    config = PipelineConfig(
+        video_a=str(video_a),
+        video_b=str(video_b),
+        output_dir=str(tmp_path / "out"),
+        dry_run=True,
+        parallel_cameras=True,
+    )
+    barrier = threading.Barrier(2, timeout=5)
+
+    def fake_run_camera_pipeline(camera_id, source_video, session_dir, config):
+        barrier.wait()  # deadlocks (times out) unless both cameras run at once
+        return CameraPipelineSummary(
+            camera_id=camera_id,
+            source_video=source_video,
+            compressed_video="",
+            frames_dir="",
+            raw_output_json="",
+            schema_valid=True,
+            frame_count=1,
+            errors=[],
+        )
+
+    original = pipeline_module.run_camera_pipeline
+    try:
+        pipeline_module.run_camera_pipeline = fake_run_camera_pipeline
+        summary = run_pipeline(config, executor_factory=ThreadPoolExecutor)
+    finally:
+        pipeline_module.run_camera_pipeline = original
+    assert [c["camera_id"] for c in summary["cameras"]] == ["camera_a", "camera_b"]

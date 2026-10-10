@@ -1060,3 +1060,120 @@ def test_build_phase2_refines_keypoints_after_offline_association(
     cfg.refine_keypoints = False
     names_off = [s.name for s in build_phase2_steps(cfg)]
     assert "refine keypoints camera_a" not in names_off
+
+
+def test_phase2_steps_are_tagged_with_their_camera(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    steps = build_phase2_steps(_job_config_two_cameras(tmp_path))
+    for step in steps:
+        assert step.camera_id in {"camera_a", "camera_b"}
+        assert step.camera_id in step.name
+
+
+def test_phase1_requests_parallel_cameras(tmp_path: Path) -> None:
+    from portal.jobs import build_phase1_steps
+
+    cfg = _job_config_two_cameras(tmp_path)
+    assert "--parallel-cameras" in build_phase1_steps(cfg)[0].argv
+    cfg.parallel_cameras = False
+    assert "--parallel-cameras" not in build_phase1_steps(cfg)[0].argv
+
+
+def test_run_steps_runs_cameras_concurrently_and_merges_logs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import threading
+
+    from portal import jobs as portal_jobs
+    from portal.jobs import CommandStep, run_steps
+
+    barrier = threading.Barrier(2, timeout=5)
+
+    def fake_run(step, cwd, log_path):
+        if step.name.startswith("first"):
+            barrier.wait()  # both cameras must be inside their first step at once
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"== {step.name} ==\n")
+
+    monkeypatch.setattr(portal_jobs, "run_command_step", fake_run)
+    steps = [
+        CommandStep("first camera_a", [], "camera_a"),
+        CommandStep("second camera_a", [], "camera_a"),
+        CommandStep("first camera_b", [], "camera_b"),
+        CommandStep("second camera_b", [], "camera_b"),
+    ]
+    seen = []
+    log = tmp_path / "job.log"
+    run_steps(
+        steps,
+        tmp_path,
+        log,
+        on_start=lambda i, n, s: seen.append(i),
+        parallel_cameras=True,
+    )
+    assert sorted(seen) == [1, 2, 3, 4]
+    text = log.read_text(encoding="utf-8")
+    assert (
+        text.index("first camera_a")
+        < text.index("second camera_a")
+        < text.index("first camera_b")
+    )
+    assert not list(tmp_path.glob("job.camera_*.log"))
+
+
+def test_run_steps_reports_failure_after_other_camera_finishes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import subprocess
+
+    from portal import jobs as portal_jobs
+    from portal.jobs import CommandStep, run_steps
+
+    ran = []
+
+    def fake_run(step, cwd, log_path):
+        ran.append(step.name)
+        if step.name == "boom camera_a":
+            raise subprocess.CalledProcessError(1, ["x"])
+
+    monkeypatch.setattr(portal_jobs, "run_command_step", fake_run)
+    steps = [
+        CommandStep("boom camera_a", [], "camera_a"),
+        CommandStep("after camera_a", [], "camera_a"),
+        CommandStep("ok camera_b", [], "camera_b"),
+    ]
+    with pytest.raises(subprocess.CalledProcessError):
+        run_steps(steps, tmp_path, tmp_path / "job.log", parallel_cameras=True)
+    assert "ok camera_b" in ran
+    assert "after camera_a" not in ran
+
+
+def test_run_steps_never_overlaps_gpu_heavy_steps(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    import time
+
+    from portal import jobs as portal_jobs
+    from portal.jobs import CommandStep, run_steps
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def fake_run(step, cwd, log_path):
+        nonlocal active, peak
+        if step.gpu_heavy:
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(portal_jobs, "run_command_step", fake_run)
+    steps = [
+        CommandStep(f"refine {cam}", [], cam, gpu_heavy=True)
+        for cam in ("camera_a", "camera_b")
+    ]
+    run_steps(steps, tmp_path, tmp_path / "job.log", parallel_cameras=True)
+    assert peak == 1
