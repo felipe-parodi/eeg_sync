@@ -39,7 +39,10 @@ from video_inference.detection_cache import DetCache, build_detection_cache
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = REPO_ROOT / "video_inference" / "output"
-JOB_ROOT = OUTPUT_ROOT / "portal_jobs"
+# The portal deletes its job folders on every start, so the colleague's anchor
+# labels (the benchmark's ground truth) are read from a backup when present.
+_JOB_BACKUP = REPO_ROOT / "pose_training" / "data" / "portal_backup_261009" / "portal_jobs"
+JOB_ROOT = _JOB_BACKUP if _JOB_BACKUP.exists() else OUTPUT_ROOT / "portal_jobs"
 DEFAULT_CACHE_DIR = REPO_ROOT / "pose_training" / "data" / "bench_cache"
 DEFAULT_MODEL = REPO_ROOT / "yolo11l-pose-dense.pt"
 
