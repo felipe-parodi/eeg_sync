@@ -77,6 +77,9 @@ Pipeline stages run in sequence: **compress -> extract frames -> infer -> track 
 - **`ultralytics_runner.py`:** YOLOv11 2D pose backend. Two tracking modes: internal (parent/child heuristic by bbox area) and external (Roboflow ByteTrack with `lost_track_buffer=60` and ID slot recycling).
 - **`rtmlib_runner.py`:** RTMLib pose backend (2D `Body` and 3D `Wholebody3d`) via onnxruntime / opencv / openvino. `--rtmlib-3d` toggles the 3D model. The runner bypasses upstream `PoseTracker` (which returned the wrong tuple arity for `RTMPose3d`) and calls the solution class directly per frame.
 - **`sam3d_runner.py`:** SAM-3D-Body true-3D pose backend. Patches upstream CUDA hardcoding for CPU fallback. Imports from `third_party/sam-3d-body/` submodule. Override path via `EEG_SYNC_SAM3D_ROOT` env var.
+- **`offline_assoc.py`:** Offline two-person identity association (portal default, `--tracker-backend offline`). Keypoint-aware dedup, conservative tracklets, per-role global best chains scored by appearance + per-camera size model, anchor labels local to +-10 s, rescue pass, gap fill. CLI re-solves with portal `anchors.json`.
+- **`detection_cache.py`:** `DetCache` (.npz of every detection, keypoints, OSNet ReID embeddings) and `build_detection_cache` (batched YOLO + ReID).
+- **`topdown_refine.py`:** Re-estimates tracked keypoints with ViTPose-plus-Huge, used only where it matches the YOLO skeleton (OKS >= 0.5).
 - **`tracking.py`:** `TwoPersonTrackerState` with IoU-based temporal continuity. Frame 0 uses area prior (parent = largest bbox), subsequent frames use IoU matching.
 - **`schema.py`:** Validates output CSVs (manifest, `tracks_2d.csv`, `pose_3d.csv`). Returns `ValidationResult` with error list, not exceptions.
 - **`device.py`:** `resolve_device("auto")` returns `"cpu"`, `"mps"`, or `"cuda"`. Auto-detection order: CUDA > MPS > CPU. `resolve_inference_mode` selects `"full"` vs `"body"` based on hardware.
@@ -177,7 +180,8 @@ Pre-compressed videos in `video_inference/compressed/` are safe to use with `--s
 
 Three valid sources of parent/child track IDs, in order of preference:
 
-1. **`video-filter-tracks` (recommended for the colleague workflow).** Block-aware: top-N most persistent tracks per `session_blocks[i]` keep, parent=0/child=1 assigned by mean bbox area within that block. Produces `tracks_2d_filtered.csv` / `pose_3d_filtered.csv`.
+0. **Offline two-person association (portal default since 2026-10).** `--tracker-backend offline` in phase 1, then `python -m video_inference.offline_assoc --anchors-json ...` writes `*_filtered.csv` with parent=0/child=1. Benchmarked with `pose_training/bench.py` against held-out colleague anchor labels.
+1. **`video-filter-tracks` (previous colleague workflow; still used for jobs without a detection cache).** Block-aware: top-N most persistent tracks per `session_blocks[i]` keep, parent=0/child=1 assigned by mean bbox area within that block. Produces `tracks_2d_filtered.csv` / `pose_3d_filtered.csv`.
 2. **`video-annotate-tracks` + `video-correct-tracks`.** Interactive override when auto-assignment is wrong (e.g. parent physically smaller, experimenter in frame, parent-child swap). Writes `track_corrections.json` → applied to `*_corrected.csv`.
 3. **Inference-time tracker.** `--tracker-backend internal` uses the two-person heuristic (parent = largest bbox at frame 0, IoU continuity after). `--tracker-backend roboflow --tracker-name bytetrack` uses ByteTrack with `lost_track_buffer=60` and recycles IDs into stable `0..max_persons-1` slots.
 

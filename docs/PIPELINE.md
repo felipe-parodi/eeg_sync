@@ -108,6 +108,21 @@ video-infer run \
 |---|---|
 | `--tracker-backend internal` | Two-person heuristic: parent = largest bbox at frame 0, then IoU continuity. Only suitable when `--max-persons 2` and detections are clean. |
 | `--tracker-backend roboflow --tracker-name bytetrack` | ByteTrack with `lost_track_buffer=60` (frames). Recommended for `--max-persons > 2` or any session with possible occlusions. |
+| `--tracker-backend offline` | **Portal default (2 people).** Caches every detection down to conf 0.05 with keypoints and a ReID embedding (`intermediate/detections.npz`), then solves parent/child over the whole recording (`video_inference/offline_assoc.py`). Without anchors the taller person is the parent. Requires `--max-persons 2`. |
+
+With the offline tracker, re-solve identities with anchor labels and write the
+filtered CSVs directly (this replaces `video-filter-tracks`):
+
+```bash
+python -m video_inference.offline_assoc --camera-dir <camera_dir> --anchors-json anchors.json
+# -> tracks_2d_filtered.csv, pose_3d_filtered.csv, two_person_summary.json
+python -m video_inference.topdown_refine --camera-dir <camera_dir>
+# -> pose_3d_refined.csv (ViTPose-Huge keypoints, gated against the YOLO ones)
+```
+
+`anchors.json` is the portal's format: a list of `{frame_idx, parent_track_id,
+child_track_id}` (or `{frame_idx, skipped: true}`) referring to `tracks_2d.csv`.
+Benchmark and rationale: `docs/pose-quality-overhaul_261009.md`.
 
 ### Per-camera outputs
 

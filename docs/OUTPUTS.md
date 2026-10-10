@@ -12,13 +12,17 @@ video_inference/output/<session_id>/
     ├── frames/                           # extracted JPGs
     │   └── frame_000001.jpg, ...
     ├── intermediate/
-    │   └── inference_raw.json            # backend's raw output (pre-tracking)
+    │   ├── inference_raw.json            # backend's raw output (pre-tracking)
+    │   └── detections.npz                # offline tracker: every detection + ReID embedding
     │
     ├── tracks_2d.csv                     # ← raw output of `video-infer`
     ├── pose_3d.csv
     │
-    ├── tracks_2d_filtered.csv            # ← after `video-filter-tracks`
+    ├── tracks_2d_filtered.csv            # ← after `video-filter-tracks` or `offline_assoc`
     ├── pose_3d_filtered.csv
+    ├── two_person_summary.json           # ← `offline_assoc`: frames with parent / child / both
+    ├── pose_3d_refined.csv               # ← `topdown_refine`: ViTPose-refined keypoints
+    ├── keypoint_refinement_summary.json
     │
     ├── track_corrections.json            # ← after `video-annotate-tracks`
     ├── tracks_2d_corrected.csv           # ← after `video-correct-tracks`

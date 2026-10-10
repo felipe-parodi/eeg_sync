@@ -87,3 +87,38 @@ metrics are out of scope.
 
 Programmatic metrics rank the candidates. Final acceptance needs human visual
 review of the overlays and the A/B galleries.
+
+## Results (2026-10-09)
+
+Benchmark: 31 camera views from 20 portal sessions. Role accuracy is scored on
+held-out halves of the colleague's anchor labels.
+
+| Pipeline | Frames with both people | Role accuracy | Child-taller frames | Confident deployed boxes kept |
+|---|---|---|---|---|
+| Deployed (BoT-SORT + nearest-anchor roles) | 0.520 | 0.784 | 0.156 | 1.000 |
+| BoT-SORT with corrected settings | 0.601 | 0.855 | 0.135 | - |
+| Offline association, no anchors | 0.626 | 0.810 | 0.171 | - |
+| **Offline association (shipped)** | **0.726** | **0.992** | **0.100** | **0.999** |
+
+Phase 3 results:
+
+- Larger inference size (1280) recovered a confident second person in only 3.6%
+  of the remaining single-person frames (0.7% at 960). Flip TTA had no effect.
+  Detection recall is near its ceiling for 960x540 footage. Not shipped.
+- ViTPose-plus-Huge on tracked boxes reduced keypoint jitter by a median ~38%
+  (8 of 8 person-tracks). It can lock onto the other person in overlapping
+  boxes, so it is gated by keypoint similarity to the YOLO skeleton. Shipped
+  as `video_inference/topdown_refine.py`.
+
+Known failures:
+
+- Confident model false positives on clutter (a coat on a chair in P003
+  camera_a, a curtain fold at the lens in 1019 camera_a). Motion and keypoint
+  quality do not separate them from still, reading parents. Fix at the model
+  (hard negatives in the next distillation round) or with a "not a person"
+  anchor button.
+- One box that covers an adult and a child lying together gets a single role.
+- Overlap (parent bending over child) still produces mixed skeletons.
+
+Not changed: extraction at 6 fps from 10 fps uploads gives uneven frame
+timing (0.1/0.2 s steps). 5 or 10 fps would make it uniform.
