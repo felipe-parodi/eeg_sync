@@ -1034,3 +1034,29 @@ def test_submission_metadata_records_offline_tracker() -> None:
     )
     assert metadata["processing"]["tracker_backend"] == "offline"
     assert metadata["processing"]["tracker_name"] == "two_person_offline"
+
+
+def test_build_phase2_refines_keypoints_after_offline_association(
+    tmp_path: Path,
+) -> None:
+    from portal.jobs import build_phase2_steps
+
+    cfg = _job_config_two_cameras(tmp_path)
+    cfg.video_b = None
+    cache = cfg.session_output_dir / "camera_a" / "intermediate" / "detections.npz"
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(b"")
+    steps = build_phase2_steps(cfg)
+    names = [s.name for s in steps]
+    assert (
+        names.index("filter tracks camera_a")
+        < names.index("refine keypoints camera_a")
+        < names.index("interpolate tracks camera_a")
+    )
+    by_name = {s.name: s.argv for s in steps}
+    assert "video_inference.topdown_refine" in by_name["refine keypoints camera_a"]
+    assert "pose_3d_refined.csv" in by_name["interpolate tracks camera_a"]
+
+    cfg.refine_keypoints = False
+    names_off = [s.name for s in build_phase2_steps(cfg)]
+    assert "refine keypoints camera_a" not in names_off

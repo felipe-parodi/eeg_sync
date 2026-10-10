@@ -94,15 +94,13 @@ def test_video_infer_cli_runs_end_to_end_on_compressed_video(tmp_path: Path) -> 
         "ultralytics",
         "--ultralytics-model-path",
         "yolo11m-pose.pt",
-        # Use the portal's production tracker so the smoke test catches
-        # any regression in the boxmot+botsort wiring (validation allow-
-        # lists, ReID backend layering, etc.) before a real upload does.
+        # Use the portal's production tracker so the smoke test catches any
+        # regression in the offline two-person wiring (detection cache,
+        # ReID batching, association) before a real upload does.
         "--tracker-backend",
-        "boxmot",
-        "--tracker-name",
-        "botsort",
+        "offline",
         "--max-persons",
-        "3",
+        "2",
         "--frame-rate",
         "1.0",
         "--analysis-windows-camera-a",
@@ -133,6 +131,9 @@ def test_video_infer_cli_runs_end_to_end_on_compressed_video(tmp_path: Path) -> 
     assert (
         camera_dir / "manifest.json"
     ).exists(), f"manifest.json missing under {camera_dir}"
+    assert (
+        camera_dir / "intermediate" / "detections.npz"
+    ).exists(), f"detection cache missing under {camera_dir}"
 
 
 def test_run_portal_job_end_to_end_on_compressed_video(tmp_path: Path) -> None:
