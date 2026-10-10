@@ -122,3 +122,22 @@ Known failures:
 
 Not changed: extraction at 6 fps from 10 fps uploads gives uneven frame
 timing (0.1/0.2 s steps). 5 or 10 fps would make it uniform.
+
+## Runtime (2026-10-09, portal job on P003, two cameras)
+
+| | Phase 1 | Phase 2 | Total |
+|---|---|---|---|
+| Before profiling | 127 s | 271 s | 398 s |
+| After | 106 s | 82 s | 188 s |
+
+Fixes:
+- GPU heatmap decoding and OpenCV crops in `topdown_refine`.
+- ViTPose-Large in place of Huge. It gives the same jitter reduction (0.763 vs
+  0.766 of the YOLO jitter) at about 60% of the time.
+- The two cameras run in parallel. GPU-heavy steps are serialized with a lock.
+- Overlay clips load only their own window.
+- ReID runs alongside YOLO.
+
+Phase 1 is now bound by YOLO on the GPU. Two ways to speed it up further:
+- A TensorRT engine for YOLO. This needs the TensorRT package.
+- Fewer frames.

@@ -117,7 +117,7 @@ filtered CSVs directly (this replaces `video-filter-tracks`):
 python -m video_inference.offline_assoc --camera-dir <camera_dir> --anchors-json anchors.json
 # -> tracks_2d_filtered.csv, pose_3d_filtered.csv, two_person_summary.json
 python -m video_inference.topdown_refine --camera-dir <camera_dir>
-# -> pose_3d_refined.csv (ViTPose-Huge keypoints, gated against the YOLO ones)
+# -> pose_3d_refined.csv (ViTPose-Large keypoints, gated against the YOLO ones)
 ```
 
 `anchors.json` is the portal's format: a list of `{frame_idx, parent_track_id,

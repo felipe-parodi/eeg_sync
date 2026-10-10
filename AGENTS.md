@@ -79,7 +79,7 @@ Pipeline stages run in sequence: **compress -> extract frames -> infer -> track 
 - **`sam3d_runner.py`:** SAM-3D-Body true-3D pose backend. Patches upstream CUDA hardcoding for CPU fallback. Imports from `third_party/sam-3d-body/` submodule. Override path via `EEG_SYNC_SAM3D_ROOT` env var.
 - **`offline_assoc.py`:** Offline two-person identity association (portal default, `--tracker-backend offline`). Keypoint-aware dedup, conservative tracklets, per-role global best chains scored by appearance + per-camera size model, anchor labels local to +-10 s, rescue pass, gap fill. CLI re-solves with portal `anchors.json`.
 - **`detection_cache.py`:** `DetCache` (.npz of every detection, keypoints, OSNet ReID embeddings) and `build_detection_cache` (batched YOLO + ReID).
-- **`topdown_refine.py`:** Re-estimates tracked keypoints with ViTPose-plus-Huge, used only where it matches the YOLO skeleton (OKS >= 0.5).
+- **`topdown_refine.py`:** Re-estimates tracked keypoints with ViTPose-plus-Large (GPU-side crop/decode), used only where it matches the YOLO skeleton (OKS >= 0.5).
 - **`tracking.py`:** `TwoPersonTrackerState` with IoU-based temporal continuity. Frame 0 uses area prior (parent = largest bbox), subsequent frames use IoU matching.
 - **`schema.py`:** Validates output CSVs (manifest, `tracks_2d.csv`, `pose_3d.csv`). Returns `ValidationResult` with error list, not exceptions.
 - **`device.py`:** `resolve_device("auto")` returns `"cpu"`, `"mps"`, or `"cuda"`. Auto-detection order: CUDA > MPS > CPU. `resolve_inference_mode` selects `"full"` vs `"body"` based on hardware.
