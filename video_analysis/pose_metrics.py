@@ -49,9 +49,54 @@ BLOCK_COLORS = {
 }
 
 
+# Blocks where both people are tracked in fewer than this share of frames are
+# flagged: their metrics describe only part of the block.
+LOW_COVERAGE_THRESHOLD = 0.5
+
+
 # ---------------------------------------------------------------------------
 # Metric computation
 # ---------------------------------------------------------------------------
+
+
+def block_coverage(
+    block_pose: pd.DataFrame,
+    block: SessionBlock,
+    frame_rate: float,
+    parent_id: int = 0,
+    child_id: int = 1,
+) -> Dict[str, Any]:
+    """Count how many frames of a block have the parent, the child, and both.
+
+    Args:
+        block_pose: Pose rows inside the block.
+        block: The block.
+        frame_rate: Analysis frame rate (frames per second).
+        parent_id: Parent track ID.
+        child_id: Child track ID.
+
+    Returns:
+        Coverage counts, the share of block frames with both people, and a
+        ``low_coverage`` flag.
+    """
+    block_frames = int(round((block.end_s - block.start_s) * frame_rate)) + 1
+    times = block_pose.groupby("track_id")["timestamp_s"].apply(
+        lambda t: set(np.round(t.to_numpy(float) * frame_rate).astype(int))
+    )
+    parent = times.get(parent_id, set())
+    child = times.get(child_id, set())
+    both = len(parent & child)
+    coverage = min(1.0, both / block_frames) if block_frames > 0 else 0.0
+    return {
+        "block_start_s": block.start_s,
+        "block_end_s": block.end_s,
+        "block_frames": block_frames,
+        "frames_with_parent": len(parent),
+        "frames_with_child": len(child),
+        "frames_with_both": both,
+        "coverage_both": round(coverage, 4),
+        "low_coverage": bool(coverage < LOW_COVERAGE_THRESHOLD),
+    }
 
 
 def compute_per_block_metrics(
@@ -61,6 +106,7 @@ def compute_per_block_metrics(
     child_id: int = 1,
     xcorr_window_s: float = 5.0,
     xcorr_max_lag_s: float = 2.0,
+    frame_rate: float = 6.0,
 ) -> Dict[str, Any]:
     """Compute torso proximity and movement xcorr per block.
 
@@ -71,6 +117,7 @@ def compute_per_block_metrics(
         child_id: Child track ID.
         xcorr_window_s: Cross-correlation window size in seconds.
         xcorr_max_lag_s: Maximum lag to search in seconds.
+        frame_rate: Analysis frame rate, used for tracking coverage.
 
     Returns:
         Dict with keys: proximity_frames, xcorr_windows, block_stats.
@@ -85,7 +132,9 @@ def compute_per_block_metrics(
             & (pose_df["timestamp_s"] <= block.end_s)
         ].copy()
 
+        coverage = block_coverage(block_pose, block, frame_rate, parent_id, child_id)
         if block_pose.empty:
+            block_stats.append({"block": block.name, **coverage})
             continue
 
         # Torso proximity
@@ -103,7 +152,7 @@ def compute_per_block_metrics(
             all_xcorr.append(xcorr)
 
         # Per-block summary
-        stats: Dict[str, Any] = {"block": block.name}
+        stats: Dict[str, Any] = {"block": block.name, **coverage}
         if not prox.empty:
             dist = prox["torso_distance_px"]
             stats["proximity_mean"] = float(dist.mean())
@@ -340,6 +389,7 @@ def main() -> None:
         child_id=mapping.child_track_id,
         xcorr_window_s=args.xcorr_window,
         xcorr_max_lag_s=args.xcorr_max_lag,
+        frame_rate=config.frame_rate,
     )
 
     # Save CSVs
@@ -369,7 +419,9 @@ def main() -> None:
         lag_mean = stats.get("lag_mean_s", 0)
         print(
             f"  {block:12s}: proximity={prox_mean:.1f} +/- {prox_std:.1f} px, "
-            f"xcorr={xcorr_mean:.3f}, lag={lag_mean:.3f}s"
+            f"xcorr={xcorr_mean:.3f}, lag={lag_mean:.3f}s, "
+            f"both people tracked in {stats['coverage_both']:.0%} of the block"
+            + (" (LOW: interpret with care)" if stats["low_coverage"] else "")
         )
 
     # Generate plots

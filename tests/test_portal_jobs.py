@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZipFile
 
+import pandas as pd
 import pytest
 
 import portal.app as portal_app
@@ -1230,3 +1231,50 @@ def test_build_submission_metadata_camera_b_exclusions_can_be_empty() -> None:
 
     assert len(metadata["analysis_blocks_by_camera"]["camera_a"]) == 2
     assert len(metadata["analysis_blocks_by_camera"]["camera_b"]) == 1
+
+
+def _write_session_metrics(output_root: Path, session_id: str, coverage: float) -> None:
+    session = output_root / session_id
+    session.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "session_id": session_id,
+                "camera_id": "camera_a",
+                "block": "storybook",
+                "block_start_s": 100.0,
+                "block_end_s": 200.0,
+                "block_frames": 601,
+                "coverage_both": coverage,
+                "low_coverage": coverage < 0.5,
+            }
+        ]
+    ).to_csv(session / "session_metrics.csv", index=False)
+
+
+def test_job_page_shows_block_coverage(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path / "portal_jobs")
+    monkeypatch.setattr(portal_app, "OUTPUT_ROOT", tmp_path)
+    job_dir = tmp_path / "portal_jobs" / "job-001"
+    write_status(job_dir, {"state": "complete", "message": "Done."})
+    (job_dir / "job_config.json").write_text(
+        json.dumps({"session_id": "1012"}), encoding="utf-8"
+    )
+    _write_session_metrics(tmp_path, "1012", 0.21)
+
+    text = portal_app.job_detail("job-001", None).body.decode("utf-8")
+
+    assert "storybook" in text
+    assert "21%" in text
+    assert "Low" in text
+
+
+def test_all_sessions_table_download(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(portal_app, "OUTPUT_ROOT", tmp_path)
+    _write_session_metrics(tmp_path, "1010", 0.9)
+    _write_session_metrics(tmp_path, "1012", 0.2)
+
+    response = portal_app.download_all_sessions_table(None)
+
+    table = pd.read_csv(response.path)
+    assert sorted(table["session_id"].astype(str)) == ["1010", "1012"]

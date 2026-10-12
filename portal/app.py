@@ -988,6 +988,8 @@ def index(session_token: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
 
 <section class="panel">
   <h2>Jobs</h2>
+  <p><a href="/metrics/all_sessions.csv">Download all sessions table</a>
+  <span class="muted">(one row per session, camera, and block, for every processed session)</span></p>
   <table>
     <thead><tr><th>Job</th><th>Status</th><th>Message</th></tr></thead>
     <tbody>{_job_rows()}</tbody>
@@ -1441,6 +1443,7 @@ def job_detail(
             '<p class="muted">This page refreshes automatically while the job runs.</p>'
             "<script>setTimeout(() => window.location.reload(), 10000);</script>"
         )
+    coverage = _coverage_panel(job_dir)
     log_link = ""
     if (job_dir / "job.log").exists():
         log_link = f'<p><a href="/jobs/{safe_job_id}/log">View job log</a></p>'
@@ -1452,11 +1455,65 @@ def job_detail(
   <p><strong>Message:</strong> {message}</p>
   {annotate}
   {download}
+  {coverage}
   {log_link}
   {refresh_script}
   <p><a href="/">Back to jobs</a></p>
 </section>""",
     )
+
+
+def _coverage_panel(job_dir: Path) -> str:
+    """Summarize per-block tracking coverage for a finished job.
+
+    Args:
+        job_dir: Portal job directory.
+
+    Returns:
+        HTML table, or an empty string when the job has no session table yet.
+    """
+    import pandas as pd
+
+    config_path = job_dir / "job_config.json"
+    if not config_path.exists():
+        return ""
+    session_id = json.loads(config_path.read_text(encoding="utf-8")).get("session_id")
+    metrics_path = OUTPUT_ROOT / str(session_id) / "session_metrics.csv"
+    if not session_id or not metrics_path.exists():
+        return ""
+    table = pd.read_csv(metrics_path, dtype={"camera_id": str, "block": str})
+    rows = []
+    for row in table.itertuples():
+        share = float(getattr(row, "coverage_both", 0) or 0)
+        low = bool(getattr(row, "low_coverage", share < 0.5))
+        note = (
+            '<span style="color:#c2410c;font-weight:600">Low: check the overlay clips</span>'
+            if low
+            else "OK"
+        )
+        rows.append(
+            f"<tr><td>{html.escape(str(row.camera_id))}</td>"
+            f"<td>{html.escape(str(row.block))}</td><td>{share:.0%}</td><td>{note}</td></tr>"
+        )
+    return (
+        "<h3>Both people tracked, per block</h3>"
+        '<p class="muted">Metrics use only frames where both people were found. '
+        "The zip's report.html has the full summary.</p>"
+        "<table><thead><tr><th>Camera</th><th>Block</th><th>Coverage</th><th></th>"
+        f"</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+@app.get("/metrics/all_sessions.csv")
+def download_all_sessions_table(
+    _: Annotated[None, Depends(require_auth)],
+) -> FileResponse:
+    """Download the combined metrics table across every processed session."""
+    from video_analysis.session_report import ALL_SESSIONS_CSV, build_all_sessions_table
+
+    out = OUTPUT_ROOT / ALL_SESSIONS_CSV
+    build_all_sessions_table(OUTPUT_ROOT).to_csv(out, index=False)
+    return FileResponse(out, filename=ALL_SESSIONS_CSV, media_type="text/csv")
 
 
 @app.get("/jobs/{job_id}/download")

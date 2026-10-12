@@ -1073,6 +1073,32 @@ def run_command_step(step: CommandStep, cwd: Path, log_path: Path) -> None:
         )
 
 
+def build_session_report_step(config: PortalJobConfig) -> CommandStep:
+    """Build the step that writes the session table, report, and study table.
+
+    Runs after every camera's chain: it reads all cameras' metric summaries
+    and rebuilds ``all_sessions_metrics.csv`` across every processed session.
+
+    Args:
+        config: Portal job configuration.
+
+    Returns:
+        The session report command.
+    """
+    return CommandStep(
+        name="session report",
+        argv=[
+            sys.executable,
+            "-m",
+            "video_analysis.session_report",
+            "--session-dir",
+            str(config.session_output_dir),
+            "--all-sessions-root",
+            str(config.output_root),
+        ],
+    )
+
+
 def run_steps(
     steps: Sequence[CommandStep],
     cwd: Path,
@@ -1237,6 +1263,8 @@ frame).
 ```
 {config.session_id}/
   README.md                <- this file
+  report.html              <- START HERE: one-page summary (open in a browser)
+  session_metrics.csv      <- all headline numbers, one row per camera x block
   session_summary.json     <- run-level config + validation status
 {camera_tree}
   portal_metadata/         <- provenance: what you submitted + the run log
@@ -1245,6 +1273,29 @@ frame).
 Each `camera_*/` folder is one camera angle and is self-contained:
 
 {camera_blocks_md}
+
+## Start here
+
+Open **`report.html`** in a browser. It shows, for every camera and block,
+how much of the block had both people tracked, the headline numbers, and
+links to the overlay clips and figures.
+
+**`session_metrics.csv`** holds the same numbers as a table (one row per
+camera and block) for stats software. The portal also keeps a combined table
+for every processed session; download it from the portal's home page
+("Download all sessions table").
+
+Key columns:
+
+| column | meaning |
+|---|---|
+| `block_start_s`, `block_end_s`, `block_frames` | The block on this camera's own clock, and how many frames it spans. |
+| `frames_with_parent`, `frames_with_child`, `frames_with_both` | Frames in the block where each person (or both) was tracked. |
+| `coverage_both` | `frames_with_both / block_frames`. All dyad metrics use only those frames. |
+| `low_coverage` | `True` if `coverage_both` is below 0.5. Treat that block's metrics with care and check the overlay clips. |
+| `proximity_*`, `xcorr_*`, `lag_*` | Pose metrics (see `pose_metrics_summary.json` below). |
+| `gaze_*` | Gaze metrics per block, when gaze analysis was requested. |
+| `tracking_*` | Whole-camera tracking stats from `two_person_summary.json`. |
 
 ## Which files to analyze
 
@@ -1320,8 +1371,8 @@ COCO-17 keypoint order (`kp_000`→nose, increasing index):
 ### `pose_metrics_summary.json` — per-block roll-up
 
 A list of objects, one per block, with `proximity_mean/std/median/n_frames`
-and `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows`. This is the
-headline table for each block.
+and `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows`, plus the tracking
+coverage columns described under "Start here".
 
 ### Figures and video
 
@@ -1573,6 +1624,9 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
             on_start=on_start,
             parallel_cameras=config.parallel_cameras,
         )
+        report_step = build_session_report_step(config)
+        on_start(len(steps) + 1, len(steps) + 1, report_step)
+        run_command_step(report_step, cwd=repo_root, log_path=log_path)
 
         zip_path = config.job_dir / f"{config.session_id}_results.zip"
         metadata_root = Path(config.session_id) / "portal_metadata"

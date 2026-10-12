@@ -105,3 +105,27 @@ def test_compute_per_block_empty():
 
     assert results["proximity_df"].empty
     assert results["xcorr_df"].empty
+
+
+def test_block_stats_report_tracking_coverage() -> None:
+    """Each block reports how much of it had parent, child, and both."""
+    pose = _make_pose_df(n_frames=100, fps=10.0)  # 0.0 .. 9.9 s
+    # Child missing for the second half of the block.
+    pose = pose[~((pose.track_id == 1) & (pose.timestamp_s >= 5.0))]
+    blocks = [SessionBlock("task", 0.0, 9.9), SessionBlock("empty", 50.0, 60.0)]
+
+    stats = {
+        s["block"]: s
+        for s in compute_per_block_metrics(pose, blocks, frame_rate=10.0)["block_stats"]
+    }
+
+    task = stats["task"]
+    assert task["block_frames"] == 100
+    assert task["frames_with_parent"] == 100
+    assert task["frames_with_child"] == 50
+    assert task["frames_with_both"] == 50
+    assert task["coverage_both"] == 0.5
+    assert task["low_coverage"] is False
+    # A block with no tracking at all is still reported, flagged.
+    assert stats["empty"]["frames_with_both"] == 0
+    assert stats["empty"]["low_coverage"] is True
