@@ -1278,3 +1278,69 @@ def test_all_sessions_table_download(tmp_path: Path, monkeypatch) -> None:
 
     table = pd.read_csv(response.path)
     assert sorted(table["session_id"].astype(str)) == ["1010", "1012"]
+
+
+def _gaze_label_job(tmp_path: Path, monkeypatch) -> Path:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "gaze_label_helpers", Path(__file__).with_name("test_portal_gaze_labels.py")
+    )
+    helpers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helpers)
+    _camera = helpers._camera
+
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path / "portal_jobs")
+    monkeypatch.setattr(portal_app, "OUTPUT_ROOT", tmp_path)
+    session = tmp_path / "1012"
+    session.mkdir()
+    _camera(session)
+    job_dir = tmp_path / "portal_jobs" / "job-001"
+    write_status(job_dir, {"state": "complete", "message": "Done."})
+    (job_dir / "job_config.json").write_text(
+        json.dumps(
+            {
+                "session_id": "1012",
+                "frame_rate": 6.0,
+                "blocks_by_camera": {
+                    "camera_a": [{"name": "grocery", "start_s": 100.0, "end_s": 199.0}]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return job_dir
+
+
+def test_gaze_label_page_lists_frames(tmp_path: Path, monkeypatch) -> None:
+    _gaze_label_job(tmp_path, monkeypatch)
+    monkeypatch.setattr(portal_app, "csrf_token_for_session", lambda token: "csrf")
+
+    text = portal_app.gaze_label_page("job-001", None).body.decode("utf-8")
+
+    assert "The other person's face" in text
+    assert '"image_name": "frame_' in text
+    assert "/gaze-frames/" in text
+
+
+def test_gaze_label_submission_is_saved_with_outputs(tmp_path: Path, monkeypatch) -> None:
+    from portal.gaze_labels import load_gaze_labels
+
+    _gaze_label_job(tmp_path, monkeypatch)
+    entry = {
+        "frame_idx": 600,
+        "timestamp_s": 100.0,
+        "person": "child",
+        "target": "object",
+        "point": None,
+    }
+    saved = portal_app._save_gaze_label_submission(
+        "job-001", {"labeler": "RA", "labels": {"camera_a": [entry]}}
+    )
+
+    assert saved == {"camera_a": 1}
+    assert load_gaze_labels(tmp_path / "1012" / "camera_a") == [entry]
+    with pytest.raises(Exception):
+        portal_app._save_gaze_label_submission(
+            "job-001", {"labels": {"camera_z": [entry]}}
+        )
