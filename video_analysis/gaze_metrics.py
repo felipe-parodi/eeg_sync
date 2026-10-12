@@ -427,7 +427,7 @@ def main() -> None:
     camera_dir = Path(args.camera_dir)
     config = load_session_config(args.session_config)
     mapping = config.get_camera_mapping(args.camera_id)
-    blocks = config.session_blocks
+    blocks = config.blocks_for_camera(args.camera_id)
 
     # Load data
     gaze_df = pd.read_csv(camera_dir / args.gaze_csv)

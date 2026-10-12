@@ -461,6 +461,7 @@ def compute_block_summary(
     metrics_df: pd.DataFrame,
     session_config: SessionConfig,
     metric_column: str,
+    camera_id: str | None = None,
 ) -> pd.DataFrame:
     """Compute per-block summary statistics for a metric column.
 
@@ -468,12 +469,18 @@ def compute_block_summary(
         metrics_df: DataFrame with timestamp_s and the metric column.
         session_config: Session config with block definitions.
         metric_column: Column name to summarize.
+        camera_id: Use this camera's own blocks (default: shared blocks).
 
     Returns:
         DataFrame with block_name, mean, std, median, count columns.
     """
     rows = []
-    for block in session_config.session_blocks:
+    blocks = (
+        session_config.blocks_for_camera(camera_id)
+        if camera_id is not None
+        else session_config.session_blocks
+    )
+    for block in blocks:
         mask = (metrics_df["timestamp_s"] >= block.start_s) & (
             metrics_df["timestamp_s"] <= block.end_s
         )
@@ -623,7 +630,7 @@ def main() -> None:
     summary: Dict[str, Any] = {"camera_id": args.camera_id}
     if not proximity_df.empty:
         summary["torso_proximity_blocks"] = compute_block_summary(
-            proximity_df, session_config, "torso_distance_px"
+            proximity_df, session_config, "torso_distance_px", args.camera_id
         ).to_dict(orient="records")
 
     if not xcorr_df.empty:

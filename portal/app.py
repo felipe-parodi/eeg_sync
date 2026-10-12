@@ -477,6 +477,7 @@ def build_submission_metadata(
     video_b_size: int,
     include_gaze: bool,
     blocks_text_b: str | None = None,
+    exclusions_text_b: str | None = None,
 ) -> dict[str, Any]:
     """Build the durable metadata record for one submitted portal run.
 
@@ -485,7 +486,8 @@ def build_submission_metadata(
         created_at: Timestamp for job creation.
         safe_session_id: Sanitized session identifier.
         blocks_text: Raw analysis block text for camera A from the form.
-        exclusions_text: Raw extra-person window text from the form.
+        exclusions_text: Raw extra-person window text for camera A, in Video
+            A's own time.
         video_a_name: Browser-provided filename for camera A.
         video_b_name: Browser-provided filename for camera B.
         video_a_size: Browser-reported byte size for camera A.
@@ -493,6 +495,9 @@ def build_submission_metadata(
         include_gaze: Whether optional gaze analysis was requested.
         blocks_text_b: Raw analysis block text for camera B. Defaults to
             ``blocks_text`` for backward compatibility.
+        exclusions_text_b: Raw extra-person window text for camera B, in Video
+            B's own time. Defaults to ``exclusions_text`` for backward
+            compatibility.
 
     Returns:
         JSON-serializable submission metadata.
@@ -508,14 +513,23 @@ def build_submission_metadata(
 
     blocks_text_a = blocks_text
     blocks_text_b = blocks_text if blocks_text_b is None else blocks_text_b
-    exclusions = _parse_exclusions_text(exclusions_text)
+    exclusions_text_a = exclusions_text
+    exclusions_text_b = (
+        exclusions_text if exclusions_text_b is None else exclusions_text_b
+    )
+    # The two GoPros have different clocks, so each camera's extra-person
+    # windows are entered (and removed) in that camera's own time.
+    exclusions_by_camera = {
+        "camera_a": _parse_exclusions_text(exclusions_text_a),
+        "camera_b": _parse_exclusions_text(exclusions_text_b),
+    }
 
     input_blocks_by_camera: dict[str, list[SessionBlock]] = {}
     analysis_blocks_by_camera: dict[str, list[SessionBlock]] = {}
     if has_video_a:
         camera_a_blocks = _parse_blocks_text(blocks_text_a)
         camera_a_analysis_blocks = split_blocks_for_exclusions(
-            camera_a_blocks, exclusions
+            camera_a_blocks, exclusions_by_camera["camera_a"]
         )
         if not camera_a_analysis_blocks:
             raise ValueError("Exclusions removed all Video A analysis time")
@@ -524,7 +538,7 @@ def build_submission_metadata(
     if has_video_b:
         camera_b_blocks = _parse_blocks_text(blocks_text_b)
         camera_b_analysis_blocks = split_blocks_for_exclusions(
-            camera_b_blocks, exclusions
+            camera_b_blocks, exclusions_by_camera["camera_b"]
         )
         if not camera_b_analysis_blocks:
             raise ValueError("Exclusions removed all Video B analysis time")
@@ -560,6 +574,8 @@ def build_submission_metadata(
             "analysis_blocks_text_a": blocks_text_a,
             "analysis_blocks_text_b": blocks_text_b,
             "extra_person_windows_text": exclusions_text,
+            "extra_person_windows_text_a": exclusions_text_a,
+            "extra_person_windows_text_b": exclusions_text_b,
         },
         "input_analysis_blocks": [
             asdict(block)
@@ -569,7 +585,14 @@ def build_submission_metadata(
             camera_id: [asdict(block) for block in blocks]
             for camera_id, blocks in input_blocks_by_camera.items()
         },
-        "extra_person_windows": [asdict(exclusion) for exclusion in exclusions],
+        "extra_person_windows": [
+            asdict(exclusion)
+            for exclusion in exclusions_by_camera[next(iter(input_blocks_by_camera))]
+        ],
+        "extra_person_windows_by_camera": {
+            camera_id: [asdict(exclusion) for exclusion in exclusions_by_camera[camera_id]]
+            for camera_id in input_blocks_by_camera
+        },
         "analysis_blocks": [asdict(block) for block in legacy_blocks],
         "analysis_blocks_by_camera": {
             camera_id: [asdict(block) for block in blocks]
@@ -919,9 +942,13 @@ def index(session_token: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
   <textarea id="blocks_text_b" name="blocks_text_b" placeholder="free_play,13:26,23:40,green&#10;storybook,29:22,37:06,blue"></textarea>
   <div class="muted">Leave blank only if Video B is not uploaded.</div>
 
-  <label for="exclusions_text">Extra-Person Windows {_info_icon("These windows are removed from both cameras before inference.")}</label>
-  <textarea id="exclusions_text" name="exclusions_text" placeholder="8:14,8:42,experimenter entered"></textarea>
-  <div class="muted">One exclusion per line: start,end,reason. These windows are removed from analysis blocks.</div>
+  <label for="exclusions_text_a">Video A Extra-Person Windows {_info_icon("Optional. Times when someone else is in view, in Video A's own time. Removed from Video A only.")}</label>
+  <textarea id="exclusions_text_a" name="exclusions_text_a" placeholder="8:14,8:42,experimenter entered"></textarea>
+  <div class="muted">One window per line: start,end,reason. Use Video A's timestamps.</div>
+
+  <label for="exclusions_text_b">Video B Extra-Person Windows {_info_icon("Optional. Same as above, in Video B's own time. Removed from Video B only.")}</label>
+  <textarea id="exclusions_text_b" name="exclusions_text_b" placeholder="7:02,7:30,experimenter entered"></textarea>
+  <div class="muted">Video B's clock differs from Video A's, so enter the times as they appear in Video B.</div>
 
   <label><input name="include_gaze" type="checkbox" value="yes"> Run gaze analysis {_info_icon("Optional. Adds gaze heatmaps and gaze metrics after pose tracking.")}</label>
   <button type="submit">Submit Processing Job</button>
@@ -1203,6 +1230,8 @@ async def init_chunked_upload(
     blocks_text_a: Annotated[str | None, Form()] = None,
     blocks_text_b: Annotated[str | None, Form()] = None,
     exclusions_text: Annotated[str, Form()] = "",
+    exclusions_text_a: Annotated[str | None, Form()] = None,
+    exclusions_text_b: Annotated[str | None, Form()] = None,
     include_gaze: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
     """Create upload metadata for a chunked browser upload."""
@@ -1240,7 +1269,12 @@ async def init_chunked_upload(
             safe_session_id=safe_session_id,
             blocks_text=resolved_blocks_text_a,
             blocks_text_b=resolved_blocks_text_b,
-            exclusions_text=exclusions_text,
+            exclusions_text=(
+                exclusions_text if exclusions_text_a is None else exclusions_text_a
+            ),
+            exclusions_text_b=(
+                exclusions_text if exclusions_text_b is None else exclusions_text_b
+            ),
             video_a_name=video_a_name,
             video_b_name=video_b_name,
             video_a_size=video_a_size,

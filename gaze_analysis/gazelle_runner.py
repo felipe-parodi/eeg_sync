@@ -87,28 +87,31 @@ def _load_frame_image(frame_path: Path, transform: Any) -> Any:
     return transform(img)
 
 
-def _find_frame_paths(camera_dir: Path) -> Dict[int, Path]:
-    """Map frame_idx to frame file paths.
+def _find_frame_paths(camera_dir: Path, frame_rate: float) -> Dict[int, Path]:
+    """Map time-grid frame_idx to frame image paths.
+
+    Smoothed tables number frames by source-video time
+    (``frame_idx = round(timestamp_s * frame_rate)``), while extracted images
+    are numbered from 1 within the analysis windows. ``frame_index.csv``
+    records each image's source time, which links the two.
 
     Args:
         camera_dir: Camera output directory containing frames/ subdirectory.
+        frame_rate: Extraction rate used to build the time grid.
 
     Returns:
-        Dict mapping frame_idx (int) to Path.
+        Dict mapping time-grid frame_idx (int) to Path.
     """
     frames_dir = camera_dir / "frames"
-    if not frames_dir.exists():
+    index_path = frames_dir / "frame_index.csv"
+    if not index_path.exists():
         return {}
-
-    frame_paths: Dict[int, Path] = {}
-    for p in sorted(frames_dir.glob("frame_*.jpg")):
-        # Filename format: frame_000001.jpg
-        try:
-            idx = int(p.stem.split("_")[1])
-            frame_paths[idx] = p
-        except (IndexError, ValueError):
-            continue
-    return frame_paths
+    index = pd.read_csv(index_path)
+    grid_idx = np.rint(index["timestamp_s"].to_numpy(float) * frame_rate).astype(int)
+    return {
+        int(idx): frames_dir / name
+        for idx, name in zip(grid_idx, index["image_name"])
+    }
 
 
 def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
@@ -142,7 +145,7 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
     )
 
     # Find available frames on disk
-    frame_paths = _find_frame_paths(camera_dir)
+    frame_paths = _find_frame_paths(camera_dir, session_config.frame_rate)
     available_frames = set(frame_paths.keys())
     head_bboxes_df = head_bboxes_df[
         head_bboxes_df["frame_idx"].isin(available_frames)

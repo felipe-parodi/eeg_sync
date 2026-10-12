@@ -310,7 +310,7 @@ def main() -> None:
     session_config = load_session_config(args.session_config)
 
     metrics_df = pd.read_csv(camera_dir / args.metrics_csv)
-    blocks = session_config.session_blocks
+    blocks = session_config.blocks_for_camera(args.camera_id)
 
     # Apply time-range filter
     t_start, t_end = resolve_time_range(

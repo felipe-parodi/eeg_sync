@@ -77,7 +77,8 @@ and whether gaze analysis was requested.
 ## Analysis-Window-Only Inference
 
 The portal removes extra-person windows from the submitted analysis blocks before
-running inference. It then passes those post-exclusion blocks to `video-infer
+running inference. Each camera has its own extra-person field, entered in that
+video's own time, because the two GoPro clocks differ. It then passes those post-exclusion blocks to `video-infer
 run --analysis-windows`, so the workstation only extracts and processes frames
 inside valid analysis time.
 

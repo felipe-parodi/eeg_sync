@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
 import cv2
 import numpy as np
 import pandas as pd
 
 from gaze_analysis.config import SessionBlock, load_session_config
+from gaze_analysis.gazelle_runner import _find_frame_paths
 
 # Track colors: parent = orange, child = blue
 TRACK_COLORS = {
@@ -24,28 +25,6 @@ TRACK_COLORS = {
     1: (255, 140, 0),  # blue (BGR)
 }
 TRACK_LABELS = {0: "Parent", 1: "Child"}
-
-
-def _find_frame_paths(camera_dir: Path) -> Dict[int, Path]:
-    """Map frame_idx to frame file paths.
-
-    Args:
-        camera_dir: Camera output directory with frames/ subdirectory.
-
-    Returns:
-        Dict mapping frame_idx to Path.
-    """
-    frames_dir = camera_dir / "frames"
-    if not frames_dir.exists():
-        return {}
-    frame_paths: Dict[int, Path] = {}
-    for p in sorted(frames_dir.glob("frame_*.jpg")):
-        try:
-            idx = int(p.stem.split("_")[1])
-            frame_paths[idx] = p
-        except (IndexError, ValueError):
-            continue
-    return frame_paths
 
 
 def draw_gaze_overlay(
@@ -137,6 +116,7 @@ def generate_block_snapshots(
     image_height: int = 480,
     parent_id: int = 0,
     child_id: int = 1,
+    frame_rate: float = 6.0,
 ) -> List[Path]:
     """Generate gaze overlay snapshot grids for each block.
 
@@ -151,11 +131,12 @@ def generate_block_snapshots(
         image_height: Frame height.
         parent_id: Parent track ID.
         child_id: Child track ID.
+        frame_rate: Extraction rate (links time-grid frame_idx to images).
 
     Returns:
         List of saved file paths.
     """
-    frame_paths = _find_frame_paths(camera_dir)
+    frame_paths = _find_frame_paths(camera_dir, frame_rate)
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths: List[Path] = []
 
@@ -324,7 +305,7 @@ def main() -> None:
     camera_dir = Path(args.camera_dir)
     config = load_session_config(args.session_config)
     mapping = config.get_camera_mapping(args.camera_id)
-    blocks = config.session_blocks
+    blocks = config.blocks_for_camera(args.camera_id)
 
     gaze_df = pd.read_csv(camera_dir / args.gaze_csv)
     pose_df = pd.read_csv(camera_dir / args.pose_input)
@@ -348,6 +329,7 @@ def main() -> None:
         image_height=config.image_height,
         parent_id=mapping.parent_track_id,
         child_id=mapping.child_track_id,
+        frame_rate=config.frame_rate,
     )
 
 

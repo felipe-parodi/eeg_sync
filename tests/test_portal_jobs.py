@@ -1177,3 +1177,56 @@ def test_run_steps_never_overlaps_gpu_heavy_steps(tmp_path: Path, monkeypatch) -
     ]
     run_steps(steps, tmp_path, tmp_path / "job.log", parallel_cameras=True)
     assert peak == 1
+
+
+def test_build_submission_metadata_applies_exclusions_per_camera_clock() -> None:
+    # Each camera has its own clock, so each gets its own extra-person windows.
+    metadata = build_submission_metadata(
+        job_id="job-001",
+        created_at="2026-05-14T13:00:00",
+        safe_session_id="1015",
+        blocks_text="grocery,16:00,26:50",
+        blocks_text_b="grocery,14:48,25:54",
+        exclusions_text="18:06,18:21,experimenter entered",
+        exclusions_text_b="16:54,17:09,experimenter entered",
+        video_a_name="a.mp4",
+        video_b_name="b.mp4",
+        video_a_size=1024,
+        video_b_size=2048,
+        include_gaze=False,
+    )
+
+    blocks = metadata["analysis_blocks_by_camera"]
+    assert [(b["start_s"], b["end_s"]) for b in blocks["camera_a"]] == [
+        (960.0, 1086.0),
+        (1101.0, 1610.0),
+    ]
+    assert [(b["start_s"], b["end_s"]) for b in blocks["camera_b"]] == [
+        (888.0, 1014.0),
+        (1029.0, 1554.0),
+    ]
+    windows = metadata["extra_person_windows_by_camera"]
+    assert windows["camera_b"][0]["start_s"] == 1014.0
+    assert metadata["raw_inputs"]["extra_person_windows_text_b"] == (
+        "16:54,17:09,experimenter entered"
+    )
+
+
+def test_build_submission_metadata_camera_b_exclusions_can_be_empty() -> None:
+    metadata = build_submission_metadata(
+        job_id="job-001",
+        created_at="2026-05-14T13:00:00",
+        safe_session_id="1015",
+        blocks_text="grocery,16:00,26:50",
+        blocks_text_b="grocery,14:48,25:54",
+        exclusions_text="18:06,18:21,experimenter entered",
+        exclusions_text_b="",
+        video_a_name="a.mp4",
+        video_b_name="b.mp4",
+        video_a_size=1024,
+        video_b_size=2048,
+        include_gaze=False,
+    )
+
+    assert len(metadata["analysis_blocks_by_camera"]["camera_a"]) == 2
+    assert len(metadata["analysis_blocks_by_camera"]["camera_b"]) == 1
