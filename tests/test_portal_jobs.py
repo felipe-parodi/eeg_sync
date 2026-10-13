@@ -1344,3 +1344,17 @@ def test_gaze_label_submission_is_saved_with_outputs(tmp_path: Path, monkeypatch
         portal_app._save_gaze_label_submission(
             "job-001", {"labels": {"camera_z": [entry]}}
         )
+
+
+def test_gaze_step_uses_page_by_default_and_gazelle_on_request(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    cfg = _job_config_two_cameras(tmp_path)
+    cfg.include_gaze = True
+    gaze = [s for s in build_phase2_steps(cfg) if s.name.startswith("gaze inference")]
+    assert len(gaze) == 2
+    assert all("gaze_analysis.page_runner" in s.argv for s in gaze)
+
+    cfg.gaze_model = "gazelle"
+    gaze = [s for s in build_phase2_steps(cfg) if s.name.startswith("gaze inference")]
+    assert all("gaze_analysis.gazelle_runner" in s.argv for s in gaze)

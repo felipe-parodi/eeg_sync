@@ -127,6 +127,10 @@ class PortalJobConfig:
     infer_imgsz: int = PORTAL_DEFAULT_INFER_IMGSZ
     overlay_seconds: float = PORTAL_DEFAULT_OVERLAY_SECONDS
     refine_keypoints: bool = True
+    # Gaze model: "page" (PaGE ViT-B; preferred over Gaze-LLE in a blind
+    # side-by-side on lab footage and better on published child-gaze
+    # benchmarks) or "gazelle" (Gaze-LLE ViT-L, the previous default).
+    gaze_model: str = "page"
     # Process camera A and camera B at the same time (the GPU is mostly
     # idle during one camera's CPU-bound work): ~halves job wall time.
     parallel_cameras: bool = True
@@ -721,6 +725,12 @@ def build_phase1_steps(config: PortalJobConfig) -> list[CommandStep]:
     return [CommandStep(name="pose inference", argv=pose_argv)]
 
 
+GAZE_RUNNER_MODULES = {
+    "page": "gaze_analysis.page_runner",
+    "gazelle": "gaze_analysis.gazelle_runner",
+}
+
+
 def build_phase2_steps(
     config: PortalJobConfig,
     anchors_json_by_camera: dict[str, Path] | None = None,
@@ -930,7 +940,7 @@ def build_phase2_steps(
                         argv=[
                             python,
                             "-m",
-                            "gaze_analysis.gazelle_runner",
+                            GAZE_RUNNER_MODULES[config.gaze_model],
                             "--camera-dir",
                             str(camera_dir),
                             "--session-config",
