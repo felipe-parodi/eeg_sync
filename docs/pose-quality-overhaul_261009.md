@@ -141,3 +141,39 @@ Fixes:
 Phase 1 is now bound by YOLO on the GPU. Two ways to speed it up further:
 - A TensorRT engine for YOLO. This needs the TensorRT package.
 - Fewer frames.
+
+## Follow-up (2026-10-12): colleague-reported bugs and gaze
+
+Three colleague reports, all fixed:
+
+- **Per-camera task windows.** Metrics read a merged A+B block list, so blocks
+  appeared twice. Each camera now uses `session_blocks_by_camera`.
+- **Extra-person windows per camera.** Each video has its own field in its own
+  clock. The A–B offsets implied by typed times vary by 4–16 s within a
+  session, so the windows cannot be shifted automatically.
+- **Gaze covered only a few seconds.** Gaze looked up images by file number
+  while smoothed tables use time-grid frame numbers. It now maps frames
+  through `frame_index.csv`.
+
+Related fixes found along the way:
+
+- **Frame size.** Head boxes were normalized by 854x480 while frames are
+  960x540. This inflated 1012 Grocery joint attention from 33% to 91%.
+- **Gaze categories redefined.** They now use pixel box tests, an
+  out-of-frame "unknown" category, and chance levels from a 60 s shift of the
+  child's gaze. Under the old rules, parent-watching scored below chance.
+
+Gaze model:
+- PaGE ViT-B replaced Gaze-LLE ViT-L.
+- In a blind side-by-side on 50 random frames from 1010 and 1012, two judges
+  preferred PaGE among decisive frames (15–7 and 17–4) and never picked
+  opposite models.
+- Gaze-LLE put the child's gaze on the child's own head about 3× as often.
+
+New outputs:
+- Tracking coverage per block, `session_metrics.csv`, `report.html`, and
+  `all_sessions_metrics.csv`.
+- An optional gaze labeling page, scored with `gaze-label-eval`.
+
+Red light: the board is held up to camera A only. Hold windows are found in
+15/19 sessions, but the LED onset is not visible at 8–10 fps.

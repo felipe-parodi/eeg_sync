@@ -7,7 +7,7 @@ This file provides guidance to AI coding assistants working with this repository
 Pose, gaze, and synchrony analysis pipeline for parent-child interaction videos, plus an interactive EEG-video synchronization tool. Originally built for the Cayo Santiago studies. The primary user is a non-technical research colleague driving the pipeline with an LLM -- all CLI output, error messages, and documentation must be clear and jargon-free.
 
 **Two workflows:**
-- **Video pipeline (primary):** `video-infer run` for pose detection, followed by track cleanup (`video-filter-tracks`, `video-annotate-tracks`, `video-correct-tracks`), `video-smooth`, and per-block metrics (`video-pose-metrics`, `gaze-infer`, `video-gaze-metrics`). Three backends: `ultralytics` (default), `rtmlib`, `sam3d`.
+- **Video pipeline (primary):** usually run through the Video Processing Portal (`portal/`, `start-portal.ps1`). The steps: `video-infer run --tracker-backend offline`, anchor labels, `video-assoc`, `video-refine-keypoints`, `video-interpolate`, `video-smooth`, then per-block metrics (`video-pose-metrics`, `gaze-infer`, `video-gaze-metrics`) and `video-session-report`. Older track cleanup (`video-filter-tracks`, `video-annotate-tracks`, `video-correct-tracks`) remains for jobs without a detection cache. Three backends: `ultralytics` (default), `rtmlib`, `sam3d`.
 - **EEG sync (side track):** Interactive CLI (`eeg-sync`) that finds time offsets between EEG streams and video files using IR pulses, red-light frame marking, and multi-clap audio sync.
 
 **Doc map:**
@@ -66,6 +66,7 @@ Split into focused modules with a backward-compatible `__init__.py`:
 - **`plotting.py`:** `plot_sync_timeline`, `plot_eeg_data` (matplotlib, lazy-imported).
 - **`sync_pipeline.py`:** `sync_two_eeg_files`, `sync_eeg_to_video`, `sync_videos`.
 - **`cli.py`:** File collection, workflow orchestration, `main()` entry point.
+- **`red_light.py`:** `eeg-red-light`. Finds when the red-light board is held up to camera A (`find_presentation_windows`; it is never shown to camera B) and searches for LED onsets inside those holds (`detect_red_light_events`). On 8–10 fps compressed copies the flash itself is not visible, so the exact frame is still marked by hand; validate onsets on full-rate originals before trusting them. Not wired into the portal.
 
 All public symbols are re-exported from `sync_eeg_vid.__init__`, so `from sync_eeg_vid import find_sync_pulse` still works.
 
@@ -88,16 +89,23 @@ Pipeline stages run in sequence: **compress -> extract frames -> infer -> track 
 
 Post-inference cleanup, metrics, and visualization. Each module exposes a `build_arg_parser` + `main` CLI.
 
-- **`track_filter.py`:** `video-filter-tracks`. Keeps top-N persistent tracks per named time block and assigns `parent=0`/`child=1` by mean bbox area within that block. Recommended default for parent/child ID assignment.
+- **`track_filter.py`:** `video-filter-tracks`. Keeps top-N persistent tracks per named time block and assigns `parent=0`/`child=1` by mean bbox area within that block. Legacy; the portal uses `video_inference.offline_assoc` when a detection cache exists.
 - **`track_annotator.py`:** `video-annotate-tracks`. Interactive OpenCV viewer — click bbox, press `0`-`3` to reassign, `P` to propagate forward, `S` to save. Writes `track_corrections.json`.
 - **`track_correction.py`:** `video-correct-tracks`. Applies the annotator's JSON with atomic per-frame ID remapping (handles `0↔1` swaps correctly). Writes `*_corrected.csv`.
 - **`interpolate.py`:** `video-interpolate`. Linear upsampling of low-FPS track/pose data (e.g., 1 FPS -> 8 FPS). Gap-aware: won't interpolate across large timestamp gaps. **Optional** — 5 FPS native is usually sufficient.
 - **`temporal_smooth.py`:** `video-smooth`. Confidence-gated bidirectional EMA smoothing. High-confidence keypoints pass through raw; only low-confidence ones get smoothed. Default `tau=0.15`, `conf_gate=0.3`.
-- **`pose_metrics.py`:** `video-pose-metrics`. Per-block torso proximity + windowed movement cross-correlation. Writes per-block CSV + PNG plot.
-- **`gaze_metrics.py`:** `video-gaze-metrics`. Per-block gaze category proportions + gaze convergence. Writes per-block CSV + PNG plot.
+- **`pose_metrics.py`:** `video-pose-metrics`. Per-block torso proximity + windowed movement cross-correlation + tracking coverage (`coverage_both`, `low_coverage`). Uses the camera's own blocks (`--camera-id`).
+- **`session_report.py`:** `video-session-report`. `session_metrics.csv` (one row per camera x block), `report.html`, and the study-wide `all_sessions_metrics.csv`.
+- **`gaze_metrics.py`:** `video-gaze-metrics`. Per-block gaze category shares with chance levels (`<cat>_chance_pct`) + gaze convergence with `convergence_chance`.
 - **`gaze_snapshots.py`:** `video-gaze-snapshots`. Samples N frames per block and renders gaze heatmap over the source frame for sanity checks.
 - **`visualize_pose_tracks.py`:** `video-visualize`. Renders COCO17 skeletons + bounding boxes + track IDs onto video frames. Supports both JSON and CSV input modes.
 - **`visualize_pose_3d.py`:** `video-visualize-3d`. Matplotlib 3D skeleton snapshots + optional MP4 from `pose_3d.csv`.
+
+### Portal (`portal/`)
+
+- **`app.py`:** FastAPI portal. Chunked uploads; per-camera blocks and extra-person windows (each in that video's own clock); anchor labeling; job page with per-block coverage; optional gaze labeling page (`/jobs/{id}/gaze-label`); `/metrics/all_sessions.csv`. Startup purges job folders (session outputs are kept).
+- **`jobs.py`:** Builds and runs phase 1 (pose) and phase 2 (association, refinement, interpolation, smoothing, metrics, overlays, gaze), one thread per camera, then the session report and results zip. Records the real frame size after phase 1. `PortalJobConfig.gaze_model` selects `page` (default) or `gazelle`.
+- **`gaze_labels.py`:** Samples frames with both people visible and validates and saves `gaze_labels.json` next to the outputs.
 
 ### CSV suffix chain
 
@@ -109,13 +117,16 @@ pose_3d.csv    →  pose_3d_filtered.csv    →  pose_3d_corrected.csv    →  p
 
 ### Gaze Analysis (`gaze_analysis/`)
 
-Parent-child gaze estimation and synchrony analysis using Gazelle (CVPR 2025). Requires a `session_config.json` with manual parent/child track ID mapping per camera and session block definitions.
+Parent-child gaze estimation (PaGE ViT-B by default; Gaze-LLE optional) and synchrony analysis. Requires a `session_config.json` with manual parent/child track ID mapping per camera and session block definitions.
 
 - **`config.py`:** Session configuration — loads JSON with camera-person mappings and session block timestamps.
 - **`head_bbox.py`:** Derives normalized head bounding boxes from COCO keypoints (kp_000-kp_004). Falls back to top 30% of body bbox when head keypoints are low confidence.
 - **`page_runner.py`:** Batch PaGE ViT-B gaze inference (portal default; pinned HF revisions). Same outputs as `gazelle_runner.py`.
 - **`gazelle_runner.py`:** Batch Gazelle (Gaze-LLE) inference, kept as `gaze_model="gazelle"`. Loads frames + head bboxes, runs model, outputs `gaze_heatmap.csv` (scalar summaries) + `gaze_heatmaps.npz` (64x64 heatmaps).
-- **`synchrony.py`:** Four metrics — torso proximity (2D Euclidean distance), movement cross-correlation (windowed xcorr of velocity), gaze categories (mutual/joint/watching/independent), gaze convergence (cosine similarity of heatmaps).
+- **`synchrony.py`:** Four metrics — torso proximity (2D Euclidean distance), movement cross-correlation (windowed xcorr of velocity), gaze categories, gaze convergence (background-removed heatmap overlap).
+- **`gaze_categories.py`:** Frame-level categories from each gaze point vs the other person's head/body boxes in pixels (mutual_gaze, joint_attention, parent/child_watching, both_watching, independent, unknown), one-frame blip absorption, and chance levels (child gaze shifted 60 s).
+- **`label_eval.py`:** `gaze-label-eval`. Scores gaze tables against the portal's human gaze labels (`gaze_labels.json`).
+- **`config.frame_image_size`:** Real frame size from `frames/`. Use it for head-box normalization, because the session config size can be wrong (854x480 configured, 960x540 uploaded).
 - **`plotting.py`:** 4-panel dashboard with session block coloring (grocery=green, synchrony=orange, storybook=blue).
 - **`gaze_schema.py`:** Column definitions for gaze output CSVs.
 
@@ -139,7 +150,13 @@ Parent-child gaze estimation and synchrony analysis using Gazelle (CVPR 2025). R
 | `video-gaze-snapshots` | Per-block gaze heatmap-over-frame samples |
 | `video-visualize` | 2D pose overlay video |
 | `video-visualize-3d` | 3D skeleton PNG/MP4 from pose_3d.csv |
-| `gaze-infer` | Gazelle gaze estimation on video frames |
+| `gaze-infer` | PaGE ViT-B gaze estimation (`gaze-infer-gazelle`: Gaze-LLE) |
+| `gaze-label-eval` | Score gaze output against portal gaze labels |
+| `video-assoc` | Offline two-person association with anchors |
+| `video-refine-keypoints` | ViTPose-Large keypoint refinement |
+| `video-session-report` | Session table, report.html, all-sessions table |
+| `video-processing-portal` | Web portal (use `start-portal.ps1`) |
+| `eeg-red-light` | Find the red-light board presentation in a video |
 | `gaze-synchrony` | Compute parent-child synchrony metrics |
 | `gaze-plot` | Plot synchrony dashboard |
 

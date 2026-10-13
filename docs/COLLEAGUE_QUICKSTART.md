@@ -3,6 +3,12 @@
 **Audience**: research collaborators who have session videos and want pose/gaze metrics out.
 **You will**: install once, then for each session run six commands. End result: per-block plots, CSVs you can analyze in Python/R/Excel, and overlay videos you can sanity-check.
 
+> **Most people should use the Video Processing Portal instead.** It runs
+> every step below in the browser: upload videos, enter each camera's task
+> blocks, click the parent in about 10 frames, download a zip, and open
+> `report.html`. See the portal section of the [README](../README.md). This
+> page is for running the steps by hand.
+
 If you're driving this with an LLM (Codex, Claude, etc.), point it at this file plus `docs/PIPELINE.md` and `docs/OUTPUTS.md`. Both are written to be machine-readable.
 
 ---

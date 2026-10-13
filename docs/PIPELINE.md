@@ -256,13 +256,13 @@ video-pose-metrics \
   --xcorr-max-lag 2.0
 ```
 
-Reads `session_blocks` from `session_config.json`. Writes per-block plots + a per-block CSV (`pose_metrics_<block>.csv`).
+Pass `--camera-id`: each camera uses its own blocks (`session_blocks_by_camera` in `session_config.json`, falling back to `session_blocks`). Writes `pose_metrics_summary.json` (per block, including tracking coverage: `frames_with_both`, `coverage_both`, `low_coverage`), `pose_metrics_proximity.csv`, `pose_metrics_xcorr.csv`, and plots.
 
 ---
 
 ## Stage 5b–d — gaze
 
-Three CLIs run in order: `gaze-infer` → `gaze-synchrony` → `gaze-plot`. Requires the optional Gazelle dependencies (`pip install -e ".[gaze]"`) and the `third_party/gazelle` submodule (`git submodule update --init`).
+Three CLIs run in order: `gaze-infer` → `gaze-synchrony` → `gaze-plot`. `gaze-infer` runs PaGE ViT-B (weights from Hugging Face at a pinned revision; `uv sync --extra gaze`). `gaze-infer-gazelle` runs the previous model, Gaze-LLE, with the same outputs. PaGE was preferred in a blind side-by-side on 50 random lab frames and has lower published error on the ChildPlay child-gaze benchmark. Head boxes are normalized by the real frame size read from `frames/`.
 
 ```bash
 gaze-infer \
@@ -283,7 +283,7 @@ gaze-plot \
   --session-config session_config.json
 ```
 
-`gaze-infer` writes `gaze_heatmap.csv` (per-frame scalars) and `gaze_heatmaps.npz` (64×64 heatmaps).
+`gaze-infer` writes `gaze_heatmap.csv` (per-frame scalars) and `gaze_heatmaps.npz` (64×64 heatmaps). Images are found through `frames/frame_index.csv` by time, so gaze covers every block.
 `gaze-synchrony` writes `synchrony_metrics.csv` (one row per frame, all four metrics) and `synchrony_summary.json`.
 `gaze-plot` writes `synchrony_dashboard.png` (4-panel, shaded by `session_blocks` colors).
 
@@ -291,7 +291,7 @@ gaze-plot \
 
 ## Stage 5e — `video-gaze-metrics`
 
-Per-block gaze category proportions (mutual, joint, parent-watching, child-watching, independent) and gaze convergence.
+Per-block gaze category shares, each with a chance level (child's gaze shifted 60 s), and gaze convergence. Categories: mutual gaze, joint attention, parent watching, child watching, both watching, independent, unknown. Rules are in [`OUTPUTS.md`](OUTPUTS.md#synchrony_metricscsv).
 
 ```bash
 video-gaze-metrics \
@@ -303,7 +303,9 @@ video-gaze-metrics \
 
 > **Footgun**: `video-gaze-metrics` (and `video-gaze-snapshots`) default `--pose-input` to `pose_3d_filtered_5hz.csv` — a file the standard colleague workflow never produces. Always pass `--pose-input` and `--tracks-input` explicitly.
 
-Writes `gaze_metrics_<block>.png` and a per-block CSV.
+Writes `gaze_metrics_summary.json`, `gaze_metrics_categories.csv`, `gaze_metrics_convergence.csv`, and plots.
+
+After every camera is done, `video-session-report --session-dir <session> --all-sessions-root video_inference/output` writes `session_metrics.csv`, `report.html`, and the study-wide `all_sessions_metrics.csv`.
 
 ---
 
