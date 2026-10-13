@@ -1391,6 +1391,35 @@ coverage columns described under "Start here".
 - `overlay_<block>.mp4` and `overlay_<block>_end.mp4` — ~{int(config.overlay_seconds)} s clips of the **start** and **end** of each block, with boxes and skeletons drawn, to eyeball tracking quality at both ends. (A block shorter than ~{int(config.overlay_seconds)} s yields a single full-block `overlay_<block>.mp4`.) Every keypoint is drawn; keypoints that were gap-filled or low-confidence-infilled (`interpolated = True`) are shown muted (hollow dot, thin dimmed bone) so you can tell them from directly observed joints.
 - SVGs are editable vector versions of the PNGs.
 
+### Gaze (when requested)
+
+A gaze model (PaGE) estimates, for each person in each frame, the point in the
+image they are looking at (`gaze_heatmap.csv`: `gaze_peak_x/y` as fractions of
+image width/height; `inout_score` = probability the target is inside the
+image). Each frame is then given one category (`gaze_metrics_categories.csv`):
+
+| category | rule |
+|---|---|
+| `mutual_gaze` | each person's gaze lands on the other's face |
+| `parent_watching` / `child_watching` | one person's gaze lands on the other (face or body); the other's does not land back |
+| `both_watching` | each looks at the other, not face to face |
+| `joint_attention` | both look at something in view (not each other), gaze points within 1.5 head-heights |
+| `independent` | both look at different things in view |
+| `unknown` | someone's gaze is out of view, or a box is missing |
+
+One-frame flickers are absorbed into the surrounding category.
+`gaze_metrics_summary.json` gives each category's share per block
+(`<category>_pct`, summing to 100) and its **chance level**
+(`<category>_chance_pct`): the share with the child's gaze shifted 60 s in time,
+which keeps seating positions but breaks the moment-to-moment pairing. Treat a
+category as meaningful only when it clearly exceeds its chance level.
+`convergence_mean` is the overlap of the two people's gaze maps (0 = disjoint,
+1 = identical), with `convergence_chance` computed the same way.
+
+Gaze estimates have not been validated against human coding on this lab's
+videos; a blind visual comparison of two models on 50 random frames was used
+to choose PaGE.
+
 ### `session_summary.json` and `portal_metadata/`
 
 `session_summary.json` records the run configuration and a per-block validity

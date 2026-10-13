@@ -225,149 +225,68 @@ def _head_center_dict(
     return {i: value for i in range(n)}
 
 
-def test_mutual_gaze_both_looking_at_each_other() -> None:
-    """When both look at each other's head location, classify as mutual_gaze."""
-    # Parent head at normalized (0.2, 0.3), child head at (0.7, 0.3)
-    # Parent gaze peak at child's head, child gaze peak at parent's head
-    n = 3
-    parent_gaze = [(0.7, 0.3)] * n  # looking at child
-    child_gaze = [(0.2, 0.3)] * n  # looking at parent
+W, H = 960, 540
+
+
+def _heads_and_tracks(frames, parent_head, child_head, missing_child_head=()):
+    """Normalized head boxes and pixel body boxes for parent (0) and child (1)."""
+    heads, tracks = [], []
+    for f in frames:
+        for tid, (hx, hy) in ((0, parent_head), (1, child_head)):
+            if tid == 1 and f in missing_child_head:
+                continue
+            heads.append(
+                {"frame_idx": f, "track_id": tid, "head_x1": hx - 0.03,
+                 "head_y1": hy - 0.05, "head_x2": hx + 0.03, "head_y2": hy + 0.05}
+            )
+        for tid, (hx, hy) in ((0, parent_head), (1, child_head)):
+            tracks.append(
+                {"frame_idx": f, "track_id": tid, "bbox_x1": (hx - 0.06) * W,
+                 "bbox_y1": (hy - 0.06) * H, "bbox_x2": (hx + 0.06) * W,
+                 "bbox_y2": (hy + 0.5) * H}
+            )
+    return pd.DataFrame(heads), pd.DataFrame(tracks)
+
+
+def _categories(parent_gaze, child_gaze, parent_head, child_head, n=3, **kw):
     gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
+    gaze_df["inout_score"] = 0.9
+    heads, tracks = _heads_and_tracks(range(n), parent_head, child_head, **kw)
+    return compute_gaze_categories(gaze_df, heads, tracks, (W, H), 0, 1)
 
-    # Head locations (normalized) keyed by frame_idx
-    parent_head_center = _head_center_dict(n, (0.2, 0.3))
-    child_head_center = _head_center_dict(n, (0.7, 0.3))
 
-    result = compute_gaze_categories(
-        gaze_df,
-        parent_track_id=0,
-        child_track_id=1,
-        parent_head_centers=parent_head_center,
-        child_head_centers=child_head_center,
-        proximity_threshold=0.15,
-    )
+def test_mutual_gaze_both_looking_at_each_other() -> None:
+    result = _categories([(0.7, 0.3)] * 3, [(0.2, 0.3)] * 3, (0.2, 0.3), (0.7, 0.3))
     assert all(result["gaze_category"] == "mutual_gaze")
 
 
 def test_joint_attention_both_looking_same_spot() -> None:
-    """When both look at the same third location, classify as joint_attention."""
-    n = 3
-    # Both looking at center of image
-    parent_gaze = [(0.5, 0.5)] * n
-    child_gaze = [(0.5, 0.5)] * n
-    gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
-
-    # Heads are at different locations
-    parent_head = _head_center_dict(n, (0.2, 0.3))
-    child_head = _head_center_dict(n, (0.8, 0.3))
-
-    result = compute_gaze_categories(
-        gaze_df,
-        parent_track_id=0,
-        child_track_id=1,
-        parent_head_centers=parent_head,
-        child_head_centers=child_head,
-        proximity_threshold=0.15,
-    )
+    result = _categories([(0.5, 0.9)] * 3, [(0.5, 0.9)] * 3, (0.2, 0.3), (0.8, 0.3))
     assert all(result["gaze_category"] == "joint_attention")
 
 
 def test_independent_gaze_looking_different_spots() -> None:
-    """When both look at different spots, classify as independent."""
-    n = 3
-    parent_gaze = [(0.1, 0.1)] * n  # top-left
-    child_gaze = [(0.9, 0.9)] * n  # bottom-right
-    gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
-
-    parent_head = _head_center_dict(n, (0.3, 0.5))
-    child_head = _head_center_dict(n, (0.7, 0.5))
-
-    result = compute_gaze_categories(
-        gaze_df,
-        parent_track_id=0,
-        child_track_id=1,
-        parent_head_centers=parent_head,
-        child_head_centers=child_head,
-        proximity_threshold=0.15,
-    )
+    result = _categories([(0.45, 0.05)] * 3, [(0.5, 0.95)] * 3, (0.2, 0.3), (0.8, 0.3))
     assert all(result["gaze_category"] == "independent")
 
 
-def test_adaptive_threshold_close_proximity() -> None:
-    """With adaptive threshold, close heads + shared gaze = joint_attention, not mutual."""
-    n = 3
-    # Heads very close together (0.06 apart), both gaze at a spot between them
-    # but slightly off-center (0.07 from parent head, 0.05 from child head)
-    parent_head = _head_center_dict(n, (0.47, 0.3))
-    child_head = _head_center_dict(n, (0.53, 0.3))  # 0.06 apart
-    # Both look at the same spot slightly toward the child
-    parent_gaze = [(0.515, 0.3)] * n  # 0.045 from parent, 0.015 from child
-    child_gaze = [(0.515, 0.3)] * n
-    gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
+def test_shared_spot_near_the_child_is_watching_not_joint_attention() -> None:
+    """Old rule bug: gaze on the partner was absorbed into joint attention."""
+    result = _categories([(0.8, 0.3)] * 3, [(0.8, 0.31)] * 3, (0.2, 0.3), (0.8, 0.3))
+    assert all(result["gaze_category"] == "parent_watching")
 
-    # With fixed 0.15 threshold: both distances < 0.15 → mutual_gaze (wrong)
-    result_fixed = compute_gaze_categories(
-        gaze_df, 0, 1, parent_head, child_head, proximity_threshold=0.15
+
+def test_missing_head_box_aligns_by_frame_idx() -> None:
+    """A frame without the child's head box does not borrow another frame's."""
+    result = _categories(
+        [(0.7, 0.3)] * 5, [(0.2, 0.3)] * 5, (0.2, 0.3), (0.7, 0.3), n=5,
+        missing_child_head=(2, 3),
     )
-    assert all(result_fixed["gaze_category"] == "mutual_gaze")
-
-    # With adaptive threshold: 0.4 * 0.06 = 0.024, clamped to 0.04
-    # Parent gaze→child head = 0.015 < 0.04 (parent looks at child)
-    # Child gaze→parent head = 0.045 > 0.04 (child does NOT look at parent)
-    # → should NOT be mutual_gaze
-    result_adaptive = compute_gaze_categories(
-        gaze_df, 0, 1, parent_head, child_head, proximity_threshold=None
-    )
-    assert all(result_adaptive["gaze_category"] != "mutual_gaze")
-
-
-def test_head_center_lookup_aligns_by_frame_idx_not_position() -> None:
-    """Regression: head centers must be looked up by frame_idx, not list index.
-
-    Earlier the function indexed ``parent_head_centers[i]`` where ``i`` was the
-    loop counter over the merged gaze frames. If head_bbox was missing for
-    some frames present in gaze, the positional index pointed at the wrong
-    frame's head bbox and gaze categories silently got misclassified.
-    """
-    # Gaze data for 4 frames.
-    n = 4
-    parent_gaze = [(0.7, 0.3)] * n
-    child_gaze = [(0.2, 0.3)] * n
-    gaze_df = _make_gaze_csv(n, parent_gaze, child_gaze)
-
-    # Head bbox detection FAILED on frame 2 — dict keys are {0, 1, 3}.
-    parent_head_centers = {
-        0: (0.2, 0.3),
-        1: (0.2, 0.3),
-        3: (0.99, 0.99),  # garbage; this is for frame 3, not for "third item"
-    }
-    child_head_centers = {
-        0: (0.7, 0.3),
-        1: (0.7, 0.3),
-        3: (0.01, 0.01),
-    }
-
-    result = compute_gaze_categories(
-        gaze_df,
-        0,
-        1,
-        parent_head_centers=parent_head_centers,
-        child_head_centers=child_head_centers,
-        proximity_threshold=0.15,
-    )
-
-    # Frames 0 and 1 have correct heads -> mutual_gaze.
-    assert (
-        result.loc[result["frame_idx"] == 0, "gaze_category"].iloc[0] == "mutual_gaze"
-    )
-    assert (
-        result.loc[result["frame_idx"] == 1, "gaze_category"].iloc[0] == "mutual_gaze"
-    )
-    # Frame 2 has NO head bbox -> falls back to (0,0); both gaze peaks are
-    # far from (0,0) so neither "looks at" the other -> not mutual_gaze.
-    assert (
-        result.loc[result["frame_idx"] == 2, "gaze_category"].iloc[0] != "mutual_gaze"
-    )
+    by_frame = dict(zip(result["frame_idx"], result["gaze_category"]))
+    assert by_frame[0] == by_frame[1] == by_frame[4] == "mutual_gaze"
+    # Without the child's head box the parent's gaze still lands on the
+    # child's body box: watching each other, but not face to face.
+    assert by_frame[2] == by_frame[3] == "both_watching"
 
 
 # ====================================================================

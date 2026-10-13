@@ -130,20 +130,10 @@ def plot_gaze_categories(
     if ax is None:
         _, ax = plt.subplots(1, 1, figsize=(14, 3))
 
-    category_order = [
-        "mutual_gaze",
-        "joint_attention",
-        "parent_watching",
-        "child_watching",
-        "independent",
-    ]
-    category_colors = {
-        "mutual_gaze": "#2ecc71",
-        "joint_attention": "#3498db",
-        "parent_watching": "#e67e22",
-        "child_watching": "#9b59b6",
-        "independent": "#95a5a6",
-    }
+    from gaze_analysis.gaze_categories import CATEGORIES, CATEGORY_COLORS
+
+    category_order = CATEGORIES
+    category_colors = CATEGORY_COLORS
 
     df = gaze_cat_df.sort_values("timestamp_s").reset_index(drop=True)
     timestamps = df["timestamp_s"].values

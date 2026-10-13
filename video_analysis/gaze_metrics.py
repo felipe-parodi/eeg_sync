@@ -9,15 +9,25 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from gaze_analysis.config import SessionBlock, frame_image_size, load_session_config
+from gaze_analysis.gaze_categories import (
+    CATEGORIES,
+    CATEGORY_COLORS,
+    build_frame_table,
+    category_shares,
+    chance_shares,
+    chance_shift_rows,
+    gaze_categories,
+    heatmap_overlap,
+)
 from gaze_analysis.head_bbox import extract_head_bboxes
-from gaze_analysis.synchrony import compute_gaze_categories, compute_gaze_convergence
+from gaze_analysis.synchrony import compute_gaze_convergence
 
 # ---------------------------------------------------------------------------
 # Nature journal style
@@ -47,21 +57,7 @@ BLOCK_COLORS = {
 }
 
 # Gaze category colors
-CATEGORY_COLORS = {
-    "mutual_gaze": "#2ecc71",
-    "joint_attention": "#3498db",
-    "parent_watching": "#e67e22",
-    "child_watching": "#9b59b6",
-    "independent": "#95a5a6",
-}
-
-CATEGORY_ORDER = [
-    "mutual_gaze",
-    "joint_attention",
-    "parent_watching",
-    "child_watching",
-    "independent",
-]
+CATEGORY_ORDER = CATEGORIES
 
 
 # ---------------------------------------------------------------------------
@@ -121,19 +117,16 @@ def compute_per_block_gaze_metrics(
             head_bboxes_df["frame_idx"].isin(block_frames)
         ].copy()
 
-        # Build head center lists aligned with merged gaze frames
-        parent_head_centers, child_head_centers = _build_head_centers(
-            block_gaze, block_heads, parent_id, child_id
-        )
-
-        # Gaze categories
-        cat_df = compute_gaze_categories(
+        # Gaze categories from gaze points vs the other person's boxes.
+        frames = build_frame_table(
             block_gaze,
+            block_heads,
+            tracks_df[tracks_df["frame_idx"].isin(block_frames)],
+            (image_width, image_height),
             parent_id,
             child_id,
-            parent_head_centers=parent_head_centers,
-            child_head_centers=child_head_centers,
         )
+        cat_df = gaze_categories(frames) if not frames.empty else pd.DataFrame()
         if not cat_df.empty:
             cat_df["block"] = block.name
             all_categories.append(cat_df)
@@ -169,16 +162,21 @@ def compute_per_block_gaze_metrics(
         # Per-block summary
         stats: Dict[str, Any] = {"block": block.name}
         if not cat_df.empty:
-            counts = cat_df["gaze_category"].value_counts()
-            total = len(cat_df)
-            stats["n_frames"] = total
-            for cat in CATEGORY_ORDER:
-                stats[f"{cat}_pct"] = float(counts.get(cat, 0) / total * 100)
+            stats["n_frames"] = len(cat_df)
+            stats.update(category_shares(cat_df["gaze_category"]))
+            # Chance level: the same block with the child's gaze shifted in
+            # time, so only seating positions and box sizes remain.
+            shift = chance_shift_rows(frames)
+            for key, value in chance_shares(frames, shift).items():
+                stats[key.replace("_pct", "_chance_pct")] = value
         if all_convergence and all_convergence[-1]["block"].iloc[0] == block.name:
             conv_vals = all_convergence[-1]["gaze_convergence_score"]
             stats["convergence_mean"] = float(conv_vals.mean())
             stats["convergence_std"] = float(conv_vals.std())
             stats["convergence_n_frames"] = len(conv_vals)
+            stats["convergence_chance"] = _chance_convergence(
+                heatmaps, hm_keys, block_frames, parent_id, child_id
+            )
         block_stats.append(stats)
 
     categories_df = (
@@ -199,46 +197,44 @@ def compute_per_block_gaze_metrics(
     }
 
 
-def _build_head_centers(
-    gaze_df: pd.DataFrame,
-    head_bboxes_df: pd.DataFrame,
+def _chance_convergence(
+    heatmaps: np.ndarray,
+    hm_keys: List[str],
+    block_frames: set,
     parent_id: int,
     child_id: int,
-) -> Tuple[
-    Optional[Dict[int, Tuple[float, float]]],
-    Optional[Dict[int, Tuple[float, float]]],
-]:
-    """Build per-frame head center lookups for gaze category computation.
+    shift_frac: float = 0.5,
+) -> Optional[float]:
+    """Mean heatmap overlap when the child's maps are shifted in time.
 
     Args:
-        gaze_df: Gaze DataFrame with frame_idx, track_id.
-        head_bboxes_df: Head bbox DataFrame.
+        heatmaps: All heatmaps.
+        hm_keys: Keys ``f{frame}_t{track}`` matching ``heatmaps``.
+        block_frames: Frames in this block.
         parent_id: Parent track ID.
         child_id: Child track ID.
+        shift_frac: Shift as a fraction of the block's paired frames.
 
     Returns:
-        ``(parent_head_centers, child_head_centers)`` — each is a
-        ``{frame_idx: (x, y)}`` dict, or None if no head bboxes are available.
+        Mean overlap at chance, or None without paired frames.
     """
-    if head_bboxes_df.empty:
-        return None, None
-
-    def _track_centers(track_id: int) -> Dict[int, Tuple[float, float]]:
-        sub = head_bboxes_df[head_bboxes_df["track_id"] == track_id]
-        return {
-            int(row.frame_idx): (
-                float((row.head_x1 + row.head_x2) / 2),
-                float((row.head_y1 + row.head_y2) / 2),
-            )
-            for row in sub.itertuples(index=False)
-        }
-
-    parent_centers = _track_centers(parent_id)
-    child_centers = _track_centers(child_id)
-
-    if not parent_centers and not child_centers:
-        return None, None
-    return parent_centers, child_centers
+    index = {k: i for i, k in enumerate(hm_keys)}
+    frames = sorted(
+        f
+        for f in block_frames
+        if f"f{f:06d}_t{parent_id}" in index and f"f{f:06d}_t{child_id}" in index
+    )
+    if len(frames) < 2:
+        return None
+    shift = max(1, int(len(frames) * shift_frac))
+    vals = [
+        heatmap_overlap(
+            heatmaps[index[f"f{f:06d}_t{parent_id}"]],
+            heatmaps[index[f"f{frames[(i + shift) % len(frames)]:06d}_t{child_id}"]],
+        )
+        for i, f in enumerate(frames)
+    ]
+    return float(np.mean(vals))
 
 
 # ---------------------------------------------------------------------------

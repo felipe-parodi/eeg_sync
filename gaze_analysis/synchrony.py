@@ -22,9 +22,16 @@ from gaze_analysis.config import (
     add_time_range_args,
     filter_by_time_range,
     filter_heatmaps_by_time_range,
+    frame_image_size,
     load_session_config,
     resolve_time_range,
 )
+from gaze_analysis.gaze_categories import (
+    build_frame_table,
+    gaze_categories,
+    heatmap_overlap,
+)
+from gaze_analysis.head_bbox import extract_head_bboxes
 
 # COCO torso keypoints: left/right shoulder (5,6) + left/right hip (11,12)
 _TORSO_KEYPOINTS = ["kp_005", "kp_006", "kp_011", "kp_012"]
@@ -269,124 +276,33 @@ def compute_movement_xcorr(
 
 def compute_gaze_categories(
     gaze_df: pd.DataFrame,
+    head_boxes_df: pd.DataFrame,
+    tracks_df: pd.DataFrame,
+    image_size: tuple[int, int],
     parent_track_id: int = 0,
     child_track_id: int = 1,
-    parent_head_centers: dict[int, tuple[float, float]] | None = None,
-    child_head_centers: dict[int, tuple[float, float]] | None = None,
-    proximity_threshold: float | None = None,
 ) -> pd.DataFrame:
-    """Classify gaze patterns per frame into categories.
+    """Classify each frame's parent-child gaze pattern.
 
-    Categories:
-    - mutual_gaze: Both look at each other's head
-    - joint_attention: Both look at the same spot (not each other)
-    - parent_watching: Only parent looks at child
-    - child_watching: Only child looks at parent
-    - independent: Neither looks at the other or a shared spot
+    See :mod:`gaze_analysis.gaze_categories` for the category rules.
 
     Args:
-        gaze_df: Gaze CSV DataFrame with gaze_peak_x, gaze_peak_y per person.
+        gaze_df: Gaze CSV rows (gaze point as image fractions, in/out score).
+        head_boxes_df: Normalized head boxes (``extract_head_bboxes``).
+        tracks_df: Tracks with pixel body boxes.
+        image_size: (width, height) of the frames in pixels.
         parent_track_id: Track ID for the parent.
         child_track_id: Track ID for the child.
-        parent_head_centers: Mapping ``frame_idx -> (x, y)`` of normalized head
-            centers for the parent. Keyed by ``frame_idx`` (not list position)
-            so the function aligns correctly even when the head_bbox dataframe
-            has different frame coverage than the gaze dataframe.
-        child_head_centers: Mapping ``frame_idx -> (x, y)`` for the child.
-        proximity_threshold: Distance threshold (normalized) for "looking at".
-            If None and head centers are provided, uses an adaptive per-frame
-            threshold scaled to 40% of the inter-head distance (clamped to
-            [0.04, 0.15]). If None and no head centers, falls back to 0.15.
 
     Returns:
         DataFrame with frame_idx, timestamp_s, gaze_category columns.
     """
-    use_adaptive = proximity_threshold is None
-    if proximity_threshold is None:
-        proximity_threshold = 0.15  # fallback when no head centers
-
-    parent_gaze = (
-        gaze_df[gaze_df["track_id"] == parent_track_id]
-        .sort_values("frame_idx")
-        .reset_index(drop=True)
+    frames = build_frame_table(
+        gaze_df, head_boxes_df, tracks_df, image_size, parent_track_id, child_track_id
     )
-    child_gaze = (
-        gaze_df[gaze_df["track_id"] == child_track_id]
-        .sort_values("frame_idx")
-        .reset_index(drop=True)
-    )
-
-    # Align by frame_idx
-    merged = (
-        parent_gaze[["frame_idx", "timestamp_s", "gaze_peak_x", "gaze_peak_y"]]
-        .merge(
-            child_gaze[["frame_idx", "gaze_peak_x", "gaze_peak_y"]],
-            on="frame_idx",
-            suffixes=("_p", "_c"),
-        )
-        .sort_values("frame_idx")
-        .reset_index(drop=True)
-    )
-
-    n = len(merged)
-    categories = []
-
-    for i in range(n):
-        row = merged.iloc[i]
-        frame_idx = int(row["frame_idx"])
-        p_gx = row["gaze_peak_x_p"]
-        p_gy = row["gaze_peak_y_p"]
-        c_gx = row["gaze_peak_x_c"]
-        c_gy = row["gaze_peak_y_c"]
-
-        # Head centers for this frame, looked up by frame_idx so the function
-        # tolerates head_bbox / gaze coverage gaps.
-        if parent_head_centers is not None:
-            p_hx, p_hy = parent_head_centers.get(frame_idx, (0.0, 0.0))
-        else:
-            p_hx, p_hy = 0.0, 0.0
-
-        if child_head_centers is not None:
-            c_hx, c_hy = child_head_centers.get(frame_idx, (0.0, 0.0))
-        else:
-            c_hx, c_hy = 0.0, 0.0
-
-        # Per-frame adaptive threshold: scale by inter-head distance
-        if (
-            use_adaptive
-            and parent_head_centers is not None
-            and child_head_centers is not None
-        ):
-            inter_head_dist = np.sqrt((p_hx - c_hx) ** 2 + (p_hy - c_hy) ** 2)
-            thresh_i = float(np.clip(0.4 * inter_head_dist, 0.04, 0.15))
-        else:
-            thresh_i = proximity_threshold
-
-        # Distance from parent's gaze to child's head
-        p_looks_at_child = np.sqrt((p_gx - c_hx) ** 2 + (p_gy - c_hy) ** 2) < thresh_i
-        # Distance from child's gaze to parent's head
-        c_looks_at_parent = np.sqrt((c_gx - p_hx) ** 2 + (c_gy - p_hy) ** 2) < thresh_i
-        # Distance between gaze peaks
-        gaze_close = np.sqrt((p_gx - c_gx) ** 2 + (p_gy - c_gy) ** 2) < thresh_i
-
-        if p_looks_at_child and c_looks_at_parent:
-            cat = "mutual_gaze"
-        elif gaze_close and not p_looks_at_child and not c_looks_at_parent:
-            cat = "joint_attention"
-        elif gaze_close:
-            # Both looking at same area which happens to be near one's head
-            cat = "joint_attention"
-        elif p_looks_at_child:
-            cat = "parent_watching"
-        elif c_looks_at_parent:
-            cat = "child_watching"
-        else:
-            cat = "independent"
-
-        categories.append(cat)
-
-    merged["gaze_category"] = categories
-    return merged[["frame_idx", "timestamp_s", "gaze_category"]]
+    if frames.empty:
+        return pd.DataFrame(columns=["frame_idx", "timestamp_s", "gaze_category"])
+    return gaze_categories(frames)
 
 
 # ====================================================================
@@ -400,7 +316,11 @@ def compute_gaze_convergence(
     parent_track_id: int = 0,
     child_track_id: int = 1,
 ) -> pd.DataFrame:
-    """Compute cosine similarity of parent and child gaze heatmaps per frame.
+    """Compute the overlap of parent and child gaze heatmaps per frame.
+
+    Uses :func:`gaze_analysis.gaze_categories.heatmap_overlap` (background
+    removed, maps normalized to sum to 1, summed elementwise minimum): 1 means
+    identical gaze distributions and 0 disjoint ones.
 
     Args:
         heatmaps: Array of shape [N, 64, 64] from gaze_heatmaps.npz.
@@ -429,16 +349,9 @@ def compute_gaze_convergence(
 
     rows = []
     for frame_key in common_frames:
-        p_hm = heatmaps[parent_frames[frame_key]].flatten().astype(float)
-        c_hm = heatmaps[child_frames[frame_key]].flatten().astype(float)
-
-        p_norm = np.linalg.norm(p_hm)
-        c_norm = np.linalg.norm(c_hm)
-
-        if p_norm < 1e-12 or c_norm < 1e-12:
-            cos_sim = 0.0
-        else:
-            cos_sim = float(np.dot(p_hm, c_hm) / (p_norm * c_norm))
+        cos_sim = heatmap_overlap(
+            heatmaps[parent_frames[frame_key]], heatmaps[child_frames[frame_key]]
+        )
 
         # Extract frame index from key like "f000001"
         frame_idx = int(frame_key[1:])
@@ -574,39 +487,17 @@ def main() -> None:
     # Metric 2: Movement cross-correlation
     xcorr_df = compute_movement_xcorr(pose_df, pid, cid)
 
-    # Metric 3: Gaze categories (derive head centers from gaze CSV or head_bbox).
-    # Build dicts keyed by frame_idx so the lookup inside
-    # compute_gaze_categories aligns even when head_bbox is missing frames
-    # that gaze still has (or vice versa).
-    head_bbox_path = camera_dir / "head_bboxes.csv"
-    if head_bbox_path.exists():
-        head_bbox_df = pd.read_csv(head_bbox_path)
-        p_heads = head_bbox_df[head_bbox_df["track_id"] == pid]
-        c_heads = head_bbox_df[head_bbox_df["track_id"] == cid]
-        parent_head_centers = {
-            int(row.frame_idx): (
-                float((row.head_x1 + row.head_x2) / 2),
-                float((row.head_y1 + row.head_y2) / 2),
-            )
-            for row in p_heads.itertuples(index=False)
-        }
-        child_head_centers = {
-            int(row.frame_idx): (
-                float((row.head_x1 + row.head_x2) / 2),
-                float((row.head_y1 + row.head_y2) / 2),
-            )
-            for row in c_heads.itertuples(index=False)
-        }
-    else:
-        parent_head_centers = None
-        child_head_centers = None
-
+    # Metric 3: Gaze categories, from each person's gaze point relative to
+    # the other's head and body boxes (in pixels of the real frame size).
+    tracks_df = pd.read_csv(camera_dir / args.tracks_input)
+    if time_limited:
+        tracks_df = filter_by_time_range(tracks_df, t_start, t_end)
+    image_size = frame_image_size(
+        camera_dir, (session_config.image_width, session_config.image_height)
+    )
+    head_boxes_df = extract_head_bboxes(pose_df, tracks_df, *image_size)
     gaze_cat_df = compute_gaze_categories(
-        gaze_df,
-        pid,
-        cid,
-        parent_head_centers=parent_head_centers,
-        child_head_centers=child_head_centers,
+        gaze_df, head_boxes_df, tracks_df, image_size, pid, cid
     )
 
     # Metric 4: Gaze convergence

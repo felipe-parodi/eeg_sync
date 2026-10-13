@@ -131,6 +131,15 @@ def _fmt(value: Any, digits: int = 1, suffix: str = "") -> str:
     return f"{float(value):.{digits}f}{suffix}"
 
 
+def _chance(row: pd.Series, column: str) -> str:
+    chance = row.get(column.replace("_pct", "_chance_pct"))
+    if chance is None or (isinstance(chance, float) and pd.isna(chance)):
+        return ""
+    if column.endswith("unknown_pct"):
+        return ""
+    return f' <span class="muted">(chance {float(chance):.0f})</span>'
+
+
 def _coverage_cell(row: pd.Series) -> str:
     share = float(row.get("coverage_both", 0) or 0)
     low = bool(row.get("low_coverage", share < 0.5))
@@ -163,6 +172,7 @@ def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
         ("gaze_joint_attention_pct", "Joint attention"),
         ("gaze_parent_watching_pct", "Parent watching child"),
         ("gaze_child_watching_pct", "Child watching parent"),
+        ("gaze_unknown_pct", "Gaze unknown"),
     ]
     gaze_cols = [(c, label) for c, label in gaze_cols if c in rows.columns]
 
@@ -184,7 +194,9 @@ def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
             f"<td>{_coverage_cell(row)}</td>"
             f"<td>{_fmt(row.get('proximity_mean'))}</td>"
             f"<td>{_fmt(row.get('xcorr_mean'), 2)}</td>"
-            + "".join(f"<td>{_fmt(row.get(c))}</td>" for c, _ in gaze_cols)
+            + "".join(
+                f"<td>{_fmt(row.get(c))}{_chance(row, c)}</td>" for c, _ in gaze_cols
+            )
             + "</tr>"
         )
 
@@ -229,8 +241,12 @@ def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
 
     gaze_note = (
         "<li><strong>Gaze columns</strong>: share of frames (with both people "
-        "tracked) in each gaze category, estimated from head position and the "
-        "image.</li>"
+        "tracked) in each gaze category, from where each person's estimated "
+        "gaze lands relative to the other person. <em>Chance</em> is the same "
+        "share with the child's gaze shifted 60 s in time: what seating "
+        "position alone would produce. A category is meaningful only when it "
+        "clearly exceeds its chance level. <em>Gaze unknown</em> = the model "
+        "judged someone to be looking out of view.</li>"
         if has_gaze
         else ""
     )
