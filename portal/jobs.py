@@ -1554,6 +1554,17 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
             )
             run_command_step(step, cwd=repo_root, log_path=log_path)
 
+        # Record the real frame size (uploads are often 960x540, not the
+        # 854x480 default); gaze head boxes are normalized by it.
+        from gaze_analysis.config import frame_image_size
+
+        config.image_width, config.image_height = frame_image_size(
+            config.session_output_dir / active_camera_ids(config)[0],
+            (config.image_width, config.image_height),
+        )
+        write_session_config(config)
+        _write_json(config.job_dir / "job_config.json", job_config_to_dict(config))
+
         # After pose+tracking, extract anchor frames per camera and pause
         # for the colleague to label which detection is the parent. Phase 2
         # resumes via resume_portal_job_phase2 once annotations arrive.

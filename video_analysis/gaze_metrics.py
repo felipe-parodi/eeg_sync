@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from gaze_analysis.config import SessionBlock, load_session_config
+from gaze_analysis.config import SessionBlock, frame_image_size, load_session_config
 from gaze_analysis.head_bbox import extract_head_bboxes
 from gaze_analysis.synchrony import compute_gaze_categories, compute_gaze_convergence
 
@@ -446,6 +446,9 @@ def main() -> None:
         heatmaps = np.array([])
         hm_keys = []
 
+    image_width, image_height = frame_image_size(
+        camera_dir, (config.image_width, config.image_height)
+    )
     results = compute_per_block_gaze_metrics(
         gaze_df,
         pose_df,
@@ -455,8 +458,8 @@ def main() -> None:
         blocks,
         parent_id=mapping.parent_track_id,
         child_id=mapping.child_track_id,
-        image_width=config.image_width,
-        image_height=config.image_height,
+        image_width=image_width,
+        image_height=image_height,
     )
 
     # Save CSVs

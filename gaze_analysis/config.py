@@ -193,6 +193,32 @@ def load_session_config(path: Path | str) -> SessionConfig:
     )
 
 
+def frame_image_size(
+    camera_dir: Path | str, fallback: Tuple[int, int]
+) -> Tuple[int, int]:
+    """Return the (width, height) of a camera's extracted frames.
+
+    The session config's image size is a default that can disagree with the
+    uploaded video (for example 854x480 configured, 960x540 uploaded). Head
+    boxes are normalized by image size, so the real size must be used.
+
+    Args:
+        camera_dir: Camera output folder with ``frames/``.
+        fallback: Size to use when no frame image is found.
+
+    Returns:
+        (width, height) in pixels.
+    """
+    from PIL import Image
+
+    frames_dir = Path(camera_dir) / "frames"
+    first = next(iter(sorted(frames_dir.glob("frame_*.jpg"))), None)
+    if first is None:
+        return fallback
+    with Image.open(first) as image:
+        return image.size
+
+
 # ====================================================================
 # Time-range filtering
 # ====================================================================

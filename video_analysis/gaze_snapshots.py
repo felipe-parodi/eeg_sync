@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from gaze_analysis.config import SessionBlock, load_session_config
+from gaze_analysis.config import SessionBlock, frame_image_size, load_session_config
 from gaze_analysis.gazelle_runner import _find_frame_paths
 
 # Track colors: parent = orange, child = blue
@@ -313,9 +313,10 @@ def main() -> None:
 
     from gaze_analysis.head_bbox import extract_head_bboxes
 
-    head_bboxes_df = extract_head_bboxes(
-        pose_df, tracks_df, config.image_width, config.image_height
+    image_width, image_height = frame_image_size(
+        camera_dir, (config.image_width, config.image_height)
     )
+    head_bboxes_df = extract_head_bboxes(pose_df, tracks_df, image_width, image_height)
 
     output_dir = camera_dir / args.output_dir
     generate_block_snapshots(
@@ -325,8 +326,8 @@ def main() -> None:
         blocks,
         output_dir,
         n_samples=args.n_samples,
-        image_width=config.image_width,
-        image_height=config.image_height,
+        image_width=image_width,
+        image_height=image_height,
         parent_id=mapping.parent_track_id,
         child_id=mapping.child_track_id,
         frame_rate=config.frame_rate,

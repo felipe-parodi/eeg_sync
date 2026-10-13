@@ -137,25 +137,25 @@ def score_gaze_predictions(
 
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point."""
+    from gaze_analysis.config import frame_image_size
     from portal.gaze_labels import load_gaze_labels
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--camera-dir", required=True, type=Path)
     parser.add_argument("--gaze", nargs="+", default=["gaze_heatmap.csv"])
     parser.add_argument("--tracks", default="tracks_2d_smooth.csv")
-    parser.add_argument("--image-width", type=int, default=854)
-    parser.add_argument("--image-height", type=int, default=480)
     args = parser.parse_args(argv)
 
     labels = pd.DataFrame(load_gaze_labels(args.camera_dir))
     if labels.empty:
         raise SystemExit(f"No gaze labels saved yet in {args.camera_dir}")
     tracks = pd.read_csv(args.camera_dir / args.tracks)
+    image_size = frame_image_size(args.camera_dir, (854, 480))
     results = {}
     for name in args.gaze:
         gaze = pd.read_csv(args.camera_dir / name)
         results[name] = score_gaze_predictions(
-            labels, gaze, tracks, (args.image_width, args.image_height)
+            labels, gaze, tracks, image_size
         )
     print(json.dumps(results, indent=2, default=str))
 
