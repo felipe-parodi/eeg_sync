@@ -91,7 +91,7 @@ and overlays use those timestamps.
 Run the portal on the workstation:
 
 ```powershell
-cd "C:\Users\Felipe Parodi\Documents\ext_repos\eeg_sync"
+cd "<path\to\eeg_sync>"
 .\start-portal.ps1
 ```
 

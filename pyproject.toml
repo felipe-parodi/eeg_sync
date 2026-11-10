@@ -77,7 +77,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.urls]
-Repository = "https://github.com/felipeparodi/eeg_sync"
+Repository = "https://github.com/felipe-parodi/eeg_sync"
 
 [tool.ruff]
 line-length = 88
