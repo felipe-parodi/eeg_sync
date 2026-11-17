@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hmac
-import html
 import json
 import math
+import mimetypes
 import os
 import re
 import secrets
@@ -31,6 +31,11 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup
+from starlette.responses import Response
+from starlette.types import Scope
 
 from .jobs import (
     PORTAL_DEFAULT_FRAME_RATE,
@@ -125,7 +130,75 @@ async def portal_lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
 
 
+PORTAL_PACKAGE_DIR = Path(__file__).resolve().parent
+TEMPLATE_DIR = PORTAL_PACKAGE_DIR / "templates"
+STATIC_DIR = PORTAL_PACKAGE_DIR / "static"
+STATIC_SUFFIXES = frozenset({".css", ".js"})
+
+
+def script_json(value: Any) -> Markup:
+    r"""Serialize ``value`` as JSON that is safe inside a ``<script>`` element.
+
+    ``<``, ``>`` and ``&`` become ``\uXXXX`` escapes, so no string in the data
+    can close the script block or open a comment. Key order is kept (unlike
+    Jinja's ``tojson``, which sorts keys and also escapes apostrophes).
+
+    Args:
+        value: JSON-serializable data.
+
+    Returns:
+        Markup holding the escaped JSON text.
+    """
+    text = (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+    return Markup(text)
+
+
+# Autoescaping is on for every template; values are passed raw and escaped at
+# render time.
+TEMPLATES = Environment(
+    loader=FileSystemLoader(TEMPLATE_DIR),
+    autoescape=select_autoescape(enabled_extensions=("html",), default=True),
+)
+TEMPLATES.filters["script_json"] = script_json
+
+# Windows can map .js to text/plain through the registry; pin the types the
+# static mount serves so browsers always run/apply them.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+
+
+class PortalStaticFiles(StaticFiles):
+    """Static file mount that serves only stylesheets and scripts.
+
+    The mount is public (the login page needs its stylesheet), so anything
+    other than ``.css``/``.js`` returns 404, even if it is placed in the folder.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """Serve ``path`` only when its suffix is an allowed static type.
+
+        Args:
+            path: Requested path relative to the static directory.
+            scope: ASGI request scope.
+
+        Returns:
+            The static file response.
+
+        Raises:
+            HTTPException: 404 for any other file type or a directory.
+        """
+        if Path(path).suffix.lower() not in STATIC_SUFFIXES:
+            raise HTTPException(status_code=404, detail="Not Found")
+        return await super().get_response(path, scope)
+
+
 app = FastAPI(title=PORTAL_DISPLAY_NAME, lifespan=portal_lifespan)
+app.mount("/static", PortalStaticFiles(directory=STATIC_DIR), name="static")
 
 
 def portal_password() -> str:
@@ -251,161 +324,21 @@ def require_csrf(request: Request) -> str:
     return session_token
 
 
-def _html_page(title: str, body: str) -> HTMLResponse:
-    return HTMLResponse(f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title}</title>
-  <style>
-    :root {{
-      color-scheme: light;
-      font-family: Arial, sans-serif;
-      background: #f6f7f9;
-      color: #17202a;
-    }}
-    body {{ margin: 0; }}
-    header {{
-      background: #143642;
-      color: white;
-      padding: 16px 24px;
-      font-size: 18px;
-      font-weight: 700;
-    }}
-    main {{
-      max-width: 980px;
-      margin: 0 auto;
-      padding: 24px;
-    }}
-    form, .panel {{
-      background: white;
-      border: 1px solid #d9dee5;
-      border-radius: 6px;
-      padding: 20px;
-      margin-bottom: 18px;
-    }}
-    label {{
-      display: block;
-      font-weight: 700;
-      margin-top: 14px;
-      margin-bottom: 6px;
-    }}
-    .info-icon {{
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 18px;
-      height: 18px;
-      margin-left: 6px;
-      border-radius: 50%;
-      border: 1px solid #8da0b3;
-      color: #176b87;
-      font-size: 12px;
-      font-weight: 700;
-      cursor: help;
-    }}
-    input, textarea, button {{
-      font: inherit;
-      box-sizing: border-box;
-    }}
-    input[type="text"], input[type="email"], input[type="password"], input[type="file"], textarea {{
-      width: 100%;
-      border: 1px solid #b9c1cc;
-      border-radius: 4px;
-      padding: 10px;
-      background: white;
-    }}
-    input.file-input-native {{
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      opacity: 0;
-      pointer-events: none;
-    }}
-    textarea {{ min-height: 120px; resize: vertical; }}
-    .file-drop-zone {{
-      border: 2px dashed #8da0b3;
-      border-radius: 6px;
-      padding: 18px;
-      background: #f9fbfc;
-      cursor: pointer;
-    }}
-    .file-drop-zone strong, .file-drop-zone span {{
-      display: block;
-    }}
-    .file-drop-zone.dragover {{
-      border-color: #176b87;
-      background: #eef8fb;
-    }}
-    .file-name {{
-      margin-top: 8px;
-    }}
-    button {{
-      border: 0;
-      border-radius: 4px;
-      background: #176b87;
-      color: white;
-      padding: 11px 16px;
-      margin-top: 16px;
-      font-weight: 700;
-      cursor: pointer;
-    }}
-    .button-link {{
-      display: inline-block;
-      border-radius: 4px;
-      background: #176b87;
-      color: white;
-      padding: 11px 16px;
-      font-weight: 700;
-      text-decoration: none;
-    }}
-    .top-actions {{
-      display: flex;
-      justify-content: flex-end;
-      margin-bottom: 12px;
-    }}
-    .top-actions button {{ margin-top: 0; }}
-    table {{ width: 100%; border-collapse: collapse; background: white; }}
-    th, td {{ border-bottom: 1px solid #d9dee5; padding: 10px; text-align: left; }}
-    .muted {{ color: #5d6d7e; font-size: 14px; }}
-    .warning {{
-      border-left: 4px solid #c77700;
-      background: #fff8ec;
-      padding: 10px 12px;
-      margin-bottom: 16px;
-    }}
-    .error {{ color: #9b1c1c; font-weight: 700; }}
-    .output-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 12px;
-    }}
-    .output-card {{
-      border: 1px solid #d9dee5;
-      border-radius: 6px;
-      padding: 12px;
-      background: #fbfcfd;
-    }}
-    .output-card h3 {{
-      margin: 0 0 8px 0;
-      font-size: 16px;
-    }}
-    .output-card ul {{
-      margin: 8px 0 0 18px;
-      padding: 0;
-    }}
-  </style>
-</head>
-<body>
-  <header>{PORTAL_DISPLAY_NAME}</header>
-  <main>{body}</main>
-</body>
-</html>""")
+def _render_page(template_name: str, title: str, **context: Any) -> HTMLResponse:
+    """Render one portal page from ``portal/templates``.
 
+    Args:
+        template_name: Template file name, e.g. ``"index.html"``.
+        title: Text for the page ``<title>`` (autoescaped).
+        **context: Extra template variables for the page.
 
-def _info_icon(text: str) -> str:
-    return f'<span class="info-icon" title="{html.escape(text)}">?</span>'
+    Returns:
+        The rendered page as an HTML response.
+    """
+    template = TEMPLATES.get_template(template_name)
+    return HTMLResponse(
+        template.render(title=title, portal_name=PORTAL_DISPLAY_NAME, **context)
+    )
 
 
 def _slug(value: str) -> str:
@@ -590,7 +523,9 @@ def build_submission_metadata(
             for exclusion in exclusions_by_camera[next(iter(input_blocks_by_camera))]
         ],
         "extra_person_windows_by_camera": {
-            camera_id: [asdict(exclusion) for exclusion in exclusions_by_camera[camera_id]]
+            camera_id: [
+                asdict(exclusion) for exclusion in exclusions_by_camera[camera_id]
+            ]
             for camera_id in input_blocks_by_camera
         },
         "analysis_blocks": [asdict(block) for block in legacy_blocks],
@@ -811,21 +746,24 @@ def resume_portal_job_phase2_background(safe_job_id: str, job_dir: Path) -> None
         )
 
 
-def _job_rows() -> str:
+def _job_rows() -> list[dict[str, str]]:
+    """Return one display row per job folder, newest first.
+
+    Returns:
+        Dicts with ``job_id``, ``state`` and ``message`` (raw strings; the
+        template escapes them).
+    """
     rows = []
     for status_path in sorted(JOB_ROOT.glob("*/status.json"), reverse=True):
-        job_id = status_path.parent.name
         status = read_status(status_path.parent)
-        safe_job_id = html.escape(job_id, quote=True)
-        state = html.escape(str(status.get("state", "unknown")), quote=True)
-        message = html.escape(str(status.get("message", "")), quote=True)
         rows.append(
-            f'<tr><td><a href="/jobs/{safe_job_id}">{safe_job_id}</a></td>'
-            f"<td>{state}</td><td>{message}</td></tr>"
+            {
+                "job_id": status_path.parent.name,
+                "state": str(status.get("state", "unknown")),
+                "message": str(status.get("message", "")),
+            }
         )
-    if not rows:
-        return '<tr><td colspan="3" class="muted">No jobs yet.</td></tr>'
-    return "\n".join(rows)
+    return rows
 
 
 def _client_host(request: Request) -> str:
@@ -862,14 +800,7 @@ def _login_is_rate_limited(client_host: str) -> bool:
 @app.get("/login", response_class=HTMLResponse)
 def login_page() -> HTMLResponse:
     """Render the login page."""
-    return _html_page(
-        "Login",
-        """<form method="post" action="/login">
-  <label for="password">Password</label>
-  <input id="password" name="password" type="password" autocomplete="current-password">
-  <button type="submit">Log in</button>
-</form>""",
-    )
+    return _render_page("login.html", "Login")
 
 
 @app.post("/login")
@@ -907,316 +838,12 @@ def logout(session_token: Annotated[str, Depends(require_csrf)]) -> RedirectResp
 @app.get("/", response_class=HTMLResponse)
 def index(session_token: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
     """Render the upload form and recent jobs."""
-    csrf_token = csrf_token_for_session(session_token)
-    return _html_page(
+    return _render_page(
+        "index.html",
         "Submit Job",
-        f"""<div class="top-actions"><button id="logout-button" type="button">Log out</button></div>
-
-<form id="upload-form">
-  <label for="session_id">Session ID {_info_icon("Use the participant/session name that should appear on outputs.")}</label>
-  <input id="session_id" name="session_id" type="text" required placeholder="P001c">
-
-  <div class="warning"><strong>Upload at least one GoPro video.</strong> Video A and Video B are both supported, but one camera can be omitted when only one recording is available.</div>
-
-  <label for="video_a">GoPro Video A {_info_icon("Optional. Upload the first GoPro angle if available.")}</label>
-  <div class="file-drop-zone" data-file-input="video_a" tabindex="0">
-    <strong>Drop GoPro Video A here</strong>
-    <span class="muted">or click to choose a file</span>
-    <span id="video_a_selected" class="muted file-name">No file selected</span>
-  </div>
-  <input id="video_a" class="file-input-native" name="video_a" type="file" accept=".mov,.mp4,.avi,.mkv,.m4v">
-
-  <label for="video_b">GoPro Video B {_info_icon("Optional. Upload the second GoPro angle if available.")}</label>
-  <div class="file-drop-zone" data-file-input="video_b" tabindex="0">
-    <strong>Drop GoPro Video B here</strong>
-    <span class="muted">or click to choose a file</span>
-    <span id="video_b_selected" class="muted file-name">No file selected</span>
-  </div>
-  <input id="video_b" class="file-input-native" name="video_b" type="file" accept=".mov,.mp4,.avi,.mkv,.m4v">
-
-  <label for="blocks_text_a">Video A Analysis Blocks {_info_icon("Required when Video A is uploaded. These windows are the only Video A times processed.")}</label>
-  <textarea id="blocks_text_a" name="blocks_text_a" placeholder="free_play,13:26,23:40,green&#10;storybook,29:22,37:06,blue"></textarea>
-  <div class="muted">One block per line: name,start,end[,color]. Times may be seconds, MM:SS, or HH:MM:SS.</div>
-
-  <label for="blocks_text_b">Video B Analysis Blocks {_info_icon("Required when Video B is uploaded. Use the same format as Video A.")}</label>
-  <textarea id="blocks_text_b" name="blocks_text_b" placeholder="free_play,13:26,23:40,green&#10;storybook,29:22,37:06,blue"></textarea>
-  <div class="muted">Leave blank only if Video B is not uploaded.</div>
-
-  <label for="exclusions_text_a">Video A Extra-Person Windows {_info_icon("Optional. Times when someone else is in view, in Video A's own time. Removed from Video A only.")}</label>
-  <textarea id="exclusions_text_a" name="exclusions_text_a" placeholder="8:14,8:42,experimenter entered"></textarea>
-  <div class="muted">One window per line: start,end,reason. Use Video A's timestamps.</div>
-
-  <label for="exclusions_text_b">Video B Extra-Person Windows {_info_icon("Optional. Same as above, in Video B's own time. Removed from Video B only.")}</label>
-  <textarea id="exclusions_text_b" name="exclusions_text_b" placeholder="7:02,7:30,experimenter entered"></textarea>
-  <div class="muted">Video B's clock differs from Video A's, so enter the times as they appear in Video B.</div>
-
-  <label><input name="include_gaze" type="checkbox" value="yes"> Run gaze analysis {_info_icon("Optional. Adds gaze heatmaps and gaze metrics after pose tracking.")}</label>
-  <button type="submit">Submit Processing Job</button>
-  <p id="upload-status" class="muted"></p>
-  <progress id="upload-progress" value="0" max="100" style="width: 100%; display: none;"></progress>
-</form>
-
-<section class="panel">
-  <h2>Result Figures And Tables</h2>
-  <div class="output-grid">
-    <div class="output-card">
-      <h3>Proximity</h3>
-      <p class="muted">Parent-child torso distance inside each valid analysis block.</p>
-      <ul>
-        <li>Figure: proximity over time and block comparison</li>
-        <li>Table: per-frame torso distance and per-block summary</li>
-      </ul>
-    </div>
-    <div class="output-card">
-      <h3>Movement synchrony</h3>
-      <p class="muted">Windowed movement cross-correlation between parent and child tracks.</p>
-      <ul>
-        <li>Figure: synchrony strength and lead-lag summary</li>
-        <li>Table: peak correlation and lag per window</li>
-      </ul>
-    </div>
-    <div class="output-card">
-      <h3>Gaze estimation</h3>
-      <p class="muted">Optional gaze categories and heatmap-based convergence metrics.</p>
-      <ul>
-        <li>Figure: gaze dashboard and snapshots when enabled</li>
-        <li>Table: gaze category proportions and convergence values</li>
-      </ul>
-    </div>
-  </div>
-</section>
-
-<section class="panel">
-  <h2>Jobs</h2>
-  <p><a href="/metrics/all_sessions.csv">Download all sessions table</a>
-  <span class="muted">(one row per session, camera, and block, for every processed session)</span></p>
-  <table>
-    <thead><tr><th>Job</th><th>Status</th><th>Message</th></tr></thead>
-    <tbody>{_job_rows()}</tbody>
-  </table>
-</section>
-
-<script>
-const CHUNK_SIZE = {CHUNK_SIZE_BYTES};
-const CSRF_TOKEN = "{html.escape(csrf_token, quote=True)}";
-const form = document.getElementById("upload-form");
-const logoutButton = document.getElementById("logout-button");
-const statusEl = document.getElementById("upload-status");
-const progressEl = document.getElementById("upload-progress");
-const dropZones = document.querySelectorAll(".file-drop-zone");
-let uploadInProgress = false;
-
-function setStatus(message) {{
-  statusEl.textContent = message;
-}}
-
-function formatBytes(bytes) {{
-  const gib = bytes / (1024 * 1024 * 1024);
-  if (gib >= 1) {{
-    return `${{gib.toFixed(2)}} GB`;
-  }}
-  return `${{(bytes / (1024 * 1024)).toFixed(1)}} MB`;
-}}
-
-function updateSelectedFile(input) {{
-  const label = document.getElementById(`${{input.id}}_selected`);
-  if (!label) {{
-    return;
-  }}
-  label.textContent = input.files.length ? input.files[0].name : "No file selected";
-}}
-
-logoutButton.addEventListener("click", async () => {{
-  await fetch("/logout", {{
-    method: "POST",
-    headers: {{"X-CSRF-Token": CSRF_TOKEN}},
-    credentials: "same-origin"
-  }});
-  window.location.href = "/login";
-}});
-
-dropZones.forEach((zone) => {{
-  const input = document.getElementById(zone.dataset.fileInput);
-  input.addEventListener("change", () => updateSelectedFile(input));
-
-  zone.addEventListener("click", () => input.click());
-  zone.addEventListener("keydown", (event) => {{
-    if (event.key === "Enter" || event.key === " ") {{
-      event.preventDefault();
-      input.click();
-    }}
-  }});
-  zone.addEventListener("dragover", (event) => {{
-    event.preventDefault();
-    zone.classList.add("dragover");
-  }});
-  zone.addEventListener("dragleave", () => {{
-    zone.classList.remove("dragover");
-  }});
-  zone.addEventListener("drop", (event) => {{
-    event.preventDefault();
-    zone.classList.remove("dragover");
-    if (!event.dataTransfer.files.length) {{
-      return;
-    }}
-    const transfer = new DataTransfer();
-    transfer.items.add(event.dataTransfer.files[0]);
-    input.files = transfer.files;
-    updateSelectedFile(input);
-  }});
-}});
-
-async function postFormData(url, formData) {{
-  const response = await fetch(url, {{
-    method: "POST",
-    body: formData,
-    headers: {{"X-CSRF-Token": CSRF_TOKEN}},
-    credentials: "same-origin"
-  }});
-  if (!response.ok) {{
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${{response.status}}`);
-  }}
-  return await response.json();
-}}
-
-function postChunkFormData(url, formData, onProgress) {{
-  return new Promise((resolve, reject) => {{
-    const request = new XMLHttpRequest();
-    request.open("POST", url);
-    request.withCredentials = true;
-    request.setRequestHeader("X-CSRF-Token", CSRF_TOKEN);
-    request.upload.onprogress = (event) => {{
-      if (event.lengthComputable) {{
-        onProgress(event.loaded, event.total);
-      }}
-    }};
-    request.onload = () => {{
-      if (request.status >= 200 && request.status < 300) {{
-        resolve(JSON.parse(request.responseText));
-        return;
-      }}
-      reject(new Error(request.responseText || `Request failed: ${{request.status}}`));
-    }};
-    request.onerror = () => reject(new Error("Network error during chunk upload."));
-    request.send(formData);
-  }});
-}}
-
-function updateUploadProgress(cameraId, cameraLabel, chunkNumber, totalChunks, visibleCameraBytes, uploadState) {{
-  uploadState[cameraId] = visibleCameraBytes;
-  const visibleBytes = uploadState.camera_a + uploadState.camera_b;
-  progressEl.value = Math.round((visibleBytes / uploadState.totalBytes) * 100);
-  setStatus(
-    `${{cameraLabel}}: uploading chunk ${{chunkNumber}} of ${{totalChunks}} ` +
-    `(${{formatBytes(visibleBytes)}} of ${{formatBytes(uploadState.totalBytes)}} total). Keep this tab open.`
-  );
-}}
-
-async function uploadCamera(jobId, cameraId, file, uploadState) {{
-  const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-  const cameraLabel = cameraId === "camera_a" ? "Video A" : "Video B";
-  let uploadedCameraBytes = 0;
-  for (let index = 0; index < totalChunks; index += 1) {{
-    const start = index * CHUNK_SIZE;
-    const end = Math.min(file.size, start + CHUNK_SIZE);
-    const chunk = file.slice(start, end);
-    const formData = new FormData();
-    formData.append("camera_id", cameraId);
-    formData.append("chunk_index", String(index));
-    formData.append("total_chunks", String(totalChunks));
-    formData.append("chunk", chunk, file.name);
-    setStatus(`${{cameraLabel}}: uploading chunk ${{index + 1}} of ${{totalChunks}}. Keep this tab open.`);
-    await postChunkFormData(`/uploads/${{jobId}}/chunk`, formData, (loaded) => {{
-      updateUploadProgress(
-        cameraId,
-        cameraLabel,
-        index + 1,
-        totalChunks,
-        uploadedCameraBytes + loaded,
-        uploadState
-      );
-    }});
-    uploadedCameraBytes += chunk.size;
-    updateUploadProgress(
-      cameraId,
-      cameraLabel,
-      index + 1,
-      totalChunks,
-      uploadedCameraBytes,
-      uploadState
-    );
-  }}
-}}
-
-window.addEventListener("beforeunload", (event) => {{
-  if (!uploadInProgress) {{
-    return;
-  }}
-  event.preventDefault();
-  event.returnValue = "";
-}});
-
-form.addEventListener("submit", async (event) => {{
-  event.preventDefault();
-  const submitButton = form.querySelector("button");
-  submitButton.disabled = true;
-  submitButton.textContent = "Uploading...";
-  uploadInProgress = true;
-  document.title = "Uploading videos";
-  progressEl.style.display = "block";
-  progressEl.value = 0;
-
-  try {{
-    const videoA = document.getElementById("video_a").files[0];
-    const videoB = document.getElementById("video_b").files[0];
-    const blocksA = document.getElementById("blocks_text_a").value.trim();
-    const blocksB = document.getElementById("blocks_text_b").value.trim();
-    if (!videoA && !videoB) {{
-      throw new Error("Upload at least one GoPro video.");
-    }}
-    if (videoA && !blocksA) {{
-      throw new Error("Video A analysis blocks are required when Video A is uploaded.");
-    }}
-    if (videoB && !blocksB) {{
-      throw new Error("Video B analysis blocks are required when Video B is uploaded.");
-    }}
-
-    const initData = new FormData(form);
-    initData.append("video_a_name", videoA ? videoA.name : "");
-    initData.append("video_b_name", videoB ? videoB.name : "");
-    initData.append("video_a_size", videoA ? String(videoA.size) : "0");
-    initData.append("video_b_size", videoB ? String(videoB.size) : "0");
-    initData.delete("video_a");
-    initData.delete("video_b");
-
-    setStatus("Creating upload job");
-    const init = await postFormData("/uploads/init", initData);
-    const totalBytes = (videoA ? videoA.size : 0) + (videoB ? videoB.size : 0);
-    const uploadState = {{ camera_a: 0, camera_b: 0, totalBytes }};
-    const uploadTasks = [];
-    if (videoA) {{
-      uploadTasks.push(uploadCamera(init.job_id, "camera_a", videoA, uploadState));
-    }}
-    if (videoB) {{
-      uploadTasks.push(uploadCamera(init.job_id, "camera_b", videoB, uploadState));
-    }}
-    await Promise.all(uploadTasks);
-
-    setStatus("Upload complete. Asking server to finalize chunks and start processing.");
-    document.title = "Processing queued";
-    const finish = await postFormData(`/uploads/${{init.job_id}}/finish`, new FormData());
-    uploadInProgress = false;
-    window.location.href = finish.status_url;
-  }} catch (error) {{
-    setStatus(`Upload failed: ${{error.message}}`);
-    submitButton.disabled = false;
-    submitButton.textContent = "Submit Processing Job";
-    uploadInProgress = false;
-    document.title = "Submit Job";
-  }}
-}});
-</script>""",
+        jobs=_job_rows(),
+        chunk_size=CHUNK_SIZE_BYTES,
+        csrf_token=csrf_token_for_session(session_token),
     )
 
 
@@ -1418,96 +1045,56 @@ def job_detail(
 ) -> HTMLResponse:
     """Render one job status page."""
     safe_job_id = _slug(job_id)
-    display_job_id = html.escape(safe_job_id, quote=True)
     job_dir = JOB_ROOT / safe_job_id
     status = read_status(job_dir)
-    state = html.escape(str(status.get("state", "unknown")), quote=True)
-    message = html.escape(str(status.get("message", "")), quote=True)
     result_zip = status.get("result_zip")
-    download = ""
-    if result_zip and Path(result_zip).exists():
-        download = (
-            f'<p class="cta"><a href="/jobs/{safe_job_id}/download">'
-            "Download results zip</a></p>"
-        )
-    annotate = ""
-    if status.get("state") == "awaiting_annotation":
-        annotate = (
-            '<p class="cta"><a class="button-link" '
-            f'href="/jobs/{safe_job_id}/annotate">'
-            "Label parent vs child to continue</a></p>"
-        )
-    refresh_script = ""
-    if status.get("state") in {"uploading", "queued", "running"}:
-        refresh_script = (
-            '<p class="muted">This page refreshes automatically while the job runs.</p>'
-            "<script>setTimeout(() => window.location.reload(), 10000);</script>"
-        )
-    coverage = _coverage_panel(job_dir)
-    if coverage:
-        coverage += (
-            f'<p><a href="/jobs/{safe_job_id}/gaze-label">Optional: label what '
-            "people are looking at</a> "
-            '<span class="muted">(helps us check gaze accuracy)</span></p>'
-        )
-    log_link = ""
-    if (job_dir / "job.log").exists():
-        log_link = f'<p><a href="/jobs/{safe_job_id}/log">View job log</a></p>'
-    return _html_page(
-        f"Job {display_job_id}",
-        f"""<section class="panel">
-  <h2>{display_job_id}</h2>
-  <p><strong>Status:</strong> {state}</p>
-  <p><strong>Message:</strong> {message}</p>
-  {annotate}
-  {download}
-  {coverage}
-  {log_link}
-  {refresh_script}
-  <p><a href="/">Back to jobs</a></p>
-</section>""",
+    return _render_page(
+        "job_detail.html",
+        f"Job {safe_job_id}",
+        job_id=safe_job_id,
+        state=str(status.get("state", "unknown")),
+        message=str(status.get("message", "")),
+        show_annotate=status.get("state") == "awaiting_annotation",
+        show_download=bool(result_zip and Path(result_zip).exists()),
+        coverage_rows=_coverage_rows(job_dir),
+        show_log_link=(job_dir / "job.log").exists(),
+        auto_refresh=status.get("state") in {"uploading", "queued", "running"},
     )
 
 
-def _coverage_panel(job_dir: Path) -> str:
+def _coverage_rows(job_dir: Path) -> list[dict[str, Any]] | None:
     """Summarize per-block tracking coverage for a finished job.
 
     Args:
         job_dir: Portal job directory.
 
     Returns:
-        HTML table, or an empty string when the job has no session table yet.
+        One dict per camera x block row (``camera_id``, ``block``,
+        ``coverage`` as a percent string, ``low``), or None when the job has
+        no session table yet.
     """
     import pandas as pd
 
     config_path = job_dir / "job_config.json"
     if not config_path.exists():
-        return ""
+        return None
     session_id = json.loads(config_path.read_text(encoding="utf-8")).get("session_id")
     metrics_path = OUTPUT_ROOT / str(session_id) / "session_metrics.csv"
     if not session_id or not metrics_path.exists():
-        return ""
+        return None
     table = pd.read_csv(metrics_path, dtype={"camera_id": str, "block": str})
-    rows = []
+    rows: list[dict[str, Any]] = []
     for row in table.itertuples():
         share = float(getattr(row, "coverage_both", 0) or 0)
-        low = bool(getattr(row, "low_coverage", share < 0.5))
-        note = (
-            '<span style="color:#c2410c;font-weight:600">Low: check the overlay clips</span>'
-            if low
-            else "OK"
-        )
         rows.append(
-            f"<tr><td>{html.escape(str(row.camera_id))}</td>"
-            f"<td>{html.escape(str(row.block))}</td><td>{share:.0%}</td><td>{note}</td></tr>"
+            {
+                "camera_id": str(row.camera_id),
+                "block": str(row.block),
+                "coverage": f"{share:.0%}",
+                "low": bool(getattr(row, "low_coverage", share < 0.5)),
+            }
         )
-    return (
-        "<h3>Both people tracked, per block</h3>"
-        '<p class="muted">Metrics use only frames where both people were found. '
-        "The zip's report.html has the full summary.</p>"
-        "<table><thead><tr><th>Camera</th><th>Block</th><th>Coverage</th><th></th>"
-        f"</tr></thead><tbody>{''.join(rows)}</tbody></table>"
-    )
+    return rows
 
 
 @app.get("/metrics/all_sessions.csv")
@@ -1560,147 +1147,6 @@ def _gaze_label_items(job_id: str) -> tuple[str, Path, dict[str, list[dict]]]:
     return safe_job_id, session_dir, items
 
 
-GAZE_LABEL_PAGE_JS = r"""(function () {
-  const D = JSON.parse(document.getElementById("gaze-data").textContent);
-  const COLORS = { parent: "#1f8a4c", child: "#d9730d" };
-  const NAMES = { parent: "Parent", child: "Child" };
-  const state = {}; // "cam|frame|person" -> {target, point}
-  for (const [cam, labels] of Object.entries(D.existing)) {
-    for (const l of labels) {
-      state[cam + "|" + l.frame_idx + "|" + l.person] = { target: l.target, point: l.point };
-    }
-  }
-  let armed = null;
-  const cards = document.getElementById("cards");
-
-  function progress() {
-    const total = Object.values(D.items).reduce((n, a) => n + a.length * 2, 0);
-    const done = Object.values(state).filter((v) => v.target).length;
-    document.getElementById("progress").textContent = done + " of " + total + " answers";
-  }
-
-  function clock(t) {
-    return Math.floor(t / 60) + ":" + String(Math.round(t % 60)).padStart(2, "0");
-  }
-
-  for (const [cam, items] of Object.entries(D.items)) {
-    const h = document.createElement("h3");
-    h.textContent = cam;
-    cards.appendChild(h);
-    items.forEach((it, i) => {
-      const card = document.createElement("div");
-      card.className = "gcard";
-      const cap = document.createElement("div");
-      cap.className = "muted";
-      cap.textContent =
-        cam + ", frame " + (i + 1) + " of " + items.length + " (" + it.block + ", " + clock(it.timestamp_s) + ")";
-      const canvas = document.createElement("canvas");
-      const img = new Image();
-      img.src = "/jobs/" + D.job + "/gaze-frames/" + cam + "/" + it.image_name;
-      function draw() {
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        const c = canvas.getContext("2d");
-        c.drawImage(img, 0, 0);
-        for (const p of ["parent", "child"]) {
-          const b = it.boxes[p];
-          if (!b) continue;
-          c.strokeStyle = COLORS[p];
-          c.lineWidth = 3;
-          c.strokeRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
-          const s = state[cam + "|" + it.frame_idx + "|" + p];
-          if (s && s.point) {
-            const x = s.point[0] * canvas.width;
-            const y = s.point[1] * canvas.height;
-            c.fillStyle = COLORS[p];
-            c.beginPath();
-            c.arc(x, y, 7, 0, 2 * Math.PI);
-            c.fill();
-            c.strokeStyle = "#fff";
-            c.lineWidth = 2;
-            c.stroke();
-          }
-        }
-      }
-      img.onload = draw;
-      canvas.addEventListener("click", (ev) => {
-        if (!armed || armed.card !== card) return;
-        const r = canvas.getBoundingClientRect();
-        const key = cam + "|" + it.frame_idx + "|" + armed.person;
-        state[key] = state[key] || {};
-        state[key].point = [(ev.clientX - r.left) / r.width, (ev.clientY - r.top) / r.height];
-        armed.button.classList.remove("armed");
-        armed = null;
-        draw();
-      });
-      card.append(cap, canvas);
-      for (const p of ["parent", "child"]) {
-        const row = document.createElement("div");
-        row.className = "grow";
-        const lab = document.createElement("strong");
-        lab.style.color = COLORS[p];
-        lab.textContent = NAMES[p] + " is looking at:";
-        row.appendChild(lab);
-        const key = cam + "|" + it.frame_idx + "|" + p;
-        const btns = [];
-        for (const [value, text] of Object.entries(D.targets)) {
-          const b = document.createElement("button");
-          b.type = "button";
-          b.textContent = text;
-          if (state[key] && state[key].target === value) b.classList.add("chosen");
-          b.onclick = () => {
-            state[key] = state[key] || {};
-            state[key].target = value;
-            btns.forEach((x) => x.classList.remove("chosen"));
-            b.classList.add("chosen");
-            progress();
-          };
-          btns.push(b);
-          row.appendChild(b);
-        }
-        const mark = document.createElement("button");
-        mark.type = "button";
-        mark.textContent = "Mark spot";
-        mark.onclick = () => {
-          if (armed) armed.button.classList.remove("armed");
-          armed = { card, person: p, button: mark };
-          mark.classList.add("armed");
-        };
-        row.appendChild(mark);
-        card.appendChild(row);
-      }
-      cards.appendChild(card);
-    });
-  }
-  progress();
-
-  document.getElementById("save").onclick = async () => {
-    const labels = {};
-    for (const [key, v] of Object.entries(state)) {
-      if (!v.target) continue;
-      const [cam, frame, person] = key.split("|");
-      const it = D.items[cam].find((x) => String(x.frame_idx) === frame);
-      (labels[cam] = labels[cam] || []).push({
-        frame_idx: Number(frame),
-        timestamp_s: it.timestamp_s,
-        person,
-        target: v.target,
-        point: v.point || null,
-      });
-    }
-    const status = document.getElementById("save-status");
-    status.textContent = "Saving...";
-    const res = await fetch("/jobs/" + D.job + "/gaze-labels", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-csrf-token": D.csrf },
-      body: JSON.stringify({ labeler: document.getElementById("labeler").value, labels }),
-    });
-    status.textContent = res.ok ? "Saved. Thank you!" : "Save failed: " + (await res.text());
-  };
-})();
-"""
-
-
 @app.get("/jobs/{job_id}/gaze-label", response_class=HTMLResponse)
 def gaze_label_page(
     job_id: str,
@@ -1717,39 +1163,20 @@ def gaze_label_page(
     payload = {
         "job": safe_job_id,
         "csrf": csrf,
+        "frames_url": f"/jobs/{safe_job_id}/gaze-frames/",
+        "save_url": f"/jobs/{safe_job_id}/gaze-labels",
         "items": items,
         "existing": existing,
         "targets": GAZE_TARGETS,
     }
-    data = json.dumps(payload).replace("</", "<\\/")
-    body = (
-        f"<h2>What are they looking at? ({html.escape(safe_job_id)})</h2>"
-        '<p class="muted">Optional, about 30&ndash;45 minutes. Your answers let us '
-        "check how accurate the automatic gaze results are on our own videos. "
-        "For each frame, choose what the "
-        '<strong style="color:#1f8a4c">parent (green box)</strong> and the '
-        '<strong style="color:#d9730d">child (orange box)</strong> are looking at. '
-        "If you can, also click <em>Mark spot</em> and then click the spot in the "
-        "image they are looking at. Skip anything you can&#39;t judge. You can save "
-        "and come back later.</p>"
-        '<p><label>Your initials <input id="labeler" style="width:6em"></label> '
-        '<span id="progress" class="muted"></span></p>'
-        '<div id="cards"></div>'
-        '<p><button id="save" class="cta" type="button">Save labels</button> '
-        '<span id="save-status" class="muted"></span></p>'
-        f'<script id="gaze-data" type="application/json">{data}</script>'
-        "<style>"
-        ".gcard{border:1px solid #d9dee7;border-radius:8px;padding:8px;margin:12px 0}"
-        ".gcard canvas{width:100%;max-width:854px;cursor:crosshair;display:block}"
-        ".grow{margin:6px 0;display:flex;flex-wrap:wrap;gap:6px;align-items:center}"
-        ".grow button{padding:4px 8px;border:1px solid #9aa3b2;background:#fff;"
-        "border-radius:6px;color:#1d2433}"
-        ".grow button.chosen{background:#1d2433;color:#fff}"
-        ".grow button.armed{outline:3px solid #f2b705}"
-        "</style>"
-        f"<script>{GAZE_LABEL_PAGE_JS}</script>"
+    # The template embeds ``payload`` with ``|script_json``, which escapes
+    # < > & so nothing in the data can close the <script> block.
+    return _render_page(
+        "gaze_label.html",
+        f"Gaze labels {safe_job_id}",
+        job_id=safe_job_id,
+        payload=payload,
     )
-    return _html_page(f"Gaze labels {safe_job_id}", body)
 
 
 @app.get("/jobs/{job_id}/gaze-frames/{camera_id}/{image_name}")
@@ -1827,8 +1254,7 @@ def job_log(
     if not log_path.exists():
         raise HTTPException(status_code=404, detail="Log not available")
     text = log_path.read_text(encoding="utf-8", errors="replace")
-    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return _html_page("Job Log", f"<pre>{escaped}</pre>")
+    return _render_page("job_log.html", "Job Log", log_text=text)
 
 
 def _read_anchor_manifests(job_dir: Path) -> dict[str, list[dict[str, Any]]]:
@@ -1933,123 +1359,36 @@ def annotate_job(
         raise HTTPException(
             status_code=404, detail="No anchor frames available for this job"
         )
-    # The annotate page is GET-only HTML; the form's POST uses the existing
-    # require_csrf machinery via the CSRF_TOKEN constant injected into the
-    # inline script (computed below from the active session).
-    sections: list[str] = []
+    cameras: list[dict[str, Any]] = []
     for camera_id, manifest in manifests.items():
-        cards: list[str] = []
+        cards: list[dict[str, Any]] = []
         for entry in manifest:
-            anchor_idx = int(entry["anchor_idx"])
-            img_filename = html.escape(str(entry["image_filename"]), quote=True)
-            ts = float(entry.get("timestamp_s", 0.0))
-            buttons: list[str] = []
+            tracks = []
             for track in entry.get("tracks", []):
-                tid = int(track["track_id"])
                 bgr = track.get("color_bgr", [0, 0, 0])
-                # convert BGR list to CSS rgb()
-                r, g, b = int(bgr[2]), int(bgr[1]), int(bgr[0])
-                buttons.append(
-                    f'<button type="button" class="track-btn" '
-                    f'data-anchor="{anchor_idx}" data-camera="{camera_id}" '
-                    f'data-parent="{tid}" '
-                    f'style="border: 3px solid rgb({r},{g},{b}); '
-                    f'background: rgba({r},{g},{b},0.12); color: #17202a;">'
-                    f"Track {tid} is parent"
-                    f"</button>"
-                )
-            buttons.append(
-                f'<button type="button" class="skip-btn" '
-                f'data-anchor="{anchor_idx}" data-camera="{camera_id}">'
-                "Skip (neither is the parent here)"
-                "</button>"
-            )
+                # Manifest colors are OpenCV BGR; CSS wants r,g,b.
+                rgb = f"{int(bgr[2])},{int(bgr[1])},{int(bgr[0])}"
+                tracks.append({"track_id": int(track["track_id"]), "rgb": rgb})
             cards.append(
-                f'<figure class="anchor-card" '
-                f'data-anchor="{anchor_idx}" data-camera="{camera_id}">'
-                f'<img src="/jobs/{safe_job_id}/anchors/{camera_id}/{img_filename}" '
-                f'alt="anchor {anchor_idx}" loading="lazy">'
-                f'<figcaption>frame {entry["frame_idx"]} '
-                f"(t={ts:.2f}s)</figcaption>"
-                f'<div class="anchor-buttons">{"".join(buttons)}</div>'
-                f'<div class="anchor-state muted">unlabeled</div>'
-                f"</figure>"
+                {
+                    "anchor_idx": int(entry["anchor_idx"]),
+                    "image_filename": str(entry["image_filename"]),
+                    "frame_idx": entry["frame_idx"],
+                    "timestamp": f"{float(entry.get('timestamp_s', 0.0)):.2f}",
+                    "tracks": tracks,
+                }
             )
-        sections.append(
-            f'<section class="camera-anchors">'
-            f"<h3>{html.escape(camera_id)}</h3>"
-            f'<div class="anchor-grid">{"".join(cards)}</div>'
-            f"</section>"
-        )
-    page_body = (
-        f"<h2>Label parent vs child — {html.escape(safe_job_id)}</h2>"
-        "<p class='muted'>For each frame, click the box around the parent. "
-        "If neither tracked person is the parent (e.g., an experimenter is "
-        "visible), click Skip. You don't have to label every frame, but more "
-        "anchors give better coverage.</p>"
-        f"<form id='annotate-form' method='POST' "
-        f"action='/jobs/{safe_job_id}/annotations' "
-        "data-empty-allowed='no'>"
-        f"{''.join(sections)}"
-        "<p><button type='submit' class='cta'>"
-        "Submit annotations and continue processing</button></p>"
-        "</form>"
-        "<script>"
-        "(function(){"
-        "const state={};"
-        "function setBtnState(card, choice){"
-        "  card.querySelectorAll('button').forEach(b=>b.classList.remove('chosen'));"
-        "  if(choice) choice.classList.add('chosen');"
-        "  card.querySelector('.anchor-state').textContent="
-        "    choice ? (choice.classList.contains('skip-btn') ? 'skipped' :"
-        "             'parent='+choice.dataset.parent) : 'unlabeled';"
-        "}"
-        "document.querySelectorAll('.anchor-card').forEach(card=>{"
-        "  card.querySelectorAll('.track-btn').forEach(btn=>{"
-        "    btn.addEventListener('click',()=>{"
-        "      const cam=btn.dataset.camera, idx=btn.dataset.anchor, "
-        "            parent=parseInt(btn.dataset.parent,10);"
-        "      const others=Array.from(card.querySelectorAll('.track-btn'))"
-        "        .map(b=>parseInt(b.dataset.parent,10)).filter(t=>t!==parent);"
-        "      state[cam]=state[cam]||{};"
-        "      state[cam][idx]={anchor_idx:parseInt(idx,10),"
-        "                       parent_track_id:parent,"
-        "                       child_track_id:others[0]};"
-        "      setBtnState(card,btn);"
-        "    });"
-        "  });"
-        "  const skip=card.querySelector('.skip-btn');"
-        "  if(skip){"
-        "    skip.addEventListener('click',()=>{"
-        "      const cam=skip.dataset.camera, idx=skip.dataset.anchor;"
-        "      state[cam]=state[cam]||{};"
-        "      state[cam][idx]={anchor_idx:parseInt(idx,10),skipped:true};"
-        "      setBtnState(card,skip);"
-        "    });"
-        "  }"
-        "});"
-        "document.getElementById('annotate-form').addEventListener('submit',async ev=>{"
-        "  ev.preventDefault();"
-        "  const payload={};"
-        "  Object.keys(state).forEach(cam=>{"
-        "    payload[cam]=Object.values(state[cam]);"
-        "  });"
-        "  const res=await fetch(ev.target.action,{"
-        "    method:'POST',"
-        "    headers:{'Content-Type':'application/json','x-csrf-token':CSRF_TOKEN},"
-        "    body:JSON.stringify({annotations:payload})"
-        "  });"
-        "  if(res.ok){window.location='/jobs/'+"
-        f"'{safe_job_id}'"
-        ";}"
-        "  else{const t=await res.text(); alert('Submit failed: '+t);}"
-        "});"
-        "})();"
-        "</script>"
-    )
+        cameras.append({"camera_id": camera_id, "cards": cards})
+    # The page is GET-only; the form's POST goes through require_csrf, so the
+    # token is handed to annotate.js through a data attribute on the form.
     csrf = csrf_token_for_session(_require_session_or_redirect_passthrough())
-    page_body = page_body.replace("CSRF_TOKEN", f'"{csrf}"', 1)
-    return _html_page(f"Annotate {safe_job_id}", page_body)
+    return _render_page(
+        "annotate.html",
+        f"Annotate {safe_job_id}",
+        job_id=safe_job_id,
+        cameras=cameras,
+        csrf_token=csrf,
+    )
 
 
 @app.post("/jobs/{job_id}/annotations")

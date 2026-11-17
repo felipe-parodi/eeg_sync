@@ -628,6 +628,7 @@ name = "eeg-video-sync"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "jinja2" },
     { name = "matplotlib" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -685,6 +686,7 @@ requires-dist = [
     { name = "eeg-video-sync", extras = ["video", "pose3d", "gaze"], marker = "extra == 'portal'" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.115.0" },
     { name = "fastapi", marker = "extra == 'portal'", specifier = ">=0.115.0" },
+    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "matplotlib", specifier = ">=3.7.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "numpy", specifier = ">=1.24.0" },

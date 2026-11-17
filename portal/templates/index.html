@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% macro info_icon(text) %}<span class="info-icon" title="{{ text }}">?</span>{% endmacro %}
+{% block body %}<div class="top-actions"><button id="logout-button" type="button">Log out</button></div>
+
+<form id="upload-form">
+  <label for="session_id">Session ID {{ info_icon("Use the participant/session name that should appear on outputs.") }}</label>
+  <input id="session_id" name="session_id" type="text" required placeholder="P001c">
+
+  <div class="warning"><strong>Upload at least one GoPro video.</strong> Video A and Video B are both supported, but one camera can be omitted when only one recording is available.</div>
+
+  <label for="video_a">GoPro Video A {{ info_icon("Optional. Upload the first GoPro angle if available.") }}</label>
+  <div class="file-drop-zone" data-file-input="video_a" tabindex="0">
+    <strong>Drop GoPro Video A here</strong>
+    <span class="muted">or click to choose a file</span>
+    <span id="video_a_selected" class="muted file-name">No file selected</span>
+  </div>
+  <input id="video_a" class="file-input-native" name="video_a" type="file" accept=".mov,.mp4,.avi,.mkv,.m4v">
+
+  <label for="video_b">GoPro Video B {{ info_icon("Optional. Upload the second GoPro angle if available.") }}</label>
+  <div class="file-drop-zone" data-file-input="video_b" tabindex="0">
+    <strong>Drop GoPro Video B here</strong>
+    <span class="muted">or click to choose a file</span>
+    <span id="video_b_selected" class="muted file-name">No file selected</span>
+  </div>
+  <input id="video_b" class="file-input-native" name="video_b" type="file" accept=".mov,.mp4,.avi,.mkv,.m4v">
+
+  <label for="blocks_text_a">Video A Analysis Blocks {{ info_icon("Required when Video A is uploaded. These windows are the only Video A times processed.") }}</label>
+  <textarea id="blocks_text_a" name="blocks_text_a" placeholder="free_play,13:26,23:40,green&#10;storybook,29:22,37:06,blue"></textarea>
+  <div class="muted">One block per line: name,start,end[,color]. Times may be seconds, MM:SS, or HH:MM:SS.</div>
+
+  <label for="blocks_text_b">Video B Analysis Blocks {{ info_icon("Required when Video B is uploaded. Use the same format as Video A.") }}</label>
+  <textarea id="blocks_text_b" name="blocks_text_b" placeholder="free_play,13:26,23:40,green&#10;storybook,29:22,37:06,blue"></textarea>
+  <div class="muted">Leave blank only if Video B is not uploaded.</div>
+
+  <label for="exclusions_text_a">Video A Extra-Person Windows {{ info_icon("Optional. Times when someone else is in view, in Video A's own time. Removed from Video A only.") }}</label>
+  <textarea id="exclusions_text_a" name="exclusions_text_a" placeholder="8:14,8:42,experimenter entered"></textarea>
+  <div class="muted">One window per line: start,end,reason. Use Video A's timestamps.</div>
+
+  <label for="exclusions_text_b">Video B Extra-Person Windows {{ info_icon("Optional. Same as above, in Video B's own time. Removed from Video B only.") }}</label>
+  <textarea id="exclusions_text_b" name="exclusions_text_b" placeholder="7:02,7:30,experimenter entered"></textarea>
+  <div class="muted">Video B's clock differs from Video A's, so enter the times as they appear in Video B.</div>
+
+  <label><input name="include_gaze" type="checkbox" value="yes"> Run gaze analysis {{ info_icon("Optional. Adds gaze heatmaps and gaze metrics after pose tracking.") }}</label>
+  <button type="submit">Submit Processing Job</button>
+  <p id="upload-status" class="muted"></p>
+  <progress id="upload-progress" value="0" max="100" style="width: 100%; display: none;"></progress>
+</form>
+
+<section class="panel">
+  <h2>Result Figures And Tables</h2>
+  <div class="output-grid">
+    <div class="output-card">
+      <h3>Proximity</h3>
+      <p class="muted">Parent-child torso distance inside each valid analysis block.</p>
+      <ul>
+        <li>Figure: proximity over time and block comparison</li>
+        <li>Table: per-frame torso distance and per-block summary</li>
+      </ul>
+    </div>
+    <div class="output-card">
+      <h3>Movement synchrony</h3>
+      <p class="muted">Windowed movement cross-correlation between parent and child tracks.</p>
+      <ul>
+        <li>Figure: synchrony strength and lead-lag summary</li>
+        <li>Table: peak correlation and lag per window</li>
+      </ul>
+    </div>
+    <div class="output-card">
+      <h3>Gaze estimation</h3>
+      <p class="muted">Optional gaze categories and heatmap-based convergence metrics.</p>
+      <ul>
+        <li>Figure: gaze dashboard and snapshots when enabled</li>
+        <li>Table: gaze category proportions and convergence values</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Jobs</h2>
+  <p><a href="/metrics/all_sessions.csv">Download all sessions table</a>
+  <span class="muted">(one row per session, camera, and block, for every processed session)</span></p>
+  <table>
+    <thead><tr><th>Job</th><th>Status</th><th>Message</th></tr></thead>
+    <tbody>{% for job in jobs %}<tr><td><a href="/jobs/{{ job.job_id }}">{{ job.job_id }}</a></td><td>{{ job.state }}</td><td>{{ job.message }}</td></tr>{% if not loop.last %}
+{% endif %}{% else %}<tr><td colspan="3" class="muted">No jobs yet.</td></tr>{% endfor %}</tbody>
+  </table>
+</section>
+
+<script>
+const CHUNK_SIZE = {{ chunk_size }};
+const CSRF_TOKEN = "{{ csrf_token }}";
+</script>
+<script src="/static/index.js"></script>{% endblock %}

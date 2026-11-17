@@ -1,0 +1,145 @@
+/* Shared portal stylesheet (every page). */
+:root {
+  color-scheme: light;
+  font-family: Arial, sans-serif;
+  background: #f6f7f9;
+  color: #17202a;
+}
+body { margin: 0; }
+header {
+  background: #143642;
+  color: white;
+  padding: 16px 24px;
+  font-size: 18px;
+  font-weight: 700;
+}
+main {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 24px;
+}
+form, .panel {
+  background: white;
+  border: 1px solid #d9dee5;
+  border-radius: 6px;
+  padding: 20px;
+  margin-bottom: 18px;
+}
+label {
+  display: block;
+  font-weight: 700;
+  margin-top: 14px;
+  margin-bottom: 6px;
+}
+.info-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  border-radius: 50%;
+  border: 1px solid #8da0b3;
+  color: #176b87;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: help;
+}
+input, textarea, button {
+  font: inherit;
+  box-sizing: border-box;
+}
+input[type="text"], input[type="email"], input[type="password"], input[type="file"], textarea {
+  width: 100%;
+  border: 1px solid #b9c1cc;
+  border-radius: 4px;
+  padding: 10px;
+  background: white;
+}
+input.file-input-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+textarea { min-height: 120px; resize: vertical; }
+.file-drop-zone {
+  border: 2px dashed #8da0b3;
+  border-radius: 6px;
+  padding: 18px;
+  background: #f9fbfc;
+  cursor: pointer;
+}
+.file-drop-zone strong, .file-drop-zone span {
+  display: block;
+}
+.file-drop-zone.dragover {
+  border-color: #176b87;
+  background: #eef8fb;
+}
+.file-name {
+  margin-top: 8px;
+}
+button {
+  border: 0;
+  border-radius: 4px;
+  background: #176b87;
+  color: white;
+  padding: 11px 16px;
+  margin-top: 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.button-link {
+  display: inline-block;
+  border-radius: 4px;
+  background: #176b87;
+  color: white;
+  padding: 11px 16px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.top-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+.top-actions button { margin-top: 0; }
+table { width: 100%; border-collapse: collapse; background: white; }
+th, td { border-bottom: 1px solid #d9dee5; padding: 10px; text-align: left; }
+.muted { color: #5d6d7e; font-size: 14px; }
+.warning {
+  border-left: 4px solid #c77700;
+  background: #fff8ec;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+}
+.error { color: #9b1c1c; font-weight: 700; }
+.output-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+.output-card {
+  border: 1px solid #d9dee5;
+  border-radius: 6px;
+  padding: 12px;
+  background: #fbfcfd;
+}
+.output-card h3 {
+  margin: 0 0 8px 0;
+  font-size: 16px;
+}
+.output-card ul {
+  margin: 8px 0 0 18px;
+  padding: 0;
+}
+
+/* Gaze labeling page (/jobs/{id}/gaze-label). */
+.gcard{border:1px solid #d9dee7;border-radius:8px;padding:8px;margin:12px 0}
+.gcard canvas{width:100%;max-width:854px;cursor:crosshair;display:block}
+.grow{margin:6px 0;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.grow button{padding:4px 8px;border:1px solid #9aa3b2;background:#fff;border-radius:6px;color:#1d2433}
+.grow button.chosen{background:#1d2433;color:#fff}
+.grow button.armed{outline:3px solid #f2b705}

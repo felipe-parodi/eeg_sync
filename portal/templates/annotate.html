@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block body %}<h2>Label parent vs child — {{ job_id }}</h2><p class='muted'>For each frame, click the box around the parent. If neither tracked person is the parent (e.g., an experimenter is visible), click Skip. You don't have to label every frame, but more anchors give better coverage.</p><form id='annotate-form' method='POST' action='/jobs/{{ job_id }}/annotations' data-empty-allowed='no' data-job-id="{{ job_id }}" data-csrf-token="{{ csrf_token }}">
+{%- for camera in cameras -%}
+<section class="camera-anchors"><h3>{{ camera.camera_id }}</h3><div class="anchor-grid">
+{%- for card in camera.cards -%}
+<figure class="anchor-card" data-anchor="{{ card.anchor_idx }}" data-camera="{{ camera.camera_id }}"><img src="/jobs/{{ job_id }}/anchors/{{ camera.camera_id }}/{{ card.image_filename }}" alt="anchor {{ card.anchor_idx }}" loading="lazy"><figcaption>frame {{ card.frame_idx }} (t={{ card.timestamp }}s)</figcaption><div class="anchor-buttons">
+{%- for track in card.tracks -%}
+<button type="button" class="track-btn" data-anchor="{{ card.anchor_idx }}" data-camera="{{ camera.camera_id }}" data-parent="{{ track.track_id }}" style="border: 3px solid rgb({{ track.rgb }}); background: rgba({{ track.rgb }},0.12); color: #17202a;">Track {{ track.track_id }} is parent</button>
+{%- endfor -%}
+<button type="button" class="skip-btn" data-anchor="{{ card.anchor_idx }}" data-camera="{{ camera.camera_id }}">Skip (neither is the parent here)</button></div><div class="anchor-state muted">unlabeled</div></figure>
+{%- endfor -%}
+</div></section>
+{%- endfor -%}
+<p><button type='submit' class='cta'>Submit annotations and continue processing</button></p></form><script src="/static/annotate.js"></script>{% endblock %}
