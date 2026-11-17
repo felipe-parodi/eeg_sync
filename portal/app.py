@@ -38,6 +38,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from .jobs import (
+    JOB_STAGES,
     MIN_PART_S,
     PORTAL_DEFAULT_FRAME_RATE,
     PORTAL_DEFAULT_MAX_PERSONS,
@@ -48,11 +49,14 @@ from .jobs import (
     ExclusionWindow,
     PortalJobConfig,
     SessionBlock,
+    describe_step,
+    failed_status,
     final_upload_path_for,
     format_clock,
     mark_chunk_received,
     parse_timecode,
     probe_video_duration,
+    read_job_notes,
     read_status,
     resume_portal_job_phase2,
     run_portal_job,
@@ -90,6 +94,9 @@ LOGIN_FAILURES: dict[str, list[float]] = {}
 # This is intentionally process-local. Run the portal as a single uvicorn
 # worker; multiple workers would each have their own GPU job lock.
 JOB_RUN_LOCK = threading.Lock()
+# Held while a labels submission checks the job is waiting and marks it
+# queued, so two quick submits can never both start phase 2.
+ANNOTATION_SUBMIT_LOCK = threading.Lock()
 
 
 def validate_startup_configuration() -> None:
@@ -835,11 +842,13 @@ def _run_with_job_lock(job_dir: Path, action: Callable[[], None]) -> None:
     """Run one processing action after acquiring the in-process GPU job lock."""
     acquired = JOB_RUN_LOCK.acquire(blocking=False)
     if not acquired:
+        stage = read_status(job_dir).get("stage") or "upload"
         write_status(
             job_dir,
             {
                 "state": "queued",
-                "message": "Waiting for the currently running GPU job to finish.",
+                "message": "Waiting for another job to finish first.",
+                "stage": stage,
                 "current_step": "queued",
             },
         )
@@ -848,6 +857,26 @@ def _run_with_job_lock(job_dir: Path, action: Callable[[], None]) -> None:
         action()
     finally:
         JOB_RUN_LOCK.release()
+
+
+def _record_background_failure(job_dir: Path, error: BaseException, phase: int) -> None:
+    """Mark a job failed with a plain message, keeping a richer one.
+
+    The pipeline functions already write a failed status naming the step that
+    stopped; that one is kept. Otherwise the step comes from the last status.
+
+    Args:
+        job_dir: Job working directory.
+        error: The exception that stopped the job.
+        phase: Pipeline phase (1 before labeling, 2 after).
+    """
+    status = read_status(job_dir)
+    if status.get("state") == "failed" and status.get("error"):
+        return
+    write_status(
+        job_dir,
+        failed_status(status.get("current_step"), error, phase=phase),
+    )
 
 
 def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) -> None:
@@ -879,14 +908,7 @@ def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) ->
 
         _run_with_job_lock(job_dir, action)
     except Exception as error:
-        write_status(
-            job_dir,
-            {
-                "state": "failed",
-                "message": str(error),
-                "current_step": None,
-            },
-        )
+        _record_background_failure(job_dir, error, phase=1)
         log_path = job_dir / "job.log"
         print(
             f"Job {safe_job_id} failed. See {log_path} for the full subprocess log.",
@@ -916,15 +938,7 @@ def resume_portal_job_phase2_background(safe_job_id: str, job_dir: Path) -> None
 
         _run_with_job_lock(job_dir, action)
     except Exception as error:
-        write_status(
-            job_dir,
-            {
-                "state": "failed",
-                "message": str(error),
-                "current_step": None,
-                "phase": 2,
-            },
-        )
+        _record_background_failure(job_dir, error, phase=2)
         log_path = job_dir / "job.log"
         print(
             f"Job {safe_job_id} phase 2 failed. See {log_path}.",
@@ -1601,8 +1615,9 @@ async def init_chunked_upload(
             job_dir,
             {
                 "state": "uploading",
-                "message": "Waiting for video chunks.",
-                "current_step": "upload",
+                "message": "Receiving the videos.",
+                "stage": "upload",
+                "current_step": "uploading",
             },
         )
         return JSONResponse(
@@ -1724,7 +1739,12 @@ async def finish_chunked_upload(
         except Exception as error:
             write_status(
                 job_dir,
-                {"state": "failed", "message": str(error), "current_step": None},
+                {
+                    "state": "failed",
+                    "message": str(error),
+                    "stage": "upload",
+                    "current_step": None,
+                },
             )
             raise
         for camera_id, duration_s in durations.items():
@@ -1737,7 +1757,8 @@ async def finish_chunked_upload(
             job_dir,
             {
                 "state": "queued",
-                "message": "Upload complete. Finalizing videos will start now.",
+                "message": "Upload complete. Processing starts shortly.",
+                "stage": "upload",
                 "current_step": "queued",
             },
         )
@@ -1753,6 +1774,118 @@ async def finish_chunked_upload(
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+# Job states the page keeps polling for; any other state is final for now.
+POLLING_JOB_STATES = frozenset({"uploading", "queued", "running"})
+# Lines of job.log shown under "Show technical details" on a failed job.
+FAILURE_LOG_LINES = 30
+
+
+def job_stage_rows(status: dict[str, Any]) -> list[dict[str, str]]:
+    """Return the job page's stage list with each stage's progress.
+
+    Args:
+        status: The job's ``status.json`` payload.
+
+    Returns:
+        One dict per ``JOB_STAGES`` entry with ``key``, ``label`` and
+        ``status`` (``done``, ``current``, ``failed`` or ``todo``).
+    """
+    state = str(status.get("state", ""))
+    stage = str(
+        status.get("stage") or describe_step(status.get("current_step"))["stage"]
+    )
+    if state == "awaiting_annotation":
+        stage = "label_parent"
+    keys = [key for key, _ in JOB_STAGES]
+    current = keys.index(stage) if stage in keys else -1
+    rows = []
+    for index, (key, label) in enumerate(JOB_STAGES):
+        if state == "complete" or index < current:
+            progress = "done"
+        elif index == current:
+            progress = "failed" if state == "failed" else "current"
+        else:
+            progress = "todo"
+        rows.append({"key": key, "label": label, "status": progress})
+    return rows
+
+
+def _log_tail(job_dir: Path, lines: int = FAILURE_LOG_LINES) -> str:
+    """Return the last lines of a job's log (empty when there is no log).
+
+    Args:
+        job_dir: Job working directory.
+        lines: How many lines to keep.
+
+    Returns:
+        The log tail as one string.
+    """
+    log_path = job_dir / "job.log"
+    if not log_path.exists():
+        return ""
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    return "\n".join(text.rstrip().splitlines()[-lines:])
+
+
+def job_status_view(job_id: str, job_dir: Path) -> dict[str, Any]:
+    """Build the job status shown on the job page and in ``status.json``.
+
+    Args:
+        job_id: Sanitized job id.
+        job_dir: Job working directory.
+
+    Returns:
+        JSON-safe dict with ``job_id``, ``state``, ``chip_kind``,
+        ``chip_label``, plain ``message``, ``stage``, ``stages``, per-video
+        ``cameras`` messages, ``notes``, ``polling``, ``annotate_url`` (only
+        while waiting for labels) and, for a failed job, ``error`` and
+        ``log_tail``.
+    """
+    status = read_status(job_dir)
+    state = str(status.get("state", "unknown"))
+    kind, label = job_state_chip(state)
+    cameras = status.get("cameras") if state == "running" else None
+    message = str(status.get("message", ""))
+    if cameras and len(cameras) > 1:
+        # Each video's step is listed under the headline.
+        message = "Working on both videos at the same time."
+    view: dict[str, Any] = {
+        "job_id": job_id,
+        "state": state,
+        "chip_kind": kind,
+        "chip_label": label,
+        "message": message,
+        "stage": str(status.get("stage") or ""),
+        "stages": job_stage_rows(status),
+        "cameras": [
+            {"video": VIDEO_LABELS.get(str(cid), str(cid)), "message": str(msg)}
+            for cid, msg in (cameras or {}).items()
+        ],
+        "notes": read_job_notes(job_dir),
+        "polling": state in POLLING_JOB_STATES,
+        "annotate_url": (
+            f"/jobs/{job_id}/annotate" if state == "awaiting_annotation" else None
+        ),
+    }
+    if state == "failed":
+        view["error"] = str(status.get("error", ""))
+        view["log_tail"] = _log_tail(job_dir)
+    return view
+
+
+@app.get("/jobs/{job_id}/status.json")
+def job_status_json(
+    job_id: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> JSONResponse:
+    """Return the job's current status for the job page to poll."""
+    safe_job_id = _slug(job_id)
+    job_dir = JOB_ROOT / safe_job_id
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JSONResponse(job_status_view(safe_job_id, job_dir))
+
+
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 def job_detail(
     job_id: str,
@@ -1762,25 +1895,22 @@ def job_detail(
     safe_job_id = _slug(job_id)
     job_dir = JOB_ROOT / safe_job_id
     status = read_status(job_dir)
+    view = job_status_view(safe_job_id, job_dir)
     result_zip = status.get("result_zip")
-    is_complete = status.get("state") == "complete"
+    is_complete = view["state"] == "complete"
     return _render_page(
         "job_detail.html",
         f"Job {safe_job_id}",
         session_token=session_token,
+        job=view,
         job_id=safe_job_id,
-        state=str(status.get("state", "unknown")),
-        chip_kind=job_state_chip(str(status.get("state", "unknown")))[0],
-        chip_label=job_state_chip(str(status.get("state", "unknown")))[1],
-        message=str(status.get("message", "")),
-        show_annotate=status.get("state") == "awaiting_annotation",
+        show_annotate=view["annotate_url"] is not None,
         show_download=bool(result_zip and Path(result_zip).exists()),
         # A new or failed run must not show an earlier run's table.
         coverage_rows=_coverage_rows(job_dir) if is_complete else None,
         dropped_parts=_dropped_part_rows(job_dir),
         min_part_s=f"{MIN_PART_S:g}",
         show_log_link=(job_dir / "job.log").exists(),
-        auto_refresh=status.get("state") in {"uploading", "queued", "running"},
     )
 
 
@@ -2154,7 +2284,12 @@ async def submit_annotations(
     request: Request,
     _csrf: Annotated[str, Depends(require_csrf)],
 ) -> JSONResponse:
-    """Accept the colleague's anchor labels, then trigger phase 2."""
+    """Accept the colleague's anchor labels, then trigger phase 2.
+
+    Labels are taken only while the job is waiting for them; any other state
+    (queued, running, complete, failed), an empty submission, or a second
+    submit returns 409 with a plain message, so phase 2 starts once.
+    """
     safe_job_id = _slug(job_id)
     job_dir = JOB_ROOT / safe_job_id
     if not job_dir.exists():
@@ -2165,38 +2300,77 @@ async def submit_annotations(
             status_code=400, detail="No anchor frames to label for this job"
         )
     body = await request.json()
-    annotations = body.get("annotations") or {}
+    annotations = body.get("annotations") if isinstance(body, dict) else None
+    annotations = annotations or {}
     if not isinstance(annotations, dict):
         raise HTTPException(status_code=400, detail="annotations must be a JSON object")
-
-    for camera_id, entries in annotations.items():
-        if camera_id not in manifests:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown camera: {camera_id}",
-            )
-        if not isinstance(entries, list):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{camera_id} annotations must be a list",
-            )
-        converted = _convert_anchor_submission_to_filter_format(
-            entries, manifests[camera_id]
+    if not any(isinstance(v, list) and v for v in annotations.values()):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No frames were labeled. Mark the parent (or skip) on at "
+                "least one frame, then submit again."
+            ),
         )
-        out_path = job_dir / "anchors" / _slug(camera_id) / "anchors.json"
-        out_path.write_text(json.dumps(converted, indent=2), encoding="utf-8")
 
-    write_status(
-        job_dir,
-        {
-            "state": "queued",
-            "message": "Annotations received; phase 2 queued.",
-            "current_step": "phase 2 queued",
-            "phase": 2,
-        },
-    )
+    with ANNOTATION_SUBMIT_LOCK:
+        state = str(read_status(job_dir).get("state", ""))
+        if state != "awaiting_annotation":
+            raise HTTPException(
+                status_code=409, detail=_not_waiting_for_labels_message(state)
+            )
+        converted_by_camera: dict[str, list[dict[str, Any]]] = {}
+        for camera_id, entries in annotations.items():
+            if camera_id not in manifests:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown camera: {camera_id}",
+                )
+            if not isinstance(entries, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{camera_id} annotations must be a list",
+                )
+            converted_by_camera[camera_id] = (
+                _convert_anchor_submission_to_filter_format(
+                    entries, manifests[camera_id]
+                )
+            )
+        for camera_id, converted in converted_by_camera.items():
+            out_path = job_dir / "anchors" / _slug(camera_id) / "anchors.json"
+            out_path.write_text(json.dumps(converted, indent=2), encoding="utf-8")
+        write_status(
+            job_dir,
+            {
+                "state": "queued",
+                "message": describe_step("phase 2 queued")["message"],
+                "stage": "track_refine",
+                "current_step": "phase 2 queued",
+                "phase": 2,
+            },
+        )
     background_tasks.add_task(resume_portal_job_phase2_background, safe_job_id, job_dir)
     return JSONResponse({"job_id": safe_job_id, "status_url": f"/jobs/{safe_job_id}"})
+
+
+def _not_waiting_for_labels_message(state: str) -> str:
+    """Plain reason a labels submission was refused.
+
+    Args:
+        state: The job's current state.
+
+    Returns:
+        One or two short sentences for the person labeling.
+    """
+    reasons = {
+        "queued": "Labels for this job were already received.",
+        "running": "This job is already running with the labels it received.",
+        "complete": "This job is already finished.",
+        "failed": "This job stopped with an error.",
+        "uploading": "This job is still uploading.",
+    }
+    reason = reasons.get(state, "This job is not waiting for labels.")
+    return f"{reason} Nothing was changed. Go back to the job page to see where it is."
 
 
 def main() -> None:

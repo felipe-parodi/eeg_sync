@@ -127,7 +127,10 @@ def test_run_chunked_portal_job_records_failure_and_does_not_raise(
 
     status = json.loads((job_dir / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "failed"
-    assert "simulated subprocess failure" in status["message"]
+    # The raw error goes to the technical details, not the headline.
+    assert "simulated subprocess failure" in status["error"]
+    assert "simulated subprocess failure" not in status["message"]
+    assert status["message"].startswith("The job stopped while")
     captured = capsys.readouterr()
     assert safe_job_id in captured.out
     assert "failed" in captured.out.lower()

@@ -722,3 +722,61 @@ label.check { display: flex; align-items: center; font-weight: 600; margin: var(
   .review dd { margin-bottom: var(--space-2); }
   .sessions-table td.cell-open { grid-column: 2; grid-row: 2 / span 2; align-self: center; justify-self: end; }
 }
+
+/* ---------- Job page: stage list ---------- */
+.stages {
+  list-style: none;
+  margin: var(--space-4) 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.stage {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+}
+.stage__mark {
+  width: 1.1em;
+  height: 1.1em;
+  border-radius: 50%;
+  border: 2px solid var(--color-neutral-edge);
+  display: inline-grid;
+  place-items: center;
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+.stage--done { color: var(--color-ok-text); border-color: var(--color-ok-edge); }
+.stage--done .stage__mark { background: var(--color-ok-edge); border-color: var(--color-ok-edge); color: #fff; }
+.stage--done .stage__mark::before { content: "✓"; }
+.stage--current {
+  color: var(--color-info-text);
+  background: var(--color-info-bg);
+  border: 2px solid var(--color-info-edge);
+  font-weight: 600;
+}
+.stage--current .stage__mark { border-color: var(--color-info-edge); }
+.stage--current .stage__mark::before { content: "•"; font-size: var(--text-md); }
+.stage--failed {
+  color: var(--color-bad-text);
+  background: var(--color-bad-bg);
+  border: 2px solid var(--color-bad-edge);
+  font-weight: 600;
+}
+.stage--failed .stage__mark { background: var(--color-bad-edge); border-color: var(--color-bad-edge); color: #fff; }
+.stage--failed .stage__mark::before { content: "✕"; }
+.job-message { font-size: var(--text-lg); margin: var(--space-3) 0; }
+.job-message--failed { color: var(--color-bad-text); }
+.job-cameras { margin-top: 0; }
+.tech-details { margin: var(--space-3) 0; }
+.tech-details summary { cursor: pointer; color: var(--color-accent-strong); }
+.tech-details pre { max-height: 24rem; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+.job-notes li { margin-bottom: var(--space-1); }
+

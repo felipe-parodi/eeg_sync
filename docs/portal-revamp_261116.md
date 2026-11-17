@@ -54,6 +54,22 @@ Branch: `feat/portal-revamp` (from `feat/pose-quality-overhaul`).
   `output/_archive/<id>_<stamp>` at finish), job page shows results only when
   complete. M:SS accepts minutes >= 60 (`75:30`); only H:MM:SS limits minutes.
   Visual check by the user pending.
+- Scope trimmed by the user (2026-11-16): stay close to the original UI.
+  Phases 4-5 keep the bug fixes and drop click-on-image labeling, keyboard
+  shortcuts, auto-advance, the confirm dialog, elapsed timers and progress
+  bars.
+- Phase 4 done (2026-11-16): `JOB_STAGES` + `STEP_STAGE_TABLE` in `jobs.py`
+  map every internal step to a stage and a plain message; status writes carry
+  `stage`, plain `message`, and per-video `cameras` messages while both run.
+  `GET /jobs/{id}/status.json` is polled every 4 s by `static/job.js`, which
+  reloads once when the job stops running. Failures show one plain sentence
+  naming the stage (`failed_status`), keep the raw error in `error`, and put
+  it with the last 30 log lines under "Show technical details" (finding 10).
+  Labels are accepted only while `awaiting_annotation`; 409 otherwise and on
+  empty submissions, checked and marked queued under `ANNOTATION_SUBMIT_LOCK`
+  (finding 8). Check clips are `optional` steps: a failure becomes a job note
+  and the job continues; frames with nobody tracked render raw (finding 4).
+  Visual check by the user pending.
 
 ## Phase 1: Template infrastructure (pure refactor)
 

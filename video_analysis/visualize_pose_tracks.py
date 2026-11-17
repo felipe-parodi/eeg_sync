@@ -229,18 +229,18 @@ def _load_frames_from_csv(
     for img_ts, img_name, real_fidx in zip(
         frame_timestamps, frame_image_names, frame_real_indices
     ):
-        if len(csv_ts_array) == 0:
-            break
-        nearest_idx = int(np.argmin(np.abs(csv_ts_array - img_ts)))
-        nearest_ts = csv_ts_array[nearest_idx]
-        # Skip if nearest CSV timestamp is too far (> 0.5s).
-        if abs(nearest_ts - img_ts) > 0.5:
-            continue
-
-        t_rows = tracks_by_ts[nearest_ts]
-        p_rows = pose_by_ts.get(nearest_ts, pose_df.iloc[0:0])
-
+        # A frame with nobody tracked within 0.5 s is still rendered, raw,
+        # so the check clip shows the gap (and a window where nobody was
+        # tracked at all still yields a clip instead of an error).
         persons: List[Dict[str, object]] = []
+        if len(csv_ts_array):
+            nearest_idx = int(np.argmin(np.abs(csv_ts_array - img_ts)))
+            nearest_ts = csv_ts_array[nearest_idx]
+            near = abs(nearest_ts - img_ts) <= 0.5
+        else:
+            near = False
+        t_rows = tracks_by_ts[nearest_ts] if near else tracks_df.iloc[0:0]
+        p_rows = pose_by_ts.get(nearest_ts, pose_df.iloc[0:0]) if near else None
         for _, t_row in t_rows.iterrows():
             tid = int(t_row["track_id"])
             person_pose = p_rows[p_rows["track_id"] == tid].sort_values("keypoint_name")

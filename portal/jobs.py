@@ -110,6 +110,9 @@ class CommandStep:
     # GPU-bound steps never overlap across cameras: two at once only contend
     # (two ViTPose refinements took 110 s each in parallel vs 48 s alone).
     gpu_heavy: bool = False
+    # A failing optional step (a QC check clip) is recorded as a note and the
+    # job carries on; any other failing step stops the job.
+    optional: bool = False
 
 
 @dataclass
@@ -1075,6 +1078,7 @@ def build_phase2_steps(
             for out_name, name_suffix, win_start, win_end in overlay_windows:
                 steps.append(
                     CommandStep(
+                        optional=True,
                         name=f"overlay video {camera_id} {block.name}{name_suffix}",
                         argv=[
                             python,
@@ -1211,6 +1215,272 @@ def read_status(job_dir: Path) -> dict[str, Any]:
     return payload
 
 
+# Stages shown on the job page, in order: (key, label).
+JOB_STAGES: tuple[tuple[str, str], ...] = (
+    ("upload", "Upload"),
+    ("prepare", "Prepare video"),
+    ("find_people", "Find people"),
+    ("label_parent", "Label parent (you)"),
+    ("track_refine", "Track and refine"),
+    ("measure", "Measure"),
+    ("report", "Report"),
+)
+JOB_STAGE_KEYS = tuple(key for key, _ in JOB_STAGES)
+
+# The one table that maps internal step names to a stage and plain words.
+# Matched by prefix against ``current_step`` / ``CommandStep.name`` (the
+# camera id and block name that follow the prefix only name the video).
+# Each row: (step-name prefix, stage key, what is happening, failure phrase).
+STEP_STAGE_TABLE: tuple[tuple[str, str, str, str], ...] = (
+    ("uploading", "upload", "Receiving the videos.", "receiving the videos"),
+    ("queued", "upload", "Waiting for another job to finish.", "waiting its turn"),
+    (
+        "finalize uploads",
+        "upload",
+        "Putting the uploaded videos together.",
+        "putting the uploaded videos together",
+    ),
+    (
+        "compression",
+        "prepare",
+        "Making the videos smaller for processing.",
+        "preparing the videos",
+    ),
+    (
+        "pose inference",
+        "find_people",
+        "Finding the people in every frame. This is the longest step.",
+        "finding the people in the videos",
+    ),
+    (
+        "extract anchors",
+        "find_people",
+        "Picking a few frames for you to label.",
+        "picking frames for you to label",
+    ),
+    (
+        "awaiting annotation",
+        "label_parent",
+        "Waiting for you to mark the parent in a few frames.",
+        "waiting for your labels",
+    ),
+    (
+        "phase 2 queued",
+        "track_refine",
+        "Labels received. Waiting to continue.",
+        "starting after your labels",
+    ),
+    (
+        "filter tracks",
+        "track_refine",
+        "Following the parent and the child through the video.",
+        "following the parent and the child",
+    ),
+    (
+        "refine keypoints",
+        "track_refine",
+        "Refining body positions.",
+        "refining body positions",
+    ),
+    (
+        "interpolate tracks",
+        "track_refine",
+        "Filling short gaps in tracking.",
+        "filling short gaps in tracking",
+    ),
+    ("smooth tracks", "track_refine", "Smoothing movement.", "smoothing movement"),
+    ("pose metrics", "measure", "Measuring movement.", "measuring movement"),
+    (
+        "overlay video",
+        "measure",
+        "Making short check clips.",
+        "making the check clips",
+    ),
+    ("gaze", "measure", "Estimating where each person looks.", "estimating gaze"),
+    (
+        "session report",
+        "report",
+        "Writing the session report.",
+        "writing the session report",
+    ),
+    ("results zip", "report", "Packing the results.", "packing the results"),
+)
+
+CAMERA_LABELS = {"camera_a": "Video A", "camera_b": "Video B"}
+
+
+def describe_step(step_name: str | None) -> dict[str, str]:
+    """Translate an internal step name into a stage and plain words.
+
+    Args:
+        step_name: Internal step name such as ``"smooth tracks camera_a"``.
+
+    Returns:
+        Dict with ``stage`` (a ``JOB_STAGE_KEYS`` entry, or ``""`` when the
+        step is unknown), ``message`` (what is happening, in plain words,
+        naming the video when the step belongs to one camera) and
+        ``failure`` (a phrase for "the job stopped while ...").
+    """
+    name = (step_name or "").strip()
+    camera = next((cid for cid in CAMERA_LABELS if cid in name.split()), None)
+    for prefix, stage, message, failure in STEP_STAGE_TABLE:
+        if name == prefix or name.startswith(prefix + " "):
+            if camera is not None:
+                video = CAMERA_LABELS[camera]
+                message = f"{video}: {message}"
+                failure = f"{failure} for {video}"
+            return {"stage": stage, "message": message, "failure": failure}
+    return {"stage": "", "message": "Working.", "failure": "processing"}
+
+
+def running_status(
+    step_name: str, phase: int | None = None, **extra: Any
+) -> dict[str, Any]:
+    """Build a ``running`` status payload for one internal step.
+
+    Args:
+        step_name: Internal step name (kept as ``current_step`` for the log).
+        phase: Pipeline phase (1 before labeling, 2 after).
+        **extra: Further fields (e.g. ``cameras``).
+
+    Returns:
+        Status dict with ``state``, plain ``message``, ``stage`` and
+        ``current_step``.
+    """
+    info = describe_step(step_name)
+    payload: dict[str, Any] = {
+        "state": "running",
+        "message": info["message"],
+        "stage": info["stage"],
+        "current_step": step_name,
+    }
+    if phase is not None:
+        payload["phase"] = phase
+    payload.update(extra)
+    return payload
+
+
+def friendly_failure_message(step_name: str | None, error: BaseException) -> str:
+    """Return a short plain message saying where a job stopped.
+
+    A raw command line (``Command '[...]' returned non-zero exit status``)
+    is never part of it. ``ValueError`` messages are written for people
+    (e.g. "The two videos ended up at different frames per second ..."),
+    so they follow the sentence; any other error stays in the details.
+
+    Args:
+        step_name: Internal name of the step that was running.
+        error: The exception that stopped the job.
+
+    Returns:
+        A short message for the job page.
+    """
+    phrase = describe_step(step_name)["failure"]
+    if isinstance(error, ValueError) and str(error):
+        return f"The job stopped while {phrase}. {error}"
+    return (
+        f"The job stopped while {phrase}. Open the technical details below "
+        "and send them to the person who looks after the portal."
+    )
+
+
+def failed_status(
+    step_name: str | None, error: BaseException, **extra: Any
+) -> dict[str, Any]:
+    """Build a ``failed`` status payload with a plain message.
+
+    Args:
+        step_name: Internal name of the step that was running.
+        error: The exception that stopped the job (kept in ``error``).
+        **extra: Further fields (e.g. ``phase``, ``log_path``).
+
+    Returns:
+        Status dict with ``state``, plain ``message``, ``stage``,
+        ``failed_step`` and the raw ``error`` text.
+    """
+    payload: dict[str, Any] = {
+        "state": "failed",
+        "message": friendly_failure_message(step_name, error),
+        "stage": describe_step(step_name)["stage"],
+        "current_step": None,
+        "failed_step": step_name,
+        "error": f"{type(error).__name__}: {error}",
+    }
+    payload.update(extra)
+    return payload
+
+
+def failing_step_name(error: BaseException, default: str | None) -> str | None:
+    """Return the step a failure came from (tagged by ``run_steps``).
+
+    Args:
+        error: The exception raised by a step.
+        default: Step name to use when the error carries none.
+
+    Returns:
+        The failing step's internal name, or ``default``.
+    """
+    return getattr(error, "portal_step_name", None) or default
+
+
+JOB_NOTES_FILENAME = "notes.json"
+
+
+def read_job_notes(job_dir: Path) -> list[str]:
+    """Return the job's plain-language notes (empty when there are none).
+
+    Args:
+        job_dir: Job working directory.
+
+    Returns:
+        Notes in the order they were added.
+    """
+    path = job_dir / JOB_NOTES_FILENAME
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return [str(item) for item in payload] if isinstance(payload, list) else []
+
+
+def add_job_note(job_dir: Path, text: str) -> None:
+    """Append one plain-language note to the job (listed on the job page).
+
+    Args:
+        job_dir: Job working directory.
+        text: The note.
+    """
+    notes = read_job_notes(job_dir)
+    notes.append(text)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / JOB_NOTES_FILENAME).write_text(
+        json.dumps(notes, indent=2), encoding="utf-8"
+    )
+
+
+def overlay_skip_note(step: CommandStep) -> str:
+    """Plain note for a check clip that could not be made.
+
+    Args:
+        step: The overlay step (name ``overlay video <camera> <block>[ (end)]``).
+
+    Returns:
+        A sentence naming the video and block.
+    """
+    parts = step.name.split(" ", 3)
+    block = parts[3] if len(parts) > 3 else step.name
+    if block.endswith(" (end)"):
+        block = block[: -len(" (end)")] + " end clip"
+    video = CAMERA_LABELS.get(step.camera_id or "", "")
+    where = f"{video}, {block}" if video else block
+    return (
+        f"Check clip not made ({where}). This usually means the block runs "
+        "past the end of the video. The measurements are not affected."
+    )
+
+
 def job_config_to_dict(config: PortalJobConfig) -> dict[str, Any]:
     """Convert a job config to a JSON-safe dictionary.
 
@@ -1280,6 +1550,7 @@ def run_steps(
     log_path: Path,
     on_start: Any = None,
     parallel_cameras: bool = False,
+    on_optional_failure: Any = None,
 ) -> None:
     """Run command steps, optionally one thread per camera.
 
@@ -1295,10 +1566,13 @@ def run_steps(
         on_start: Optional callback ``(step_number, total, step)`` called as
             each step starts.
         parallel_cameras: Run different cameras' chains concurrently.
+        on_optional_failure: Optional callback ``(step, error)`` called when
+            an ``optional`` step fails; the chain then continues.
 
     Raises:
-        subprocess.CalledProcessError: The first failing step (after every
-            chain has stopped).
+        subprocess.CalledProcessError: The first failing required step (after
+            every chain has stopped). The error carries the step's name as
+            ``portal_step_name``.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -1317,10 +1591,25 @@ def run_steps(
             if on_start is not None:
                 on_start(started, total, step)
 
+    def run_one(step: CommandStep, step_log: Path) -> None:
+        try:
+            run_command_step(step, cwd=cwd, log_path=step_log)
+        except Exception as error:
+            if step.optional:
+                if on_optional_failure is not None:
+                    on_optional_failure(step, error)
+                return
+            if getattr(error, "portal_step_name", None) is None:
+                try:
+                    error.portal_step_name = step.name  # type: ignore[attr-defined]
+                except AttributeError:
+                    pass
+            raise
+
     if not parallel_cameras or len(groups) <= 1:
         for step in steps:
             notify(step)
-            run_command_step(step, cwd=cwd, log_path=log_path)
+            run_one(step, log_path)
         return
 
     part_logs = {
@@ -1335,9 +1624,9 @@ def run_steps(
             notify(step)
             if step.gpu_heavy:
                 with gpu_lock:
-                    run_command_step(step, cwd=cwd, log_path=part_logs[key])
+                    run_one(step, part_logs[key])
             else:
-                run_command_step(step, cwd=cwd, log_path=part_logs[key])
+                run_one(step, part_logs[key])
 
     errors: list[BaseException] = []
     with ThreadPoolExecutor(max_workers=len(groups)) as pool:
@@ -1725,15 +2014,9 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
     compression_settings = CompressionSettings(
         ffmpeg_bin=os.environ.get("PORTAL_FFMPEG_BIN", "ffmpeg")
     )
+    current_step = "compression"
     try:
-        write_status(
-            config.job_dir,
-            {
-                "state": "running",
-                "message": "Compressing uploaded videos if needed.",
-                "current_step": "compression",
-            },
-        )
+        write_status(config.job_dir, running_status(current_step))
 
         compressed_dir = repo_root / "video_inference" / "compressed" / config.job_id
         compression_summaries = []
@@ -1766,16 +2049,9 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
         _write_json(config.job_dir / "job_config.json", job_config_to_dict(config))
 
         steps = build_phase1_steps(config)
-        for index, step in enumerate(steps, start=1):
-            write_status(
-                config.job_dir,
-                {
-                    "state": "running",
-                    "message": f"Phase 1 step {index} of {len(steps)}: {step.name}",
-                    "current_step": step.name,
-                    "phase": 1,
-                },
-            )
+        for step in steps:
+            current_step = step.name
+            write_status(config.job_dir, running_status(step.name, phase=1))
             run_command_step(step, cwd=repo_root, log_path=log_path)
 
         # Record the real frame size (uploads are often 960x540, not the
@@ -1794,23 +2070,18 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
         # After pose+tracking, extract anchor frames per camera and pause
         # for the colleague to label which detection is the parent. Phase 2
         # resumes via resume_portal_job_phase2 once annotations arrive.
-        write_status(
-            config.job_dir,
-            {
-                "state": "running",
-                "message": "Preparing anchor frames for annotation.",
-                "current_step": "extract anchors",
-                "phase": 1,
-            },
-        )
+        current_step = "extract anchors"
+        write_status(config.job_dir, running_status(current_step, phase=1))
         anchor_summary = extract_job_anchor_frames(config)
         write_status(
             config.job_dir,
             {
                 "state": "awaiting_annotation",
                 "message": (
-                    "Label which detection is the parent on each anchor frame."
+                    "Ready for you: mark which person is the parent in a few "
+                    "frames so processing can continue."
                 ),
+                "stage": "label_parent",
                 "current_step": "awaiting annotation",
                 "phase": 1,
                 "annotate_url": f"/jobs/{config.job_id}/annotate",
@@ -1820,12 +2091,12 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
     except Exception as error:
         write_status(
             config.job_dir,
-            {
-                "state": "failed",
-                "message": str(error),
-                "current_step": None,
-                "log_path": str(log_path),
-            },
+            failed_status(
+                failing_step_name(error, current_step),
+                error,
+                phase=1,
+                log_path=str(log_path),
+            ),
         )
         raise
 
@@ -1838,7 +2109,14 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
     filter -> smooth -> metrics -> overlay chain, then bundles the result
     zip.
     """
+    import threading
+
     log_path = config.job_dir / "job.log"
+    current_step = "phase 2 queued"
+    # Latest plain message per video, so both cameras show while they run
+    # side by side (on_start is called under run_steps' lock).
+    cameras: dict[str, str] = {}
+    notes_lock = threading.Lock()
     try:
         # The config is rebuilt from the upload, so re-read the frame rate
         # that frame extraction actually achieved in phase 1.
@@ -1847,15 +2125,22 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
         steps = build_phase2_steps(config, anchors_json_by_camera=anchors_map)
 
         def on_start(index: int, total: int, step: CommandStep) -> None:
+            nonlocal current_step
+            current_step = step.name
+            if step.camera_id:
+                cameras[step.camera_id] = describe_step(step.name)["message"]
             write_status(
                 config.job_dir,
-                {
-                    "state": "running",
-                    "message": f"Phase 2 step {index} of {total}: {step.name}",
-                    "current_step": step.name,
-                    "phase": 2,
-                },
+                running_status(
+                    step.name,
+                    phase=2,
+                    cameras=dict(sorted(cameras.items())) if step.camera_id else {},
+                ),
             )
+
+        def on_optional_failure(step: CommandStep, error: BaseException) -> None:
+            with notes_lock:
+                add_job_note(config.job_dir, overlay_skip_note(step))
 
         run_steps(
             steps,
@@ -1863,10 +2148,13 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
             log_path=log_path,
             on_start=on_start,
             parallel_cameras=config.parallel_cameras,
+            on_optional_failure=on_optional_failure,
         )
         report_step = build_session_report_step(config)
         on_start(len(steps) + 1, len(steps) + 1, report_step)
         run_command_step(report_step, cwd=repo_root, log_path=log_path)
+        current_step = "results zip"
+        write_status(config.job_dir, running_status(current_step, phase=2))
 
         zip_path = config.job_dir / f"{config.session_id}_results.zip"
         metadata_root = Path(config.session_id) / "portal_metadata"
@@ -1906,6 +2194,7 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
             {
                 "state": "complete",
                 "message": "Processing complete.",
+                "stage": "report",
                 "current_step": None,
                 "result_zip": str(zip_path),
                 "artifacts": artifacts,
@@ -1914,11 +2203,11 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
     except Exception as error:
         write_status(
             config.job_dir,
-            {
-                "state": "failed",
-                "message": str(error),
-                "current_step": None,
-                "log_path": str(log_path),
-            },
+            failed_status(
+                failing_step_name(error, current_step),
+                error,
+                phase=2,
+                log_path=str(log_path),
+            ),
         )
         raise

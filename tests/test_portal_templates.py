@@ -259,7 +259,7 @@ def test_job_detail_renders_coverage_and_escapes(
     assert f"<td>{EVIL_ESCAPED}</td>" in text
 
 
-def test_job_detail_running_job_auto_refreshes(
+def test_job_detail_running_job_polls_status(
     client: TestClient, portal_env: Path
 ) -> None:
     write_status(
@@ -269,8 +269,8 @@ def test_job_detail_running_job_auto_refreshes(
 
     text = client.get(f"/jobs/{JOB_ID}").text
 
-    assert "This page refreshes automatically while the job runs." in text
-    assert "window.location.reload()" in text
+    assert "This page updates by itself while the job runs." in text
+    assert '<script src="/static/job.js"></script>' in text
     assert "/annotate" not in text
 
 
