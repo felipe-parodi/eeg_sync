@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pose_training import train
 
 
@@ -57,7 +59,8 @@ def test_train_student_passes_core_args_and_returns_best(tmp_path: Path) -> None
 
 
 def test_augmentation_transforms_are_pixel_only() -> None:
-    import albumentations as A  # noqa: N812
+    # albumentations comes with the video stack, not the dev install CI uses.
+    A = pytest.importorskip("albumentations")  # noqa: N806
     import numpy as np
 
     transforms = train.augmentation_transforms()

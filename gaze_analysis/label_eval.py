@@ -87,7 +87,12 @@ def score_gaze_predictions(
         (int(r.frame_idx), int(r.track_id)): r for r in gaze.itertuples(index=False)
     }
     box_by_key = {
-        (int(r.frame_idx), int(r.track_id)): (r.bbox_x1, r.bbox_y1, r.bbox_x2, r.bbox_y2)
+        (int(r.frame_idx), int(r.track_id)): (
+            r.bbox_x1,
+            r.bbox_y1,
+            r.bbox_x2,
+            r.bbox_y2,
+        )
         for r in tracks.itertuples(index=False)
     }
     rows = []
@@ -106,7 +111,9 @@ def score_gaze_predictions(
         pred = predicted_target(point, partner_box, width, height, inout)
         error = np.nan
         if isinstance(label.point, (list, tuple)) and len(label.point) == 2:
-            error = float(np.hypot(point[0] - label.point[0], point[1] - label.point[1]))
+            error = float(
+                np.hypot(point[0] - label.point[0], point[1] - label.point[1])
+            )
         rows.append(
             {
                 "person": label.person,
@@ -124,14 +131,18 @@ def score_gaze_predictions(
     scores: dict[str, Any] = {
         "n_labels": int(len(table)),
         "target_accuracy": float((table["truth"] == table["pred"]).mean()),
-        "looking_at_partner_accuracy": float((at_partner_true == at_partner_pred).mean()),
+        "looking_at_partner_accuracy": float(
+            (at_partner_true == at_partner_pred).mean()
+        ),
         "n_points": int(len(errors)),
         "point_error_median": float(errors.median()) if len(errors) else None,
         "point_error_mean": float(errors.mean()) if len(errors) else None,
         "confusion": pd.crosstab(table["truth"], table["pred"]).to_dict(),
     }
     for person, group in table.groupby("person"):
-        scores[f"{person}_target_accuracy"] = float((group["truth"] == group["pred"]).mean())
+        scores[f"{person}_target_accuracy"] = float(
+            (group["truth"] == group["pred"]).mean()
+        )
     return scores
 
 
@@ -154,9 +165,7 @@ def main(argv: list[str] | None = None) -> None:
     results = {}
     for name in args.gaze:
         gaze = pd.read_csv(args.camera_dir / name)
-        results[name] = score_gaze_predictions(
-            labels, gaze, tracks, image_size
-        )
+        results[name] = score_gaze_predictions(labels, gaze, tracks, image_size)
     print(json.dumps(results, indent=2, default=str))
 
 

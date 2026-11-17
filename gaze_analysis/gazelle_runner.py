@@ -114,8 +114,7 @@ def _find_frame_paths(camera_dir: Path, frame_rate: float) -> Dict[int, Path]:
     index = pd.read_csv(index_path)
     grid_idx = np.rint(index["timestamp_s"].to_numpy(float) * frame_rate).astype(int)
     return {
-        int(idx): frames_dir / name
-        for idx, name in zip(grid_idx, index["image_name"])
+        int(idx): frames_dir / name for idx, name in zip(grid_idx, index["image_name"])
     }
 
 
@@ -235,7 +234,9 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
     for batch_start in range(0, total_frames, batch_size):
         batch_frame_idxs = frame_indices[batch_start : batch_start + batch_size]
         batch_images = pending.result()
-        next_idxs = frame_indices[batch_start + batch_size : batch_start + 2 * batch_size]
+        next_idxs = frame_indices[
+            batch_start + batch_size : batch_start + 2 * batch_size
+        ]
         if next_idxs:
             pending = pool.submit(_load_batch, next_idxs)
 
@@ -264,8 +265,9 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
 
         images_tensor = torch.stack(batch_images).to(device)
 
-        with torch.no_grad(), torch.autocast(
-            device_type="cuda", dtype=torch.float16, enabled=use_half
+        with (
+            torch.no_grad(),
+            torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_half),
         ):
             output = model({"images": images_tensor, "bboxes": batch_bboxes})
 

@@ -36,8 +36,15 @@ def _camera(tmp_path: Path, n: int = 600, child_from: int = 0) -> Path:
     pd.DataFrame(
         tracks,
         columns=[
-            "frame_idx", "timestamp_s", "track_id", "track_label",
-            "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2", "interpolated",
+            "frame_idx",
+            "timestamp_s",
+            "track_id",
+            "track_label",
+            "bbox_x1",
+            "bbox_y1",
+            "bbox_x2",
+            "bbox_y2",
+            "interpolated",
         ],
     ).to_csv(cam / "tracks_2d_smooth.csv", index=False)
     return cam

@@ -634,6 +634,8 @@ dependencies = [
     { name = "opencv-python" },
     { name = "openpyxl" },
     { name = "pandas" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 
 [package.optional-dependencies]
@@ -704,6 +706,7 @@ requires-dist = [
     { name = "python-multipart", marker = "extra == 'portal'", specifier = ">=0.0.9" },
     { name = "rtmlib", marker = "extra == 'pose3d'" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+    { name = "scipy", specifier = ">=1.10" },
     { name = "supervision", marker = "extra == 'video'", specifier = ">=0.21.0" },
     { name = "timm", marker = "extra == 'gaze'", specifier = ">=0.9.0" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'gaze') or (sys_platform == 'win32' and extra == 'gaze')", specifier = ">=2.0.0", index = "https://download.pytorch.org/whl/cu124" },

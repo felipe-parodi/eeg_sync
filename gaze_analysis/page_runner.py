@@ -243,7 +243,9 @@ def run_page_inference(config: PageConfig) -> Dict[str, Any]:
         raise FileNotFoundError(f"No frames/frame_index.csv under {camera_dir}")
     width, height = _frame_size(frame_paths)
 
-    head_df = extract_head_bboxes(pose_df, tracks_df, image_width=width, image_height=height)
+    head_df = extract_head_bboxes(
+        pose_df, tracks_df, image_width=width, image_height=height
+    )
     head_df = head_df[head_df["frame_idx"].isin(set(frame_paths))].copy()
     t_start, t_end = resolve_time_range(
         session_config, config.start_s, config.end_s, config.time_block
@@ -273,7 +275,8 @@ def run_page_inference(config: PageConfig) -> Dict[str, Any]:
         )
 
     batches = [
-        frame_indices[s : s + batch_size] for s in range(0, len(frame_indices), batch_size)
+        frame_indices[s : s + batch_size]
+        for s in range(0, len(frame_indices), batch_size)
     ]
     rows: List[dict] = []
     heatmaps: List[np.ndarray] = []
@@ -287,12 +290,17 @@ def run_page_inference(config: PageConfig) -> Dict[str, Any]:
             pending = pool.submit(_prep, batches[n + 1])
         # Rows whose head box is empty after clipping are skipped entirely.
         kept = [
-            [i for i, b in enumerate(boxes) if b is not None] for _, _, boxes in prepared
+            [i for i, b in enumerate(boxes) if b is not None]
+            for _, _, boxes in prepared
         ]
         scenes = torch.from_numpy(np.stack([p[0] for p in prepared]))
-        heads = torch.from_numpy(
-            np.stack([p[1][i] for p, idx in zip(prepared, kept) for i in idx])
-        ) if any(kept) else None
+        heads = (
+            torch.from_numpy(
+                np.stack([p[1][i] for p, idx in zip(prepared, kept) for i in idx])
+            )
+            if any(kept)
+            else None
+        )
         if heads is None:
             continue
         inputs = {
@@ -307,8 +315,9 @@ def run_page_inference(config: PageConfig) -> Dict[str, Any]:
             inputs["bboxes"] = [inputs["bboxes"][j] for j in keep_frames]
         else:
             keep_frames = list(range(len(batch)))
-        with torch.inference_mode(), torch.autocast(
-            device_type="cuda", dtype=torch.float16, enabled=use_half
+        with (
+            torch.inference_mode(),
+            torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_half),
         ):
             out = model(inputs)
         for out_i, j in enumerate(keep_frames):
@@ -365,7 +374,9 @@ def run_page_inference(config: PageConfig) -> Dict[str, Any]:
         "heatmap_npz_size_mb": round(npz_size_mb, 1),
         "output_csv": str(gaze_csv_path),
     }
-    (out_dir / "gaze_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (out_dir / "gaze_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
     print(f"Wrote {len(gaze_df)} gaze rows to {gaze_csv_path} in {elapsed:.0f} s")
     return summary
 

@@ -26,14 +26,21 @@ def test_predicted_target_from_gaze_point(point, expected) -> None:
 
 
 def test_predicted_target_out_of_frame_is_not_partner() -> None:
-    assert predicted_target((0.7, 0.45), BOXES["child"], W, H, inout=0.1) == "not_partner"
+    assert (
+        predicted_target((0.7, 0.45), BOXES["child"], W, H, inout=0.1) == "not_partner"
+    )
 
 
 def test_score_gaze_predictions() -> None:
     labels = pd.DataFrame(
         [
             # parent looks at child's face; model agrees
-            {"frame_idx": 1, "person": "parent", "target": "partner_face", "point": [0.7, 0.45]},
+            {
+                "frame_idx": 1,
+                "person": "parent",
+                "target": "partner_face",
+                "point": [0.7, 0.45],
+            },
             # child looks at an object; model says parent's face -> wrong
             {"frame_idx": 1, "person": "child", "target": "object", "point": None},
             # unusable label is ignored
@@ -42,14 +49,40 @@ def test_score_gaze_predictions() -> None:
     )
     gaze = pd.DataFrame(
         [
-            {"frame_idx": 1, "track_id": 0, "gaze_peak_x": 0.72, "gaze_peak_y": 0.45, "inout_score": 0.9},
-            {"frame_idx": 1, "track_id": 1, "gaze_peak_x": 0.20, "gaze_peak_y": 0.30, "inout_score": 0.9},
+            {
+                "frame_idx": 1,
+                "track_id": 0,
+                "gaze_peak_x": 0.72,
+                "gaze_peak_y": 0.45,
+                "inout_score": 0.9,
+            },
+            {
+                "frame_idx": 1,
+                "track_id": 1,
+                "gaze_peak_x": 0.20,
+                "gaze_peak_y": 0.30,
+                "inout_score": 0.9,
+            },
         ]
     )
     tracks = pd.DataFrame(
         [
-            {"frame_idx": 1, "track_id": 0, "bbox_x1": 100, "bbox_y1": 100, "bbox_x2": 300, "bbox_y2": 500},
-            {"frame_idx": 1, "track_id": 1, "bbox_x1": 600, "bbox_y1": 200, "bbox_x2": 800, "bbox_y2": 500},
+            {
+                "frame_idx": 1,
+                "track_id": 0,
+                "bbox_x1": 100,
+                "bbox_y1": 100,
+                "bbox_x2": 300,
+                "bbox_y2": 500,
+            },
+            {
+                "frame_idx": 1,
+                "track_id": 1,
+                "bbox_x1": 600,
+                "bbox_y1": 200,
+                "bbox_x2": 800,
+                "bbox_y2": 500,
+            },
         ]
     )
 
