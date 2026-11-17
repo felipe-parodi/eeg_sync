@@ -30,6 +30,11 @@ SESSION_METRICS_CSV = "session_metrics.csv"
 ALL_SESSIONS_CSV = "all_sessions_metrics.csv"
 REPORT_HTML = "report.html"
 TASK_METRICS_CSV = "task_metrics.csv"
+# Bump when metric definitions change, so study tables never silently mix
+# sessions processed under different definitions. 2026-11-16: 5 fps even frame
+# timing, short-gap-only filling, whole-body synchrony, task table, verdict.
+METRICS_VERSION = "2026-11-16"
+LEGACY_METRICS_VERSION = "before-2026-11-16"
 ALL_SESSIONS_TASK_CSV = "all_sessions_task_metrics.csv"
 
 # Leading columns, in order; any other metric columns follow.
@@ -219,6 +224,14 @@ def collect_task_rows(session_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _mark_legacy(table: pd.DataFrame) -> pd.DataFrame:
+    """Label rows written before metrics versions existed."""
+    if "metrics_version" not in table.columns:
+        table["metrics_version"] = LEGACY_METRICS_VERSION
+    table["metrics_version"] = table["metrics_version"].fillna(LEGACY_METRICS_VERSION)
+    return table
+
+
 def build_all_sessions_task_table(output_root: Path) -> pd.DataFrame:
     """Stack every session's ``task_metrics.csv`` under ``output_root``.
 
@@ -235,7 +248,7 @@ def build_all_sessions_task_table(output_root: Path) -> pd.DataFrame:
     ]
     if not tables:
         return pd.DataFrame(columns=["session_id", "camera_id", "task"])
-    return pd.concat(tables, ignore_index=True, sort=False)
+    return _mark_legacy(pd.concat(tables, ignore_index=True, sort=False))
 
 
 def build_all_sessions_table(output_root: Path) -> pd.DataFrame:
@@ -253,7 +266,7 @@ def build_all_sessions_table(output_root: Path) -> pd.DataFrame:
     ]
     if not tables:
         return pd.DataFrame(columns=LEAD_COLUMNS)
-    return pd.concat(tables, ignore_index=True, sort=False)
+    return _mark_legacy(pd.concat(tables, ignore_index=True, sort=False))
 
 
 def _fmt_time(seconds: float) -> str:
@@ -467,8 +480,10 @@ def write_session_outputs(session_dir: Path) -> pd.DataFrame:
     """
     session_dir = Path(session_dir)
     rows = collect_session_rows(session_dir)
+    rows = rows.assign(metrics_version=METRICS_VERSION)
     rows.to_csv(session_dir / SESSION_METRICS_CSV, index=False)
-    collect_task_rows(session_dir).to_csv(session_dir / TASK_METRICS_CSV, index=False)
+    tasks = collect_task_rows(session_dir).assign(metrics_version=METRICS_VERSION)
+    tasks.to_csv(session_dir / TASK_METRICS_CSV, index=False)
     (session_dir / REPORT_HTML).write_text(
         render_report_html(session_dir, rows), encoding="utf-8"
     )

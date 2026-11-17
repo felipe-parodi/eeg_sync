@@ -294,3 +294,21 @@ def test_report_hides_synchrony_with_too_few_windows(tmp_path: Path) -> None:
 
     assert "0.77" not in html
     assert "too few" in html
+
+
+def test_study_tables_mark_metrics_version(tmp_path: Path) -> None:
+    """New rows carry the current metrics version; older tables get a marker."""
+    from video_analysis.session_report import METRICS_VERSION
+
+    _write_split_session(tmp_path / "1019v4")
+    write_session_outputs(tmp_path / "1019v4")
+    old = tmp_path / "1012v3"
+    old.mkdir()
+    pd.DataFrame(
+        [{"session_id": "1012v3", "camera_id": "camera_a", "block": "grocery"}]
+    ).to_csv(old / "session_metrics.csv", index=False)
+
+    study = build_all_sessions_table(tmp_path).set_index("session_id")
+
+    assert study.loc["1019v4", "metrics_version"].iloc[0] == METRICS_VERSION
+    assert study.loc["1012v3", "metrics_version"] == "before-2026-11-16"

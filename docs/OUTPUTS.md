@@ -236,6 +236,8 @@ their window counts; gaze shares and convergence are weighted by gaze frames;
 coverage sums frame counts. Extra columns: `task`, `n_parts`, `parts`,
 `task_start_s`, `task_end_s`, `duration_s` (analysed time, gaps excluded).
 
+Every row carries `metrics_version` (currently `2026-11-16`; rows from older runs show `before-2026-11-16`). Do not pool rows with different versions: re-process older sessions instead.
+
 `video_inference/output/all_sessions_metrics.csv` stacks every session's block
 table, and `all_sessions_task_metrics.csv` every session's task table.
 The portal home page offers it as "Download all sessions table". `report.html`
