@@ -11,10 +11,10 @@
 
 ## Templates
 
-- [session_config.example.json](templates/session_config.example.json): annotated starting config
-- [segment_timings.example.csv](templates/segment_timings.example.csv): collaborator-input format for per-block start/end times
-- [exclusion_windows.example.csv](templates/exclusion_windows.example.csv): collaborator-input format for "experimenter in frame" segments
-- [Templates README](templates/README.md): conversion tips
+- [session_config.example.json](docs/templates/session_config.example.json): annotated starting config
+- [segment_timings.example.csv](docs/templates/segment_timings.example.csv): collaborator-input format for per-block start/end times
+- [exclusion_windows.example.csv](docs/templates/exclusion_windows.example.csv): collaborator-input format for "experimenter in frame" segments
+- [Templates README](docs/templates/README.md): conversion tips
 
 ## Top-level README
 
@@ -22,46 +22,46 @@
 
 ## Pipeline source code
 
-- [video_inference/pipeline.py](video_inference/pipeline.py): end-to-end inference orchestrator (`video-infer run`)
-- [video_inference/ultralytics_runner.py](video_inference/ultralytics_runner.py): YOLOv11 2D pose backend (recommended)
-- [video_inference/rtmlib_runner.py](video_inference/rtmlib_runner.py): RTMLib Body 2D / Wholebody3d backend
-- [video_inference/sam3d_runner.py](video_inference/sam3d_runner.py): SAM-3D-Body true-3D pose backend
-- [video_inference/tracking.py](video_inference/tracking.py): two-person IoU continuity (`internal` tracker)
-- [video_inference/schema.py](video_inference/schema.py): output CSV validation
-- [video_inference/device.py](video_inference/device.py): device resolution (cuda > mps > cpu)
-- [video_inference/rapid_compress.py](video_inference/rapid_compress.py): `video-compress-rapid`
+- [src/video_inference/pipeline.py](src/video_inference/pipeline.py): end-to-end inference orchestrator (`video-infer run`)
+- [src/video_inference/ultralytics_runner.py](src/video_inference/ultralytics_runner.py): YOLOv11 2D pose backend (recommended)
+- [src/video_inference/rtmlib_runner.py](src/video_inference/rtmlib_runner.py): RTMLib Body 2D / Wholebody3d backend
+- [src/video_inference/sam3d_runner.py](src/video_inference/sam3d_runner.py): SAM-3D-Body true-3D pose backend
+- [src/video_inference/tracking.py](src/video_inference/tracking.py): two-person IoU continuity (`internal` tracker)
+- [src/video_inference/schema.py](src/video_inference/schema.py): output CSV validation
+- [src/video_inference/device.py](src/video_inference/device.py): device resolution (cuda > mps > cpu)
+- [src/video_inference/rapid_compress.py](src/video_inference/rapid_compress.py): `video-compress-rapid`
 
 ## Track cleanup tools
 
-- [video_analysis/track_filter.py](video_analysis/track_filter.py): `video-filter-tracks` (block-based top-N + parent/child by bbox area)
-- [video_analysis/track_annotator.py](video_analysis/track_annotator.py): `video-annotate-tracks` (interactive OpenCV reassignment)
-- [video_analysis/track_correction.py](video_analysis/track_correction.py): `video-correct-tracks` (apply corrections JSON)
-- [video_analysis/temporal_smooth.py](video_analysis/temporal_smooth.py): `video-smooth` (confidence-gated EMA)
-- [video_analysis/interpolate.py](video_analysis/interpolate.py): `video-interpolate` (linear upsample)
+- [src/video_analysis/track_filter.py](src/video_analysis/track_filter.py): `video-filter-tracks` (block-based top-N + parent/child by bbox area)
+- [src/video_analysis/track_annotator.py](src/video_analysis/track_annotator.py): `video-annotate-tracks` (interactive OpenCV reassignment)
+- [src/video_analysis/track_correction.py](src/video_analysis/track_correction.py): `video-correct-tracks` (apply corrections JSON)
+- [src/video_analysis/temporal_smooth.py](src/video_analysis/temporal_smooth.py): `video-smooth` (confidence-gated EMA)
+- [src/video_analysis/interpolate.py](src/video_analysis/interpolate.py): `video-interpolate` (linear upsample)
 
 ## Metrics & visualization
 
-- [video_analysis/pose_metrics.py](video_analysis/pose_metrics.py): `video-pose-metrics` (torso proximity + movement xcorr per block)
-- [video_analysis/gaze_metrics.py](video_analysis/gaze_metrics.py): `video-gaze-metrics` (gaze categories + convergence per block)
-- [video_analysis/gaze_snapshots.py](video_analysis/gaze_snapshots.py): `video-gaze-snapshots` (heatmap-over-frame samples)
-- [video_analysis/visualize_pose_tracks.py](video_analysis/visualize_pose_tracks.py): `video-visualize` (2D overlay video)
-- [video_analysis/visualize_pose_3d.py](video_analysis/visualize_pose_3d.py): `video-visualize-3d` (matplotlib 3D)
+- [src/video_analysis/pose_metrics.py](src/video_analysis/pose_metrics.py): `video-pose-metrics` (torso proximity + movement xcorr per block)
+- [src/video_analysis/gaze_metrics.py](src/video_analysis/gaze_metrics.py): `video-gaze-metrics` (gaze categories + convergence per block)
+- [src/video_analysis/gaze_snapshots.py](src/video_analysis/gaze_snapshots.py): `video-gaze-snapshots` (heatmap-over-frame samples)
+- [src/video_analysis/visualize_pose_tracks.py](src/video_analysis/visualize_pose_tracks.py): `video-visualize` (2D overlay video)
+- [src/video_analysis/visualize_pose_3d.py](src/video_analysis/visualize_pose_3d.py): `video-visualize-3d` (matplotlib 3D)
 
 ## Gaze analysis
 
-- [gaze_analysis/gazelle_runner.py](gaze_analysis/gazelle_runner.py): `gaze-infer` (Gazelle batch inference)
-- [gaze_analysis/synchrony.py](gaze_analysis/synchrony.py): `gaze-synchrony` (4 synchrony metrics)
-- [gaze_analysis/plotting.py](gaze_analysis/plotting.py): `gaze-plot` (4-panel dashboard)
-- [gaze_analysis/head_bbox.py](gaze_analysis/head_bbox.py): head-bbox derivation from keypoints
-- [gaze_analysis/config.py](gaze_analysis/config.py): `session_config.json` loader + time-range filtering
-- [gaze_analysis/gaze_schema.py](gaze_analysis/gaze_schema.py): gaze CSV column definitions
+- [src/gaze_analysis/gazelle_runner.py](src/gaze_analysis/gazelle_runner.py): `gaze-infer` (Gazelle batch inference)
+- [src/gaze_analysis/synchrony.py](src/gaze_analysis/synchrony.py): `gaze-synchrony` (4 synchrony metrics)
+- [src/gaze_analysis/plotting.py](src/gaze_analysis/plotting.py): `gaze-plot` (4-panel dashboard)
+- [src/gaze_analysis/head_bbox.py](src/gaze_analysis/head_bbox.py): head-bbox derivation from keypoints
+- [src/gaze_analysis/config.py](src/gaze_analysis/config.py): `session_config.json` loader + time-range filtering
+- [src/gaze_analysis/gaze_schema.py](src/gaze_analysis/gaze_schema.py): gaze CSV column definitions
 
 ## EEG sync (optional side track)
 
-- [sync_eeg_vid/cli.py](sync_eeg_vid/cli.py): `eeg-sync` interactive entry point
-- [sync_eeg_vid/sync_pipeline.py](sync_eeg_vid/sync_pipeline.py): `sync_two_eeg_files`, `sync_eeg_to_video`, `sync_videos`
-- [sync_eeg_vid/eeg_io.py](sync_eeg_vid/eeg_io.py): OpenBCI parsing + IR pulse detection
-- [sync_eeg_vid/viewer.py](sync_eeg_vid/viewer.py): OpenCV frame viewer
+- [src/sync_eeg_vid/cli.py](src/sync_eeg_vid/cli.py): `eeg-sync` interactive entry point
+- [src/sync_eeg_vid/sync_pipeline.py](src/sync_eeg_vid/sync_pipeline.py): `sync_two_eeg_files`, `sync_eeg_to_video`, `sync_videos`
+- [src/sync_eeg_vid/eeg_io.py](src/sync_eeg_vid/eeg_io.py): OpenBCI parsing + IR pulse detection
+- [src/sync_eeg_vid/viewer.py](src/sync_eeg_vid/viewer.py): OpenCV frame viewer
 - [docs/eeg_sync/HOW_TO_USE_SYNC.md](docs/eeg_sync/HOW_TO_USE_SYNC.md): using `sync_results.json` in analysis
 - [docs/eeg_sync/TUTORIAL_POSE_EEG.md](docs/eeg_sync/TUTORIAL_POSE_EEG.md): joining pose data to EEG
 - [docs/eeg_sync/CLOCK_DRIFT.md](docs/eeg_sync/CLOCK_DRIFT.md): when single-point sync isn't enough
@@ -71,7 +71,7 @@
 
 - [pyproject.toml](pyproject.toml): packaging, dependencies, all CLI entry points
 - [environment.yml](environment.yml): full conda env with ffmpeg + CUDA
-- [session_config.json](session_config.json): live session config (copy from `templates/`)
+- [session_config.json](session_config.json): live session config (copy from `docs/templates/`)
 
 ## AI / LLM guidance
 

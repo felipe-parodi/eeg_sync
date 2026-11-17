@@ -20,7 +20,7 @@ eeg_sync/
 └── templates/                       # copy-and-edit starting points
 ```
 
-`video_inference/data/`, `video_inference/compressed/`, and `video_inference/output/` are gitignored. Anything in them is local to your machine.
+`data/videos/`, `data/compressed/`, and `data/output/` are gitignored. Anything in them is local to your machine.
 
 ---
 
@@ -34,13 +34,13 @@ eeg_sync/
 | Cameras per session | 1 or 2. `--video-a` is required; `--video-b` is optional. |
 | People in analyzed segments | **Exactly 2** (parent + child). Anything else needs `video-annotate-tracks` to relabel or `--max-persons > 2` followed by `video-filter-tracks` to prune. |
 
-Raw videos belong in `video_inference/data/`. Never commit them — that folder is gitignored.
+Raw videos belong in `data/videos/`. Never commit them — that folder is gitignored.
 
 ---
 
 ## session_config.json
 
-Single source of truth for per-session analysis windows and per-camera person mappings. Copy from [`templates/session_config.example.json`](../templates/session_config.example.json).
+Single source of truth for per-session analysis windows and per-camera person mappings. Copy from [`templates/session_config.example.json`](templates/session_config.example.json).
 
 Fields:
 
@@ -71,7 +71,7 @@ Workflow 1 is the default for the colleague path. Workflows 2 and 3 exist for wh
 
 ## Segment timings (collaborator input)
 
-When a collaborator records new sessions, ask them for the start/end times of the analyzable segments per session, in `MM:SS`. Template: [`templates/segment_timings.example.csv`](../templates/segment_timings.example.csv):
+When a collaborator records new sessions, ask them for the start/end times of the analyzable segments per session, in `MM:SS`. Template: [`templates/segment_timings.example.csv`](templates/segment_timings.example.csv):
 
 ```csv
 session_id,block_name,start_time,end_time,notes
@@ -85,7 +85,7 @@ This is a **human-to-human format**, not consumed by any CLI directly. Convert i
 
 ## Exclusion windows (collaborator input)
 
-Times when someone other than parent + child was in frame. Template: [`templates/exclusion_windows.example.csv`](../templates/exclusion_windows.example.csv):
+Times when someone other than parent + child was in frame. Template: [`templates/exclusion_windows.example.csv`](templates/exclusion_windows.example.csv):
 
 ```csv
 session_id,start_time,end_time,reason

@@ -65,7 +65,7 @@ To load new code without interrupting anyone, run
 job is uploading, queued or running (jobs waiting for parent labels are kept),
 and the public link stays the same. A restart keeps the job list; jobs that
 were mid-run when the portal stopped are marked interrupted. Every job also
-writes a run record to `video_inference/output/portal_runs.jsonl`.
+writes a run record to `data/output/portal_runs.jsonl`.
 
 ---
 
@@ -76,7 +76,7 @@ git clone https://github.com/felipe-parodi/eeg_sync.git
 cd eeg_sync
 uv sync --extra dev --extra video --extra gaze
 
-S=video_inference/output/P001c
+S=data/output/P001c
 
 # 1. Pose for every frame of the analysis windows; caches all detections.
 uv run video-infer run \
@@ -105,10 +105,10 @@ uv run gaze-infer --camera-dir $S/camera_a --session-config session_config.json 
     --camera-id camera_a --pose-input pose_3d_smooth.csv --tracks-input tracks_2d_smooth.csv
 uv run video-gaze-metrics --camera-dir $S/camera_a --session-config session_config.json \
     --camera-id camera_a --pose-input pose_3d_smooth.csv --tracks-input tracks_2d_smooth.csv
-uv run video-session-report --session-dir $S --all-sessions-root video_inference/output
+uv run video-session-report --session-dir $S --all-sessions-root data/output
 ```
 
-The portal runs exactly this chain (see `portal/jobs.py`). Full walkthrough:
+The portal runs exactly this chain (see `src/portal/jobs.py`). Full walkthrough:
 [`docs/COLLEAGUE_QUICKSTART.md`](docs/COLLEAGUE_QUICKSTART.md).
 
 ---
@@ -145,21 +145,30 @@ Detail and inputs/outputs per command: [`docs/PIPELINE.md`](docs/PIPELINE.md).
 ## Repo layout
 
 ```
-sync_eeg_vid/       # EEG ↔ video sync (interactive CLI: eeg-sync)
-portal/             # Video Processing Portal (FastAPI) + job runner
-video_inference/    # Pose inference, detection cache, offline two-person association,
-                    #   ViTPose keypoint refinement
-video_analysis/     # Post-processing: smooth, interpolate, filter-tracks, annotate-tracks,
-                    #                  correct-tracks, visualize (2D + 3D), metrics
-gaze_analysis/      # PaGE / Gaze-LLE gaze inference, gaze categories, synchrony, dashboard
-pose_training/      # Pose-model distillation and the tracking benchmark (bench.py)
-docs/               # All user-facing documentation (read these in order: QUICKSTART → PIPELINE → OUTPUTS)
-templates/          # Starter session_config.json + segment / exclusion CSV examples
+src/
+  portal/           # Video Processing Portal (FastAPI) + job runner
+  video_inference/  # Frame extraction, pose inference, detection cache, offline two-person
+                    #   association, ViTPose refinement; paths.py = where everything lives
+  video_analysis/   # Gap filling, smoothing, metrics, session report, overlays
+  gaze_analysis/    # PaGE / Gaze-LLE gaze inference, gaze categories, synchrony
+  pose_training/    # Pose-model distillation and the tracking benchmark (bench.py)
+  sync_eeg_vid/     # EEG <-> video sync (interactive CLI: eeg-sync)
+docs/               # Guides (QUICKSTART -> PIPELINE -> OUTPUTS), eeg_sync/, plans/, templates/
+scripts/            # Collaborator video compressor
 tests/              # pytest suite (`uv run pytest -q`)
 third_party/        # Git submodules: sam-3d-body, gazelle
+start-portal.ps1    # Launch the portal (+ public tunnel)
+
+Local only (gitignored):
+data/               # output/ (sessions), uploads/, compressed/, videos/, training/, runs/
+models/             # model weights (*.pt)
+logs/               # portal tunnel logs
 ```
 
-Per-module READMEs: [`video_inference/README.md`](video_inference/README.md).
+`src/video_inference/paths.py` defines these locations; set `EEG_SYNC_DATA_DIR`
+to keep `data/` on another drive.
+
+Per-module READMEs: [`src/video_inference/README.md`](src/video_inference/README.md).
 
 ---
 
@@ -258,7 +267,7 @@ Tutorials for downstream EEG analysis:
 | Multi-clap | `Enter`/`Space` | Save claps and exit |
 | All | `Q` / `Esc` | Quit (no save) |
 
-Performance details (frame caching, auto-downscale, instant seeking) in [`sync_eeg_vid/`](sync_eeg_vid/).
+Performance details (frame caching, auto-downscale, instant seeking) in [`src/sync_eeg_vid/`](src/sync_eeg_vid/).
 
 ---
 
@@ -277,7 +286,7 @@ CI runs lint + format check + tests on Python 3.10 and 3.11 (see `.github/workfl
 ### Data policy
 
 - **Never commit** raw participant videos, EEG recordings, or generated outputs.
-- `video_inference/data/`, `video_inference/compressed/`, `video_inference/output/` are gitignored.
+- `data/videos/`, `data/compressed/`, `data/output/` are gitignored.
 - Tests use synthetic fixtures in `tests/fixtures/`.
 - The one tracked JSON is `session_config.json` (per-session analysis windows — no PII).
 - The README example image is a pilot-session frame showing only an adult.

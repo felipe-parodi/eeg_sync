@@ -233,7 +233,7 @@ def test_smoke_extract_anchor_frames_from_real_video(tmp_path):
     sample = (
         Path(sample_env)
         if sample_env
-        else ROOT_DIR / "video_inference" / "compressed" / "P001c_Short_Full_rapid.mp4"
+        else ROOT_DIR / "data" / "compressed" / "P001c_Short_Full_rapid.mp4"
     )
     if not sample.exists():
         pytest.skip(f"Sample video not found: {sample}")

@@ -33,9 +33,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 
-DEFAULT_SAMPLE_VIDEO = (
-    ROOT_DIR / "video_inference" / "compressed" / "P001c_Short_Full_rapid.mp4"
-)
+DEFAULT_SAMPLE_VIDEO = ROOT_DIR / "data" / "compressed" / "P001c_Short_Full_rapid.mp4"
 SMOKE_TIMEOUT_S = 600
 
 pytestmark = pytest.mark.skipif(
