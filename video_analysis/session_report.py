@@ -24,6 +24,8 @@ from typing import Any
 
 import pandas as pd
 
+from video_analysis.pose_metrics import MIN_SYNC_WINDOWS, quality_verdict
+
 SESSION_METRICS_CSV = "session_metrics.csv"
 ALL_SESSIONS_CSV = "all_sessions_metrics.csv"
 REPORT_HTML = "report.html"
@@ -165,11 +167,17 @@ def collect_task_rows(session_dir: Path) -> pd.DataFrame:
             "task_end_s": float(parts["block_end_s"].max()),
             "duration_s": float((parts["block_end_s"] - parts["block_start_s"]).sum()),
         }
-        for col in ("block_frames", "frames_with_both"):
+        for col in ("block_frames", "frames_with_both", "n_segments"):
             if col in parts:
                 row[col] = int(parts[col].fillna(0).sum())
         if row.get("block_frames"):
             row["coverage_both"] = row.get("frames_with_both", 0) / row["block_frames"]
+        if "valid_seconds_both" in parts:
+            row["valid_seconds_both"] = float(
+                parts["valid_seconds_both"].fillna(0).sum()
+            )
+        if "longest_segment_s" in parts:
+            row["longest_segment_s"] = float(parts["longest_segment_s"].max())
 
         prox = _read_csv(camera_dir / "pose_metrics_proximity.csv")
         if not prox.empty and "block" in prox:
@@ -206,6 +214,7 @@ def collect_task_rows(session_dir: Path) -> pd.DataFrame:
             for col in ("gaze_convergence_mean", "gaze_convergence_chance"):
                 if col in parts:
                     row[col] = _weighted_mean(parts[col], weight)
+        row["quality_verdict"], row["quality_reasons"] = quality_verdict(row)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -265,6 +274,16 @@ def _chance(row: pd.Series, column: str) -> str:
     if column.endswith("unknown_pct"):
         return ""
     return f' <span class="muted">(chance {float(chance):.0f})</span>'
+
+
+def _sync_cell(row: pd.Series) -> str:
+    windows = row.get("sync_n_windows")
+    if windows is None or pd.isna(windows) or int(windows) < MIN_SYNC_WINDOWS:
+        return (
+            '<span class="muted">too few unbroken 20-second stretches '
+            "to measure</span>"
+        )
+    return f"{_fmt(row.get('sync_mean'), 2)}{_sync_chance(row)}"
 
 
 def _sync_chance(row: pd.Series) -> str:
@@ -327,7 +346,7 @@ def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
             f"{_fmt_time(row.get('block_end_s', 0))}</td>"
             f"<td>{_coverage_cell(row)}</td>"
             f"<td>{_fmt(row.get('proximity_mean'))}</td>"
-            f"<td>{_fmt(row.get('sync_mean'), 2)}{_sync_chance(row)}</td>"
+            f"<td>{_sync_cell(row)}</td>"
             + "".join(
                 f"<td>{_fmt(row.get(c))}{_chance(row, c)}</td>" for c, _ in gaze_cols
             )

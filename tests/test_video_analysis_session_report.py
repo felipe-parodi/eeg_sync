@@ -107,7 +107,12 @@ def test_report_shows_body_synchrony_with_chance(tmp_path: Path) -> None:
     summary_path = session / "camera_a" / "pose_metrics_summary.json"
     blocks = json.loads(summary_path.read_text(encoding="utf-8"))
     blocks[0].update(
-        {"sync_mean": 0.21, "sync_chance_mean": 0.03, "sync_minus_chance": 0.18}
+        {
+            "sync_mean": 0.21,
+            "sync_chance_mean": 0.03,
+            "sync_minus_chance": 0.18,
+            "sync_n_windows": 10,
+        }
     )
     summary_path.write_text(json.dumps(blocks), encoding="utf-8")
 
@@ -263,3 +268,29 @@ def test_cli_writes_study_task_table(tmp_path: Path) -> None:
 
     study = pd.read_csv(tmp_path / ALL_SESSIONS_TASK_CSV)
     assert sorted(study["task"]) == ["grocery", "storybook"]
+
+
+def test_task_rows_carry_pooled_verdict(tmp_path: Path) -> None:
+    from video_analysis.session_report import collect_task_rows
+
+    session = tmp_path / "1019"
+    _write_split_session(session)
+    tasks = collect_task_rows(session).set_index("task")
+
+    assert "quality_verdict" in tasks.columns
+    # grocery pools 4 + 6 = 10 synchrony windows and 450 both-tracked frames.
+    assert tasks.loc["grocery", "sync_n_windows"] == 10
+
+
+def test_report_hides_synchrony_with_too_few_windows(tmp_path: Path) -> None:
+    session = tmp_path / "1019"
+    _write_camera(session, "camera_a", 0.9)
+    path = session / "camera_a" / "pose_metrics_summary.json"
+    blocks = json.loads(path.read_text(encoding="utf-8"))
+    blocks[0].update({"sync_mean": 0.77, "sync_chance_mean": 0.01, "sync_n_windows": 1})
+    path.write_text(json.dumps(blocks), encoding="utf-8")
+
+    html = render_report_html(session, collect_session_rows(session))
+
+    assert "0.77" not in html
+    assert "too few" in html

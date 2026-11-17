@@ -155,3 +155,79 @@ def test_block_stats_include_body_synchrony():
     assert stats["sync_minus_chance"] == pytest.approx(
         stats["sync_mean"] - stats["sync_chance_mean"]
     )
+
+
+# ---- Valid time and quality verdict (metrics-validity plan, phase 4) ----
+
+
+def _block_pose(times_both, times_parent_only=(), fps=5.0):
+    rows = []
+    for tid, times in (
+        (0, list(times_both) + list(times_parent_only)),
+        (1, list(times_both)),
+    ):
+        for t in times:
+            for kp in ["kp_005", "kp_006", "kp_011", "kp_012"]:
+                rows.append(
+                    {
+                        "frame_idx": int(round(t * fps)),
+                        "timestamp_s": t,
+                        "track_id": tid,
+                        "track_label": "p",
+                        "keypoint_name": kp,
+                        "x_m": 100.0 * tid,
+                        "y_m": 0.0,
+                        "z_m": 0.0,
+                        "keypoint_confidence": 0.9,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_block_coverage_reports_valid_seconds_and_segments():
+    from video_analysis.pose_metrics import block_coverage
+
+    both = list(np.round(np.arange(0, 30, 0.2), 6)) + list(
+        np.round(np.arange(50, 60, 0.2), 6)
+    )
+    pose = _block_pose(both)
+    cov = block_coverage(pose, SessionBlock("b", 0.0, 100.0, "#999"), 5.0)
+
+    assert cov["valid_seconds_both"] == pytest.approx(len(both) / 5.0)
+    assert cov["n_segments"] == 2
+    assert cov["longest_segment_s"] == pytest.approx(30.0)
+
+
+def test_quality_verdict_levels_and_reasons():
+    from video_analysis.pose_metrics import quality_verdict
+
+    good = {"valid_seconds_both": 400.0, "coverage_both": 0.9, "sync_n_windows": 20}
+    assert quality_verdict(good) == ("usable", "")
+
+    low = {"valid_seconds_both": 400.0, "coverage_both": 0.3, "sync_n_windows": 20}
+    verdict, reasons = quality_verdict(low)
+    assert verdict == "check" and "30%" in reasons
+
+    few = {"valid_seconds_both": 400.0, "coverage_both": 0.9, "sync_n_windows": 1}
+    verdict, reasons = quality_verdict(few)
+    assert verdict == "check" and "synchrony" in reasons
+
+    tiny = {"valid_seconds_both": 20.0, "coverage_both": 0.1, "sync_n_windows": 0}
+    verdict, reasons = quality_verdict(tiny)
+    assert verdict == "insufficient" and "20 s" in reasons
+
+
+def test_block_stats_include_quality_verdict():
+    blocks = [SessionBlock("b", 0.0, 120.0, "#999")]
+    pose_df = _make_pose_df(6 * 120, fps=6.0)
+    stats = compute_per_block_metrics(pose_df, blocks, frame_rate=6.0)["block_stats"][0]
+
+    for key in (
+        "valid_seconds_both",
+        "n_segments",
+        "longest_segment_s",
+        "quality_verdict",
+        "quality_reasons",
+    ):
+        assert key in stats
+    assert stats["quality_verdict"] in {"usable", "check", "insufficient"}

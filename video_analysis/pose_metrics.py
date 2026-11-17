@@ -55,6 +55,16 @@ BLOCK_COLORS = {
 # flagged: their metrics describe only part of the block.
 LOW_COVERAGE_THRESHOLD = 0.5
 
+# Data-check defaults behind ``quality_verdict``. These describe whether the
+# numbers rest on enough data; they are not the lab's inclusion rule, which is
+# a study decision made before looking at results.
+# A block with less than this much time with both people tracked has too little
+# data for its numbers to mean much.
+MIN_VALID_SECONDS = 60.0
+# Movement synchrony needs at least this many 20 s windows (unbroken stretches
+# with both people tracked); with fewer it is not reported.
+MIN_SYNC_WINDOWS = 3
+
 
 # ---------------------------------------------------------------------------
 # Metric computation
@@ -87,8 +97,17 @@ def block_coverage(
     )
     parent = times.get(parent_id, set())
     child = times.get(child_id, set())
-    both = len(parent & child)
+    both_frames = np.array(sorted(parent & child))
+    both = len(both_frames)
     coverage = min(1.0, both / block_frames) if block_frames > 0 else 0.0
+    if both:
+        run_lengths = np.diff(
+            np.flatnonzero(np.diff(np.r_[-10, both_frames, both_frames[-1] + 10]) > 1)
+        )
+        n_segments = int(len(run_lengths))
+        longest = float(run_lengths.max()) / frame_rate
+    else:
+        n_segments, longest = 0, 0.0
     return {
         "block_start_s": block.start_s,
         "block_end_s": block.end_s,
@@ -98,7 +117,46 @@ def block_coverage(
         "frames_with_both": both,
         "coverage_both": round(coverage, 4),
         "low_coverage": bool(coverage < LOW_COVERAGE_THRESHOLD),
+        "valid_seconds_both": round(both / frame_rate, 2),
+        "n_segments": n_segments,
+        "longest_segment_s": round(longest, 2),
     }
+
+
+def quality_verdict(stats: Dict[str, Any]) -> tuple[str, str]:
+    """Data check for one block or task: is there enough data behind the numbers?
+
+    ``insufficient`` when both people are tracked for less than
+    ``MIN_VALID_SECONDS``; ``check`` when coverage is below
+    ``LOW_COVERAGE_THRESHOLD`` or there are fewer than ``MIN_SYNC_WINDOWS``
+    synchrony windows; otherwise ``usable``. This is a guide for looking at
+    the overlay clips, not an inclusion rule.
+
+    Args:
+        stats: Row with ``valid_seconds_both``, ``coverage_both`` and
+            (optionally) ``sync_n_windows``.
+
+    Returns:
+        ``(verdict, reasons)``; reasons are plain sentences joined by "; ".
+    """
+    seconds = float(stats.get("valid_seconds_both", 0.0) or 0.0)
+    coverage = float(stats.get("coverage_both", 0.0) or 0.0)
+    windows = stats.get("sync_n_windows")
+    windows = 0 if windows is None or pd.isna(windows) else int(windows)
+    reasons = []
+    if seconds < MIN_VALID_SECONDS:
+        reasons.append(
+            f"both people tracked for only {seconds:.0f} s "
+            f"(less than {MIN_VALID_SECONDS:.0f} s)"
+        )
+        return "insufficient", "; ".join(reasons)
+    if coverage < LOW_COVERAGE_THRESHOLD:
+        reasons.append(f"both people tracked in only {coverage:.0%} of the time")
+    if windows < MIN_SYNC_WINDOWS:
+        reasons.append(
+            "too few unbroken 20-second stretches to measure movement synchrony"
+        )
+    return ("check" if reasons else "usable"), "; ".join(reasons)
 
 
 def compute_per_block_metrics(
@@ -137,7 +195,11 @@ def compute_per_block_metrics(
 
         coverage = block_coverage(block_pose, block, frame_rate, parent_id, child_id)
         if block_pose.empty:
-            block_stats.append({"block": block.name, **coverage})
+            empty_stats: Dict[str, Any] = {"block": block.name, **coverage}
+            empty_stats["quality_verdict"], empty_stats["quality_reasons"] = (
+                quality_verdict(empty_stats)
+            )
+            block_stats.append(empty_stats)
             continue
 
         # Torso proximity
@@ -189,6 +251,7 @@ def compute_per_block_metrics(
                 stats["sync_minus_chance"] = (
                     stats["sync_mean"] - stats["sync_chance_mean"]
                 )
+        stats["quality_verdict"], stats["quality_reasons"] = quality_verdict(stats)
         block_stats.append(stats)
 
     proximity_df = (

@@ -122,7 +122,7 @@ data; otherwise drop movement synchrony from the portal and report.
   ~0). Render flagged frames to PNG for **user visual confirmation**; do not
   claim correctness from numbers alone.
 
-## Phase 4: Valid time and verdict
+## Phase 4: Valid time and verdict (done 2026-11-16: defaults 60 s / 50% / 3 windows; `suspect_person_share` waits for Phase 3; tracking_* columns left as they are)
 
 - Add `valid_seconds_both`, `n_segments`, `longest_segment_s`.
 - Replace the single 50% flag with `quality_verdict` + `quality_reasons`, driven
