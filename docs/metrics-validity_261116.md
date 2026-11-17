@@ -43,6 +43,31 @@ Added to `session_metrics.csv` (one row per camera x block):
 
 New `task_metrics.csv`: one row per camera x task (`<task>_partN` rejoined).
 
+## Phase 0: Frame timing and gap filling (added 2026-11-16, done before Phase 3)
+
+Found by an exploratory bug hunt and checked on 1016v3/1019v3: uploads are 10 fps
+and `fps=6` keeps frames at 100/200/200 ms steps while stamping them 167 ms apart,
+so displacement repeats every 3 frames (0.72/0.99/0.98 of the mean) in both
+people. The user chose 5 fps.
+
+- `video_inference/frames.py`: probe the source rate; keep every k-th source frame
+  (k = round(source fps / 5)), counted from the start of the video so every block
+  lands on one shared grid; stamp each frame with its true source time (ffmpeg
+  `showinfo`); write `frames/extraction_info.json` (source fps, k, achieved rate).
+- Portal compressors (`portal/jobs.py`, `scripts/compress_videos_for_portal.py`)
+  output 10 fps (was 8, which can only give an even 4 fps).
+- `PORTAL_DEFAULT_FRAME_RATE = 5.0`; after phase 1 the portal reads the achieved
+  rate per camera, uses it downstream, and stops with a plain message if the
+  cameras disagree.
+- `video_analysis/interpolate.py`: fill only at extracted frame times
+  (`frame_index.csv`), only gaps no longer than `max_gap_seconds` between two
+  observations, and never across an extraction window. (Bug hunt findings 2-3:
+  `limit=` partly filled every gap; off-grid blocks were dropped.)
+- Coverage counts frames from `frame_index.csv` when available.
+- Sessions must be re-run from frame extraction afterwards.
+- Note: `offline_assoc` frame-count thresholds were tuned at 6 fps (e.g. 18
+  frames = 3 s); check them at 5 fps.
+
 ## Phase 1: Gap-aware, time-based movement synchrony
 
 - In `gaze_analysis/synchrony.py`, split the merged parent/child series into
@@ -55,7 +80,7 @@ New `task_metrics.csv`: one row per camera x task (`<task>_partN` rejoined).
   it; every window span <= `window_s` + one frame; a run shorter than `window_s`
   yields no window.
 
-## Phase 2: Synchrony chance baseline
+## Phase 2: Synchrony chance baseline (done; result: real minus chance = 0.008 on average, sd 0.033, n = 34 blocks)
 
 - Circularly shift the child series by 60 s within the block (same convention as
   gaze chance), recompute, and write `xcorr_chance_mean` and
@@ -67,6 +92,13 @@ New `task_metrics.csv`: one row per camera x task (`<task>_partN` rejoined).
   report that to the user before going further (possible next steps: lag-0
   correlation, longer windows, or keypoint-level motion energy instead of torso
   speed).
+
+## Phase 2b: Alternative synchrony measures (user approved)
+
+After Phase 0 re-extraction, compare on 1011-1020: lag-0 correlation, longer
+windows (10-30 s), and whole-body motion energy (all keypoints) against their
+chance baselines. Keep the measure that clearly separates real from shifted
+data; otherwise drop movement synchrony from the portal and report.
 
 ## Phase 3: False-person check
 
@@ -105,6 +137,23 @@ New `task_metrics.csv`: one row per camera x task (`<task>_partN` rejoined).
 - Append task rows to the study-wide table as `all_sessions_task_metrics.csv`.
 - Tests: two parts with known frames give the pooled mean/median; part medians
   are not averaged.
+
+## Phase 5b: Report and study table hygiene (bug hunt)
+
+- Refuse or archive an existing `output/<session_id>` folder at submit, so a
+  re-run never mixes old and new rows (finding 5; portal side in revamp Phase 3).
+- `all_sessions_metrics.csv`: add a `metrics_version` column and include only
+  current-version sessions (finding 6).
+- Gaze and synchrony chance: report missing below a minimum usable span instead
+  of shifting by seconds; smooth real and chance categories the same way
+  (finding 11).
+- Low-confidence infill in `temporal_smooth.py` must not cross gaps (finding 12,
+  confirm first).
+
+## Phase 5c: Anchor coverage (bug hunt finding 7)
+
+- Guarantee at least 2 anchor frames per block or part (storybook blocks got 0-1).
+- Blind-check parent/child labels in the affected overlay clips.
 
 ## Phase 6: Docs and re-run
 

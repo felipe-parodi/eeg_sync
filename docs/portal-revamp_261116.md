@@ -41,6 +41,11 @@ Branch: `feat/portal-revamp` (from `feat/pose-quality-overhaul`).
 - All visual results must be **checked by the user** in a browser before a phase
   is called done.
 
+## Status
+
+- Phase 1 done (templates). Phase 2 done (design system, Sessions home page,
+  session report route). Visual check by the user pending.
+
 ## Phase 1: Template infrastructure (pure refactor)
 
 - `uv add jinja2` (already installed transitively; declare it).
@@ -73,6 +78,14 @@ Branch: `feat/portal-revamp` (from `feat/pose-quality-overhaul`).
 - "Copy camera A tasks to camera B" helper (clocks differ, so it pre-fills
   for editing, never silently).
 - Still posts the existing text format, so the backend contract does not change.
+- Validation from the bug hunt (finding 9): reject `13:06:00`-style hours when
+  minutes were meant (confirm with the user), negative, `nan`/`inf`, minutes or
+  seconds >= 60, duplicate or colliding block names (`story_part1` vs generated
+  parts), parts shorter than 10 s, blocks wholly inside an exclusion (say so),
+  and times past the video length (browser-read duration; ffprobe re-check on
+  the server after upload).
+- Session ID reuse (finding 5): warn when `output/<session_id>` exists and ask
+  to pick a new ID or confirm replacing (archive, never mix).
 - Tests: rendering; server-side validation unchanged; JS kept small enough to
   review by hand.
 
@@ -83,7 +96,12 @@ Branch: `feat/portal-revamp` (from `feat/pose-quality-overhaul`).
   table in `jobs.py`.
 - Plain-language current step, elapsed time, per-camera progress.
 - `GET /jobs/{id}/status.json`; poll with `fetch` instead of full reload.
-- Failure state: one-sentence explanation + "show technical log" disclosure.
+- Failure state: one-sentence explanation naming the step + "show technical
+  log" disclosure; never a raw command line (finding 10).
+- Accept parent labels only while the job is waiting for them; otherwise say
+  so (finding 8: submits relaunched phase 2 on finished/running jobs).
+- An overlay clip with nobody tracked must not fail the job: render the raw
+  frames or skip that clip with a note (finding 4).
 
 ## Phase 5: Parent labeling page
 
