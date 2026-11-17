@@ -12,7 +12,11 @@ from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 
 from .compress import CompressionResult, compress_video
-from .frames import FrameExtractionResult, extract_frames_ffmpeg
+from .frames import (
+    FrameExtractionResult,
+    extract_frames_ffmpeg,
+    read_achieved_frame_rate,
+)
 from .rtmlib_runner import RtmlibRunnerConfig, run_rtmlib_pose_on_images
 from .sam3d_runner import RunnerConfig, run_sam3d_on_images
 from .schema import ValidationResult, validate_session_output
@@ -320,7 +324,7 @@ def run_camera_pipeline(
         extraction_result = FrameExtractionResult(
             video_path=compression_result.output_path,
             frames_dir=frames_dir,
-            frame_rate=config.frame_rate,
+            frame_rate=read_achieved_frame_rate(frames_dir, config.frame_rate),
             frame_paths=existing_frames,
             command=[],
             executed=False,
