@@ -83,41 +83,21 @@ def _frame_is_clear(frame_rows: pd.DataFrame, max_iou: float) -> bool:
     return _bbox_iou(bboxes[0], bboxes[1]) <= max_iou
 
 
-def select_anchor_frames(
-    tracks_df: pd.DataFrame,
-    n_anchors: int = 10,
-    max_iou: float = 0.3,
-    edge_margin_s: float = 1.0,
-) -> List[AnchorCandidate]:
-    """Pick up to N evenly spread frames suitable for human annotation.
+MIN_ANCHORS_PER_BLOCK = 2
 
-    Strategy:
-        1. Drop the first/last ``edge_margin_s`` seconds (often startup or
-           fade-out frames).
-        2. Keep only *clear* frames (exactly two detections, bbox IoU <
-           ``max_iou``).
-        3. Pick N clear frames evenly spaced by rank, so anchors spread over
-           the analyzed footage and none are lost to gaps between blocks.
-        4. Sort the resulting candidates by timestamp.
 
-    Returns ``< n_anchors`` candidates when there are not enough clear
-    frames in the session — the caller should treat this as "best-effort".
-    """
-    if tracks_df.empty or n_anchors < 1:
-        return []
-
-    t_min = float(tracks_df["timestamp_s"].min()) + edge_margin_s
-    t_max = float(tracks_df["timestamp_s"].max()) - edge_margin_s
-    if t_max <= t_min:
-        return []
-
-    clear: List[Tuple[int, float, List[dict]]] = []
+def _two_person_frames(
+    tracks_df: pd.DataFrame, t_min: float, t_max: float
+) -> List[Tuple[int, float, float, List[dict]]]:
+    """Frames with exactly two detections: (frame_idx, time, iou, tracks)."""
+    out: List[Tuple[int, float, float, List[dict]]] = []
     for frame_idx, frame_rows in tracks_df.groupby("frame_idx", sort=True):
-        if not _frame_is_clear(frame_rows, max_iou=max_iou):
+        if len(frame_rows) != 2:
             continue
         ts = float(frame_rows["timestamp_s"].iloc[0])
         if ts < t_min or ts > t_max:
             continue
+        boxes = frame_rows[["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]].to_numpy()
         tracks = [
             {
                 "track_id": int(row["track_id"]),
@@ -130,23 +110,83 @@ def select_anchor_frames(
             }
             for _, row in frame_rows.iterrows()
         ]
-        clear.append((int(frame_idx), ts, tracks))
+        out.append((int(frame_idx), ts, _bbox_iou(boxes[0], boxes[1]), tracks))
+    return out
 
-    if not clear:
+
+def _spread(items: list, k: int) -> list:
+    """Pick k items evenly by rank (all of them when there are fewer)."""
+    if k <= 0 or not items:
         return []
+    if len(items) <= k:
+        return list(items)
+    picks = np.unique(np.round(np.linspace(0, len(items) - 1, k)).astype(int))
+    return [items[int(i)] for i in picks]
 
-    # Spread anchors evenly over the clear frames themselves (by rank), not
-    # over the wall-clock span: time targets that fall in the gap between two
-    # analysis blocks would all snap to the same frame and be wasted.
-    picks = np.unique(np.round(np.linspace(0, len(clear) - 1, n_anchors)).astype(int))
 
-    candidates: List[AnchorCandidate] = []
-    for nearest in picks:
-        frame_idx, ts, tracks = clear[int(nearest)]
-        candidates.append(
-            AnchorCandidate(frame_idx=frame_idx, timestamp_s=ts, tracks=tracks)
-        )
+def select_anchor_frames(
+    tracks_df: pd.DataFrame,
+    n_anchors: int = 10,
+    max_iou: float = 0.3,
+    edge_margin_s: float = 1.0,
+    blocks: Sequence[Tuple[str, float, float]] | None = None,
+    min_per_block: int = MIN_ANCHORS_PER_BLOCK,
+) -> List[AnchorCandidate]:
+    """Pick up to N evenly spread frames suitable for human annotation.
 
+    Strategy:
+        1. Drop the first/last ``edge_margin_s`` seconds (often startup or
+           fade-out frames).
+        2. Prefer *clear* frames (exactly two detections, bbox IoU <=
+           ``max_iou``).
+        3. When ``blocks`` are given, first give every block
+           ``min_per_block`` anchors: its clear frames spread by rank, or,
+           if it has too few (a child on the parent's lap), its two-person
+           frames with the least overlap. Labels only steer roles near
+           themselves, so a block without anchors can end up with swapped
+           roles.
+        4. Fill the remaining budget with clear frames spread by rank over
+           the whole recording (time targets in gaps between blocks would
+           all snap to the same frame).
+        5. Sort the result by timestamp.
+
+    Returns fewer than ``n_anchors`` candidates when there are not enough
+    usable frames; with many blocks it may return more, so that each block
+    keeps ``min_per_block``.
+    """
+    if tracks_df.empty or n_anchors < 1:
+        return []
+    t_min = float(tracks_df["timestamp_s"].min()) + edge_margin_s
+    t_max = float(tracks_df["timestamp_s"].max()) - edge_margin_s
+    if t_max <= t_min:
+        return []
+    frames = _two_person_frames(tracks_df, t_min, t_max)
+    clear = [f for f in frames if f[2] <= max_iou]
+    chosen: dict[int, Tuple[int, float, float, List[dict]]] = {}
+
+    for _name, start, end in blocks or []:
+        in_block = [f for f in frames if start <= f[1] <= end]
+        block_clear = [f for f in in_block if f[2] <= max_iou]
+        picks = _spread(block_clear, min_per_block)
+        if len(picks) < min_per_block:
+            taken = {f[0] for f in picks}
+            fallback = sorted(
+                (f for f in in_block if f[0] not in taken), key=lambda f: f[2]
+            )
+            picks += fallback[: min_per_block - len(picks)]
+        for f in picks:
+            chosen[f[0]] = f
+
+    remaining = n_anchors - len(chosen)
+    if remaining > 0:
+        pool = [f for f in clear if f[0] not in chosen]
+        for f in _spread(pool, remaining):
+            chosen[f[0]] = f
+
+    candidates = [
+        AnchorCandidate(frame_idx=f[0], timestamp_s=f[1], tracks=f[3])
+        for f in chosen.values()
+    ]
     candidates.sort(key=lambda c: c.timestamp_s)
     return candidates
 
@@ -215,6 +255,7 @@ def extract_anchor_frames(
     max_iou: float = 0.3,
     edge_margin_s: float = 1.0,
     ffmpeg_bin: str = "ffmpeg",
+    blocks: Sequence[Tuple[str, float, float]] | None = None,
 ) -> List[AnchorMetadata]:
     """End-to-end anchor frame extraction + overlay rendering.
 
@@ -234,6 +275,7 @@ def extract_anchor_frames(
         n_anchors=n_anchors,
         max_iou=max_iou,
         edge_margin_s=edge_margin_s,
+        blocks=blocks,
     )
 
     metadata: List[AnchorMetadata] = []

@@ -1563,6 +1563,10 @@ def extract_job_anchor_frames(
             source_video=Path(source_video),
             output_dir=out_dir,
             n_anchors=n_anchors,
+            blocks=[
+                (block.name, block.start_s, block.end_s)
+                for block in blocks_for_camera(config, camera_id)
+            ],
         )
         summary[camera_id] = {
             "count": len(metadata),
