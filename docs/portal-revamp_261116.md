@@ -45,6 +45,15 @@ Branch: `feat/portal-revamp` (from `feat/pose-quality-overhaul`).
 
 - Phase 1 done (templates). Phase 2 done (design system, Sessions home page,
   session report route). Visual check by the user pending.
+- Phase 3 done (2026-11-16): numbered step form with task / extra-person rows,
+  per-camera timeline preview, copy A to B, browser checks mirrored on the
+  server (`parse_timecode`, `_parse_blocks_text`, `plan_camera_blocks`),
+  `MIN_PART_S = 10` with dropped parts recorded and listed on the job page,
+  ffprobe length re-check in `/uploads/{id}/finish`, session-ID reuse check
+  (`GET /sessions/{id}/exists`, 409 at init, archive to
+  `output/_archive/<id>_<stamp>` at finish), job page shows results only when
+  complete. M:SS accepts minutes >= 60 (`75:30`); only H:MM:SS limits minutes.
+  Visual check by the user pending.
 
 ## Phase 1: Template infrastructure (pure refactor)
 

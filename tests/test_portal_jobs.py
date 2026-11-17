@@ -51,10 +51,9 @@ def test_upload_page_exposes_drag_and_drop_targets(monkeypatch) -> None:
     )
     assert "Drop GoPro Video A here" in text
     assert "Drop GoPro Video B here" in text
-    assert "Upload at least one GoPro video" in text
-    assert "Video A Analysis Blocks" in text
-    assert "Video B Analysis Blocks" in text
-    assert 'class="info-icon"' in text
+    assert "Choose at least one GoPro video" in text
+    assert "Video A tasks" in text
+    assert "Video B tasks" in text
 
 
 def test_portal_password_and_secret_must_be_configured(monkeypatch) -> None:

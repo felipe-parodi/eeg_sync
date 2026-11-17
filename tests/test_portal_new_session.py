@@ -10,6 +10,7 @@ showing results for a finished job.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -403,6 +404,36 @@ def test_metadata_without_dropped_parts_has_empty_lists() -> None:
 
 
 # --- the form still posts the old text format ----------------------------------
+
+
+def test_new_session_form_keeps_old_text_fields(client: TestClient) -> None:
+    text = client.get("/new").text
+    for name in (
+        'name="blocks_text_a"',
+        'name="blocks_text_b"',
+        'name="exclusions_text_a"',
+        'name="exclusions_text_b"',
+        'name="session_id"',
+        'name="include_gaze"',
+        'name="replace_existing"',
+    ):
+        assert name in text
+    for element_id in (
+        'id="tasks-camera_a"',
+        'id="tasks-camera_b"',
+        'id="windows-camera_a"',
+        'id="windows-camera_b"',
+        'id="timeline-camera_a"',
+        'id="timeline-camera_b"',
+        'id="copy-tasks-a-to-b"',
+        'id="session-exists"',
+        'id="task-name-suggestions"',
+    ):
+        assert element_id in text
+    for suggestion in ("grocery", "storybook", "synchrony"):
+        assert f'<option value="{suggestion}">' in text
+    assert "clocks differ" in text
+    assert f"const MIN_PART_S = {MIN_PART_S};" in text
 
 
 def test_init_accepts_old_text_format(client: TestClient, portal_env: Path) -> None:
@@ -820,3 +851,81 @@ def test_job_page_lists_dropped_parts(client: TestClient, portal_env: Path) -> N
     assert "Skipped because shorter than 10 s" in text
     assert "b_grocery_b_part2" in text
     assert "Video A, 18:21 to 18:25 (4 s)" in text
+
+
+# --- browser checks mirror the server ------------------------------------------------
+
+INDEX_JS = Path(portal_app.STATIC_DIR) / "index.js"
+JS_TIME_CASES = [
+    "83",
+    "83.5",
+    "13:26",
+    "75:30",
+    "1:02:03.5",
+    "",
+    "-5",
+    "nan",
+    "inf",
+    "1e3",
+    "1.5:30",
+    "1:75",
+    "1:75:00",
+    "1:05:60",
+    "abc",
+]
+
+
+def _run_js_helpers(expression: str) -> Any:
+    """Evaluate ``expression`` with the time/split helpers from index.js.
+
+    Args:
+        expression: JavaScript expression whose JSON value is returned.
+
+    Returns:
+        The decoded JSON value.
+    """
+    source = INDEX_JS.read_text(encoding="utf-8")
+    start = source.index("// ---- Time helpers")
+    end = source.index("// ---- Rows")
+    hint = next(line for line in source.splitlines() if "const TIME_HINT" in line)
+    script = "\n".join(
+        [
+            f"const MIN_PART_S = {MIN_PART_S};",
+            hint,
+            source[start:end],
+            f"process.stdout.write(JSON.stringify({expression}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=True
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_browser_time_parsing_matches_server() -> None:
+    js = _run_js_helpers("%s.map((t) => parseTime(t))" % json.dumps(JS_TIME_CASES))
+    for text, answer in zip(JS_TIME_CASES, js):
+        try:
+            assert answer == {"value": parse_timecode(text)}, text
+        except ValueError as error:
+            assert answer == {"error": str(error)}, text
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_browser_split_matches_server() -> None:
+    windows = [(1086.0, 1101.0), (1105.0, 1200.0), (1500.0, 1700.0)]
+    js = _run_js_helpers(
+        "splitTask({slug: 'grocery', start: 960, end: 1610}, %s)"
+        % json.dumps([{"start": a, "end": b} for a, b in windows])
+    )
+    kept, dropped = split_blocks_with_min_part(
+        [SessionBlock("grocery", 960.0, 1610.0)],
+        [ExclusionWindow(a, b) for a, b in windows],
+    )
+    expected = sorted(
+        [(b.name, b.start_s, b.end_s, False) for b in kept]
+        + [(b.name, b.start_s, b.end_s, True) for b in dropped]
+    )
+    got = sorted((p["name"], p["start"], p["end"], p["dropped"]) for p in js)
+    assert got == expected
