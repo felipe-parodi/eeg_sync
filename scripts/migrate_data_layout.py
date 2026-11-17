@@ -86,7 +86,9 @@ def migrate(root: Path, dry_run: bool = False) -> dict[str, list[str]]:
                 if not dry_run:
                     weights.unlink()
             else:
-                report["conflicts"].append(f"{weights} (differs from {dst}; left in place)")
+                report["conflicts"].append(
+                    f"{weights} (differs from {dst}; left in place)"
+                )
         else:
             _merge(weights, dst, report, dry_run)
     for name in LOG_FILES:

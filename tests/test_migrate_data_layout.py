@@ -59,8 +59,15 @@ def test_migration_moves_everything_into_new_layout(tmp_path: Path) -> None:
     for rel in expected:
         assert (tmp_path / rel).exists(), rel
     # Old locations are gone (leftover folders with only caches removed).
-    for rel in ("video_inference", "pose_training", "compressed_video", "runs",
-                "yolo11l-pose.pt", "yolo26n.pt", "portal_server.log"):
+    for rel in (
+        "video_inference",
+        "pose_training",
+        "compressed_video",
+        "runs",
+        "yolo11l-pose.pt",
+        "yolo26n.pt",
+        "portal_server.log",
+    ):
         assert not (tmp_path / rel).exists(), rel
     assert report["conflicts"] == []
 
