@@ -41,8 +41,8 @@ MIN_PART_S = 10.0
 # model (downloaded on demand). See pose_training/ and AGENTS.md.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PORTAL_POSE_WEIGHTS = (
-    _REPO_ROOT / "yolo11l-pose-dense.pt",
-    _REPO_ROOT / "yolo11l-pose-fused3.pt",
+    _REPO_ROOT / "models" / "yolo11l-pose-dense.pt",
+    _REPO_ROOT / "models" / "yolo11l-pose-fused3.pt",
 )
 PORTAL_DEFAULT_MODEL_PATH = next(
     (str(path) for path in _PORTAL_POSE_WEIGHTS if path.exists()),

@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import unquote, urlparse
 
+from video_inference.weights import resolve_weights
+
 VERDICT_FIELDS = ["id", "image", "frame_path", "left_is_a", "verdict"]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -130,7 +132,9 @@ def build_verify_set(
 
     from .evaluate import _draw_pose
 
-    model_a, model_b = YOLO(weights_a), YOLO(weights_b)
+    model_a, model_b = YOLO(resolve_weights(weights_a)), YOLO(
+        resolve_weights(weights_b)
+    )
     picked = stratified_sample(rows, n, seed)
     rng = random.Random(seed)
     pairs_dir = out_dir / "pairs"

@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from video_inference.weights import resolve_weights
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_YAML = REPO_ROOT / "pose_training" / "data" / "yolo" / "data.yaml"
 DEFAULT_PROJECT = REPO_ROOT / "pose_training" / "runs"
@@ -117,7 +119,7 @@ def train_student(config: TrainConfig, model: Optional[Any] = None) -> Path:
     if model is None:
         from ultralytics import YOLO
 
-        model = YOLO(config.base_weights)
+        model = YOLO(resolve_weights(config.base_weights))
 
     if config.augment:
         install_custom_albumentations()

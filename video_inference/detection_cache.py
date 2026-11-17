@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 
+from video_inference.weights import resolve_weights
+
 # Keep faint detections: association decides which ones are real people.
 DEFAULT_CACHE_CONF = 0.05
 
@@ -196,7 +198,7 @@ def build_detection_cache(
 
     on_cpu = str(device).startswith("cpu")
     use_half = half and not on_cpu
-    model = YOLO(str(model_path))
+    model = YOLO(resolve_weights(model_path))
     reid = ReID(path=None, device=device, half=use_half).model
     paths = list(image_paths)
 

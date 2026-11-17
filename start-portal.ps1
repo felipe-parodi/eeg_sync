@@ -135,8 +135,10 @@ function Start-LocalhostRunTunnel {
 
 $tunnelProc = $null
 if (-not $NoTunnel) {
-    $tunnelLog = Join-Path $repoRoot '.portal_tunnel.log'
-    $tunnelErrLog = Join-Path $repoRoot '.portal_tunnel.err.log'
+    $logDir = Join-Path $repoRoot 'logs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $tunnelLog = Join-Path $logDir 'portal_tunnel.log'
+    $tunnelErrLog = Join-Path $logDir 'portal_tunnel.err.log'
     Remove-Item -ErrorAction SilentlyContinue $tunnelLog, $tunnelErrLog
 
     $result = $null

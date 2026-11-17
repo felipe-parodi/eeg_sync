@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
+from video_inference.weights import resolve_weights
+
 from .coco import SKELETON_EDGES
 from .pseudo_label import _result_to_arrays, extract_persons
 
@@ -80,7 +82,7 @@ def model_pred_confidences(
     if model is None:
         from ultralytics import YOLO
 
-        model = YOLO(weights)
+        model = YOLO(resolve_weights(weights))
     collected: Dict[str, List[float]] = {
         "instance_conf": [],
         "head_kpt_conf": [],
@@ -107,7 +109,7 @@ def validate_on_split(
     if model is None:
         from ultralytics import YOLO
 
-        model = YOLO(weights)
+        model = YOLO(resolve_weights(weights))
     metrics = model.val(
         data=str(data_yaml),
         split=split,
@@ -201,8 +203,8 @@ def render_overlay_comparison(
     if old_model is None or new_model is None:
         from ultralytics import YOLO
 
-        old_model = old_model or YOLO(config.old_weights)
-        new_model = new_model or YOLO(config.new_weights)
+        old_model = old_model or YOLO(resolve_weights(config.old_weights))
+        new_model = new_model or YOLO(resolve_weights(config.new_weights))
 
     capture = cv2.VideoCapture(str(video_path))
     src_fps = capture.get(cv2.CAP_PROP_FPS) or 30.0

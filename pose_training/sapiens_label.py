@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from video_inference.weights import resolve_weights
+
 from .boxes import clean_detection_boxes
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -151,7 +153,7 @@ def run_sapiens_labeling(
     if detector is None:
         from ultralytics import YOLO
 
-        detector = YOLO(config.detector_weights)
+        detector = YOLO(resolve_weights(config.detector_weights))
     if model is None:
         from huggingface_hub import hf_hub_download
 

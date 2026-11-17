@@ -19,7 +19,7 @@ from .coco import validate_flip_idx
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VIDEO_DIR = REPO_ROOT / "compressed_video"
-DEFAULT_STUDENT_WEIGHTS = REPO_ROOT / "yolo11l-pose.pt"
+DEFAULT_STUDENT_WEIGHTS = REPO_ROOT / "models" / "yolo11l-pose.pt"
 
 
 @dataclass

@@ -71,6 +71,10 @@ Split into focused modules with a backward-compatible `__init__.py`:
 
 All public symbols are re-exported from `sync_eeg_vid.__init__`, so `from sync_eeg_vid import find_sync_pulse` still works.
 
+### Model weights
+
+All `*.pt` weights live in `models/` (gitignored). Refer to them by bare name (`yolo11l-pose.pt`); `video_inference/weights.py` `resolve_weights` maps bare names to `models/<name>`, so stock models also download there.
+
 ### Frame timing (critical)
 
 Frames are extracted at 5 fps by keeping every k-th source frame (k = round(source fps / 5); 10 fps portal uploads give every 2nd frame), counted from the start of the video so all blocks share one time grid. `frames/frame_index.csv` holds each frame's true source time; `frames/extraction_info.json` holds the achieved rate, which the portal uses for everything downstream. Do not go back to ffmpeg's `fps=` filter: with a rate that does not divide the source rate it produces uneven frame spacing under evenly spaced timestamps.

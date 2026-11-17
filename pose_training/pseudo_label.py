@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
+from video_inference.weights import resolve_weights
+
 from .boxes import clean_detection_boxes
 from .coco import FLIP_IDX
 
@@ -242,7 +244,7 @@ def run_pseudo_labeling(
     if model is None:
         from ultralytics import YOLO
 
-        model = YOLO(config.teacher_weights)
+        model = YOLO(resolve_weights(config.teacher_weights))
 
     predict_kwargs = dict(
         imgsz=config.imgsz,

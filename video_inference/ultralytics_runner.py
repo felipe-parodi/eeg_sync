@@ -17,6 +17,7 @@ from .tracking import (
     TwoPersonTrackerState,
     assign_two_person_tracks,
 )
+from .weights import resolve_weights
 
 
 @dataclass
@@ -384,7 +385,7 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
     images = _iter_image_paths(image_folder, config.max_images)
     if config.tracker_backend == "offline":
         return _run_offline_two_person(config, images, ultra_device)
-    model = YOLO(config.model_path)
+    model = YOLO(resolve_weights(config.model_path))
 
     state: Optional[TwoPersonTrackerState] = None
     frame_outputs: List[Dict[str, Any]] = []
