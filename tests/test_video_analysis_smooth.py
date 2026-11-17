@@ -410,3 +410,37 @@ def test_conf_gate_zero_disables_gating():
     # With gating disabled, high-confidence values SHOULD be smoothed.
     # A step change from 0→10 with bidirectional EMA won't match raw.
     assert not np.allclose(result["x_m"].values, raw)
+
+
+def test_infill_does_not_reach_across_a_time_gap():
+    """A low-confidence keypoint at the end of one stretch is filled from that
+    stretch only, never from the person's position minutes later."""
+    import numpy as np
+    import pandas as pd
+
+    from video_analysis.temporal_smooth import infill_low_confidence_keypoints
+
+    ts = list(np.round(np.arange(0, 2.0, 0.2), 6)) + list(
+        np.round(np.arange(62, 64, 0.2), 6)
+    )
+    xs = [10.0] * 10 + [900.0] * 10
+    conf = [0.9] * 9 + [0.05] + [0.9] * 10  # last frame of stretch 1 is unreliable
+    xs[9] = 500.0  # garbage position at the low-confidence frame
+    pose = pd.DataFrame(
+        {
+            "frame_idx": [int(round(t * 5)) for t in ts],
+            "timestamp_s": ts,
+            "track_id": 0,
+            "track_label": "parent",
+            "keypoint_name": "kp_000",
+            "x_m": xs,
+            "y_m": 0.0,
+            "z_m": 0.0,
+            "keypoint_confidence": conf,
+        }
+    )
+
+    out = infill_low_confidence_keypoints(pose, conf_threshold=0.3, max_infill_run=3)
+
+    filled = out.loc[np.isclose(out["timestamp_s"], 1.8), "x_m"].iloc[0]
+    assert filled == 10.0  # held from its own stretch, not pulled toward 900

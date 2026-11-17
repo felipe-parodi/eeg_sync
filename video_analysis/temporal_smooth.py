@@ -258,24 +258,37 @@ def infill_low_confidence_keypoints(
         if "interpolated" not in group.columns:
             group["interpolated"] = False
 
-        low_mask = (group["keypoint_confidence"] < conf_threshold).values
-        high_mask = ~low_mask
-
-        # Only infill short runs of low-confidence frames.
-        infill_mask = _short_run_mask(low_mask, max_infill_run)
-
-        if infill_mask.any() and high_mask.any():
+        # Infill within unbroken stretches only, interpolating in time, so a
+        # low-confidence keypoint is never pulled toward where the person was
+        # after a gap (another block, or minutes later).
+        times = group["timestamp_s"].to_numpy(dtype=float)
+        diffs = np.diff(times)
+        step = float(np.median(diffs[diffs > 0])) if (diffs > 0).any() else 0.0
+        stretch = (
+            np.concatenate([[0], np.cumsum(diffs > 1.5 * step)])
+            if step
+            else (np.zeros(len(group), dtype=int))
+        )
+        for stretch_id in np.unique(stretch):
+            rows = np.flatnonzero(stretch == stretch_id)
+            part = group.iloc[rows]
+            low_mask = (part["keypoint_confidence"] < conf_threshold).to_numpy()
+            high_mask = ~low_mask
+            # Only infill short runs of low-confidence frames.
+            infill_mask = _short_run_mask(low_mask, max_infill_run)
+            if not (infill_mask.any() and high_mask.any()):
+                continue
+            index = group.index[rows]
             for col in POSE_POSITION_COLUMNS:
-                series = group[col].copy()
+                series = pd.Series(part[col].to_numpy(dtype=float), index=times[rows])
                 series[infill_mask] = np.nan
-                series = series.interpolate(method="linear", limit_direction="both")
-                group[col] = series
-
-            group.loc[infill_mask, "keypoint_confidence"] = min(
+                series = series.interpolate(method="index", limit_direction="both")
+                group.loc[index, col] = series.to_numpy()
+            group.loc[index[infill_mask], "keypoint_confidence"] = min(
                 conf_threshold,
-                group.loc[high_mask, "keypoint_confidence"].min(),
+                part.loc[high_mask, "keypoint_confidence"].min(),
             )
-            group.loc[infill_mask, "interpolated"] = True
+            group.loc[index[infill_mask], "interpolated"] = True
 
         groups.append(group)
 
