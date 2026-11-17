@@ -88,7 +88,9 @@ def refine_pose_table(
     kp_index = {f"kp_{k:03d}": k for k in range(17)}
     pose["_k"] = pose["keypoint_name"].map(kp_index)
     pose = pose.sort_values(["frame_idx", "track_id", "_k"]).reset_index(drop=True)
-    xy = pose[["x_m", "y_m", "keypoint_confidence"]].to_numpy(dtype=float)
+    # copy=True: pandas 3 (copy-on-write) can return a read-only view, and the
+    # refined keypoints are written into this array.
+    xy = pose[["x_m", "y_m", "keypoint_confidence"]].to_numpy(dtype=float, copy=True)
     starts = {
         (int(f), int(t)): i
         for i, (f, t, k) in enumerate(pose[["frame_idx", "track_id", "_k"]].to_numpy())
