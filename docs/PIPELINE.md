@@ -53,9 +53,9 @@ Drops file size by ≥98% so all downstream steps run in reasonable time on CPU.
 
 ```bash
 video-compress-rapid \
-  --video video_inference/data/camera_a_raw.mov \
-  --video video_inference/data/camera_b_raw.mov \
-  --output-dir video_inference/compressed
+  --video data/videos/camera_a_raw.mov \
+  --video data/videos/camera_b_raw.mov \
+  --output-dir data/compressed
 ```
 
 Key flags: `--target-fps 10` (default), `--max-width 960` (default), `--crf 30` (default — lower = larger file, higher quality). Output filename = `<input_stem>_rapid.mp4`. Writes `rapid_compression_summary.json` in `--output-dir`.
@@ -68,8 +68,8 @@ End-to-end orchestrator that extracts frames, runs pose inference, and writes a 
 
 ```bash
 video-infer run \
-  --video-a video_inference/compressed/camera_a_raw_rapid.mp4 \
-  --video-b video_inference/compressed/camera_b_raw_rapid.mp4 \
+  --video-a data/compressed/camera_a_raw_rapid.mp4 \
+  --video-b data/compressed/camera_b_raw_rapid.mp4 \
   --inference-backend ultralytics \
   --ultralytics-model-path yolo11m-pose.pt \
   --tracker-backend roboflow \
@@ -78,14 +78,14 @@ video-infer run \
   --frame-rate 5 \
   --device auto \
   --skip-compress \
-  --output-dir video_inference/output \
+  --output-dir data/output \
   --session-id P001c
 ```
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--video-a` (req) / `--video-b` | — | Source videos (use compressed paths + `--skip-compress`). |
-| `--output-dir` | `video_inference/output` | Per-session subdir is created. |
+| `--output-dir` | `data/output` | Per-session subdir is created. |
 | `--session-id` | `session_YYYYMMDD_HHMMSS` | Subfolder name. |
 | `--device` | `auto` | `auto` → CUDA > MPS > CPU. |
 | `--inference-backend` | `sam3d` | `sam3d`, `ultralytics`, or `rtmlib`. |
@@ -108,7 +108,7 @@ video-infer run \
 |---|---|
 | `--tracker-backend internal` | Two-person heuristic: parent = largest bbox at frame 0, then IoU continuity. Only suitable when `--max-persons 2` and detections are clean. |
 | `--tracker-backend roboflow --tracker-name bytetrack` | ByteTrack with `lost_track_buffer=60` (frames). Recommended for `--max-persons > 2` or any session with possible occlusions. |
-| `--tracker-backend offline` | **Portal default (2 people).** Caches every detection down to conf 0.05 with keypoints and a ReID embedding (`intermediate/detections.npz`), then solves parent/child over the whole recording (`video_inference/offline_assoc.py`). Without anchors the taller person is the parent. Requires `--max-persons 2`. |
+| `--tracker-backend offline` | **Portal default (2 people).** Caches every detection down to conf 0.05 with keypoints and a ReID embedding (`intermediate/detections.npz`), then solves parent/child over the whole recording (`src/video_inference/offline_assoc.py`). Without anchors the taller person is the parent. Requires `--max-persons 2`. |
 
 With the offline tracker, re-solve identities with anchor labels and write the
 filtered CSVs directly (this replaces `video-filter-tracks`):
@@ -147,7 +147,7 @@ Keeps only the two (or `--n-keep`) most persistent tracks within each named bloc
 
 ```bash
 video-filter-tracks \
-  --session-dir video_inference/output/P001c \
+  --session-dir data/output/P001c \
   --camera camera_a \
   --blocks "grocery_free_play,13:26,23:40;synchrony_intervention,27:56,28:45;storybook_reading,29:22,37:06" \
   --source-fps 5.0 \
@@ -174,7 +174,7 @@ Interactive OpenCV viewer for click-to-reassign correction of track IDs.
 
 ```bash
 video-annotate-tracks \
-  --session-dir video_inference/output/P001c \
+  --session-dir data/output/P001c \
   --camera camera_a \
   --start-time 8:00 --end-time 9:00 \
   --display-fps 5.0
@@ -203,7 +203,7 @@ Writes `track_corrections.json` in the camera dir.
 Applies the corrections JSON. Per-frame remap is atomic (handles `0↔1` swaps correctly).
 
 ```bash
-video-correct-tracks --session-dir video_inference/output/P001c --camera camera_a
+video-correct-tracks --session-dir data/output/P001c --camera camera_a
 ```
 
 Writes `tracks_2d_corrected.csv`, `pose_3d_corrected.csv`. Use these as inputs to subsequent stages with `--tracks-input` / `--pose-input`.
@@ -216,7 +216,7 @@ Fills short gaps (at most `--max-gap-seconds`, default 1 s) by straight-line int
 
 ```bash
 video-interpolate \
-  --camera-dir video_inference/output/P001c/camera_a \
+  --camera-dir data/output/P001c/camera_a \
   --target-fps 8 \
   --tracks-input tracks_2d.csv \
   --pose-input pose_3d.csv
@@ -230,7 +230,7 @@ Confidence-gated bidirectional EMA. Keypoints above `--conf-gate` pass through u
 
 ```bash
 video-smooth \
-  --camera-dir video_inference/output/P001c/camera_a \
+  --camera-dir data/output/P001c/camera_a \
   --tau 0.15 \
   --conf-gate 0.3 \
   --pose-input pose_3d_filtered.csv \
@@ -249,7 +249,7 @@ Per-block torso proximity and movement cross-correlation between parent and chil
 
 ```bash
 video-pose-metrics \
-  --camera-dir video_inference/output/P001c/camera_a \
+  --camera-dir data/output/P001c/camera_a \
   --session-config session_config.json \
   --pose-input pose_3d_smooth.csv \
   --xcorr-window 5.0 \
@@ -266,20 +266,20 @@ Three CLIs run in order: `gaze-infer` → `gaze-synchrony` → `gaze-plot`. `gaz
 
 ```bash
 gaze-infer \
-  --camera-dir video_inference/output/P001c/camera_a \
+  --camera-dir data/output/P001c/camera_a \
   --session-config session_config.json \
   --pose-input pose_3d_smooth.csv \
   --tracks-input tracks_2d_smooth.csv \
   --device auto
 
 gaze-synchrony \
-  --camera-dir video_inference/output/P001c/camera_a \
+  --camera-dir data/output/P001c/camera_a \
   --session-config session_config.json \
   --pose-input pose_3d_smooth.csv \
   --tracks-input tracks_2d_smooth.csv
 
 gaze-plot \
-  --camera-dir video_inference/output/P001c/camera_a \
+  --camera-dir data/output/P001c/camera_a \
   --session-config session_config.json
 ```
 
@@ -295,7 +295,7 @@ Per-block gaze category shares, each with a chance level (child's gaze shifted 6
 
 ```bash
 video-gaze-metrics \
-  --camera-dir video_inference/output/P001c/camera_a \
+  --camera-dir data/output/P001c/camera_a \
   --session-config session_config.json \
   --pose-input pose_3d_smooth.csv \
   --tracks-input tracks_2d_smooth.csv
@@ -305,7 +305,7 @@ video-gaze-metrics \
 
 Writes `gaze_metrics_summary.json`, `gaze_metrics_categories.csv`, `gaze_metrics_convergence.csv`, and plots.
 
-After every camera is done, `video-session-report --session-dir <session> --all-sessions-root video_inference/output` writes `session_metrics.csv`, `report.html`, and the study-wide `all_sessions_metrics.csv`.
+After every camera is done, `video-session-report --session-dir <session> --all-sessions-root data/output` writes `session_metrics.csv`, `report.html`, and the study-wide `all_sessions_metrics.csv`.
 
 ---
 
@@ -315,7 +315,7 @@ Samples N frames per block and renders the gaze heatmap overlaid on the source f
 
 ```bash
 video-gaze-snapshots \
-  --camera-dir video_inference/output/P001c/camera_a \
+  --camera-dir data/output/P001c/camera_a \
   --session-config session_config.json \
   --pose-input pose_3d_smooth.csv \
   --tracks-input tracks_2d_smooth.csv \
@@ -331,8 +331,8 @@ video-gaze-snapshots \
 
 ```bash
 video-visualize \
-  --camera-dir video_inference/output/P001c/camera_a \
-  --output-video video_inference/output/P001c/camera_a/overlay.mp4 \
+  --camera-dir data/output/P001c/camera_a \
+  --output-video data/output/P001c/camera_a/overlay.mp4 \
   --tracks-input tracks_2d_smooth.csv \
   --pose-input pose_3d_smooth.csv \
   --output-fps 12
@@ -342,9 +342,9 @@ video-visualize \
 
 ```bash
 video-visualize-3d \
-  --pose-csv video_inference/output/P001c/camera_a/pose_3d_smooth.csv \
-  --output-dir video_inference/output/P001c/camera_a/viz_3d \
-  --output-video video_inference/output/P001c/camera_a/viz_3d/skeleton.mp4 \
+  --pose-csv data/output/P001c/camera_a/pose_3d_smooth.csv \
+  --output-dir data/output/P001c/camera_a/viz_3d \
+  --output-video data/output/P001c/camera_a/viz_3d/skeleton.mp4 \
   --snapshot-interval 30 \
   --rotate
 ```

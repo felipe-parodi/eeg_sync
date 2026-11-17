@@ -87,7 +87,14 @@ pose-train-fit = "pose_training.train:main"
 pose-train-eval = "pose_training.evaluate:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis", "portal", "pose_training"]
+packages = [
+    "src/sync_eeg_vid",
+    "src/video_inference",
+    "src/video_analysis",
+    "src/gaze_analysis",
+    "src/portal",
+    "src/pose_training",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -102,7 +109,7 @@ target-version = "py310"
 exclude = ["third_party"]
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]  # Line too long (handled by formatter)
-per-file-ignores = {"tests/*" = ["E402"], "video_inference/pipeline.py" = ["N806"]}
+per-file-ignores = {"tests/*" = ["E402"], "src/video_inference/pipeline.py" = ["N806"]}
 
 [tool.black]
 line-length = 88
@@ -111,6 +118,7 @@ exclude = "third_party"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = "-q --tb=short"
 markers = [
     "smoke: end-to-end tests that run real inference. Enable with RUN_SMOKE_TESTS=1.",

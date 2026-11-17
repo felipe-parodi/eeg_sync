@@ -5,7 +5,7 @@ What lives where after a pipeline run, with column dictionaries for every CSV. U
 ## Directory layout per session
 
 ```
-video_inference/output/<session_id>/
+data/output/<session_id>/
 ├── session_summary.json                  # written by video-infer run
 ├── session_metrics.csv                   # ← `video-session-report`: one row per camera × block
 ├── task_metrics.csv                      # ← `video-session-report`: one row per camera × task (parts rejoined)
@@ -161,7 +161,7 @@ Written by `gaze-synchrony`. One row per frame (parent and child collapsed into 
 | `gaze_category` | string | One of the categories below. |
 | `gaze_convergence_score` | float | Overlap of the parent's and child's gaze heatmaps after removing their background (`0` = disjoint, `1` = identical). |
 
-Gaze categories (`gaze_analysis/gaze_categories.py`). Each person's gaze point
+Gaze categories (`src/gaze_analysis/gaze_categories.py`). Each person's gaze point
 is placed relative to the other person's boxes, in pixels:
 
 | Category | Rule |
@@ -201,7 +201,7 @@ that camera's own clock.
 | `low_coverage` | `true` when `coverage_both` < 0.5: interpret the block's metrics with care. |
 | `proximity_mean/std/median/n_frames` | Torso distance (pixels). |
 | `valid_seconds_both`, `n_segments`, `longest_segment_s` | Seconds with both people tracked, the number of unbroken stretches of such frames, and the longest one. |
-| `quality_verdict`, `quality_reasons` | Data check and recommended inclusion rule: `insufficient` (both people tracked < 2 min), `check` (coverage < 50% or fewer than 10 synchrony windows; synchrony is then not shown in the report), else `usable`. Basis (1011-1020): a 2 min sample ranks dyads' distance like the full task at r = 0.85; 10 synchrony windows give r ~ 0.87 (3 windows r = 0.66). Always also check the overlay clips. Thresholds are `MIN_VALID_SECONDS`, `LOW_COVERAGE_THRESHOLD`, `MIN_SYNC_WINDOWS` in `video_analysis/pose_metrics.py`. Also in `task_metrics.csv`, from pooled values. |
+| `quality_verdict`, `quality_reasons` | Data check and recommended inclusion rule: `insufficient` (both people tracked < 2 min), `check` (coverage < 50% or fewer than 10 synchrony windows; synchrony is then not shown in the report), else `usable`. Basis (1011-1020): a 2 min sample ranks dyads' distance like the full task at r = 0.85; 10 synchrony windows give r ~ 0.87 (3 windows r = 0.66). Always also check the overlay clips. Thresholds are `MIN_VALID_SECONDS`, `LOW_COVERAGE_THRESHOLD`, `MIN_SYNC_WINDOWS` in `src/video_analysis/pose_metrics.py`. Also in `task_metrics.csv`, from pooled values. |
 | `sync_mean/std`, `sync_n_windows` | **Movement synchrony (the reported measure).** Each person's whole-body motion energy (mean speed of keypoints with confidence >= 0.3) is correlated between parent and child at lag 0 in 20 s windows (50% overlap) inside unbroken stretches where both are tracked. |
 | `sync_chance_mean`, `sync_minus_chance` | The same measure with the child's movement shifted in time (several shifts at 60 s steps, at most 10; half the data for blocks under 2 min; none under 40 s of data, where the shift would be under 20 s), pooled; and the real value minus it. Only `sync_minus_chance` above 0 reflects the interaction. On 1011v3-1020v3 it averaged +0.18 (grocery +0.12, storybook +0.25). |
 | `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows` | *Superseded* (kept so older tables still line up). Movement synchrony in 5 s windows. Windows sit inside unbroken stretches where both people are tracked and never cross a gap; stretches shorter than 5 s give no window. |
@@ -238,7 +238,7 @@ coverage sums frame counts. Extra columns: `task`, `n_parts`, `parts`,
 
 Every row carries `metrics_version` (currently `2026-11-16`; rows from older runs show `before-2026-11-16`). Do not pool rows with different versions: re-process older sessions instead.
 
-`video_inference/output/all_sessions_metrics.csv` stacks every session's block
+`data/output/all_sessions_metrics.csv` stacks every session's block
 table, and `all_sessions_task_metrics.csv` every session's task table.
 The portal home page offers it as "Download all sessions table". `report.html`
 shows the same numbers with coverage warnings, chance levels, figures, and
@@ -289,7 +289,7 @@ table against these labels.
 
 For troubleshooting and planning, every portal job writes a run record:
 `run_info.json` in the job folder and in the session folder (so it is in the
-results zip), plus one line per job in `video_inference/output/portal_runs.jsonl`,
+results zip), plus one line per job in `data/output/portal_runs.jsonl`,
 which survives portal restarts. Fields: job and session id, state (`complete` /
 `failed`), submission and upload-finished times, code (`git_commit`,
 `metrics_version`, pose and gaze model, frame rate), GPUs, per video (file

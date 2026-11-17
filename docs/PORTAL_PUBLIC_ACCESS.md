@@ -54,8 +54,8 @@ Each submitted run writes metadata into the job directory before processing
 starts:
 
 ```text
-video_inference/output/portal_jobs/<job_id>/submission_metadata.json
-video_inference/output/portal_jobs/<job_id>/upload_meta.json
+data/output/portal_jobs/<job_id>/submission_metadata.json
+data/output/portal_jobs/<job_id>/upload_meta.json
 ```
 
 The result zip also includes the metadata under:

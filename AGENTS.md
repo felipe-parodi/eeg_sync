@@ -17,7 +17,7 @@ Pose, gaze, and synchrony analysis pipeline for parent-child interaction videos,
 - `docs/OUTPUTS.md` — output catalog with column dictionaries for every CSV
 - `docs/eeg_sync/GETTING_STARTED.md`, `docs/eeg_sync/HOW_TO_USE_SYNC.md`, `docs/eeg_sync/TUTORIAL_POSE_EEG.md`, `docs/eeg_sync/CLOCK_DRIFT.md` — EEG-sync–side tutorials
 - `docs/plans/` — dated feature plans (`name_YYMMDD.md`) and the old portal roadmap; history and rationale, not current instructions
-- `templates/` — starter `session_config.example.json`, `segment_timings.example.csv`, `exclusion_windows.example.csv`
+- `docs/templates/` — starter `session_config.example.json`, `segment_timings.example.csv`, `exclusion_windows.example.csv`
 
 ## Build & Run Commands
 
@@ -73,7 +73,7 @@ All public symbols are re-exported from `sync_eeg_vid.__init__`, so `from sync_e
 
 ### Model weights
 
-All `*.pt` weights live in `models/` (gitignored). Refer to them by bare name (`yolo11l-pose.pt`); `video_inference/weights.py` `resolve_weights` maps bare names to `models/<name>`, so stock models also download there.
+All `*.pt` weights live in `models/` (gitignored). Refer to them by bare name (`yolo11l-pose.pt`); `src/video_inference/weights.py` `resolve_weights` maps bare names to `models/<name>`, so stock models also download there.
 
 ### Frame timing (critical)
 
@@ -174,15 +174,15 @@ Parent-child gaze estimation (PaGE ViT-B by default; Gaze-LLE optional) and sync
 1. Read `README.md` for the user-facing overview.
 2. Read `docs/PIPELINE.md` for the full stage-by-stage CLI map (video pipeline).
 3. Read `docs/OUTPUTS.md` for the per-file schemas.
-4. For the video pipeline orchestration, read `video_inference/pipeline.py` (`PipelineConfig`, `_run_camera_pipeline`).
-5. For sync, read `sync_eeg_vid/sync_pipeline.py` (`sync_two_eeg_files`, `sync_eeg_to_video`, `sync_videos`) plus `sync_eeg_vid/eeg_io.py` (`find_sync_pulse`, `extract_eeg_segment`) and `sync_eeg_vid/cli.py:main`.
+4. For the video pipeline orchestration, read `src/video_inference/pipeline.py` (`PipelineConfig`, `_run_camera_pipeline`).
+5. For sync, read `src/sync_eeg_vid/sync_pipeline.py` (`sync_two_eeg_files`, `sync_eeg_to_video`, `sync_videos`) plus `src/sync_eeg_vid/eeg_io.py` (`find_sync_pulse`, `extract_eeg_segment`) and `src/sync_eeg_vid/cli.py:main`.
 6. Read `tests/test_sync_eeg_vid.py` and `tests/test_video_inference_*.py` to understand protected behavior.
 7. Validate inference outputs with `video_inference.schema.validate_session_output`.
 
 ## Data Policy
 
 - **Never commit** raw participant videos or identifiable recordings.
-- `video_inference/data/` is gitignored for local-only media.
+- `data/videos/` is gitignored for local-only media.
 - Keep generated artifacts local (`sync_results.json`, plots, output CSVs).
 - Tests use synthetic fixtures in `tests/fixtures/`.
 
@@ -194,7 +194,7 @@ Always compress videos first. Target file size: **under 50 MB**. Use one of:
 1. `video-compress-rapid` CLI to batch-compress raw videos.
 2. The pipeline's built-in compression (the default -- do NOT pass `--skip-compress` on raw files).
 
-Pre-compressed videos in `video_inference/compressed/` are safe to use with `--skip-compress`.
+Pre-compressed videos in `data/compressed/` are safe to use with `--skip-compress`.
 
 ## Testing Patterns
 
@@ -207,7 +207,7 @@ Pre-compressed videos in `video_inference/compressed/` are safe to use with `--s
 
 Three valid sources of parent/child track IDs, in order of preference:
 
-0. **Offline two-person association (portal default since 2026-10).** `--tracker-backend offline` in phase 1, then `python -m video_inference.offline_assoc --anchors-json ...` writes `*_filtered.csv` with parent=0/child=1. Benchmarked with `pose_training/bench.py` against held-out colleague anchor labels.
+0. **Offline two-person association (portal default since 2026-10).** `--tracker-backend offline` in phase 1, then `python -m video_inference.offline_assoc --anchors-json ...` writes `*_filtered.csv` with parent=0/child=1. Benchmarked with `src/pose_training/bench.py` against held-out colleague anchor labels.
 1. **`video-filter-tracks` (previous colleague workflow; still used for jobs without a detection cache).** Block-aware: top-N most persistent tracks per `session_blocks[i]` keep, parent=0/child=1 assigned by mean bbox area within that block. Produces `tracks_2d_filtered.csv` / `pose_3d_filtered.csv`.
 2. **`video-annotate-tracks` + `video-correct-tracks`.** Interactive override when auto-assignment is wrong (e.g. parent physically smaller, experimenter in frame, parent-child swap). Writes `track_corrections.json` → applied to `*_corrected.csv`.
 3. **Inference-time tracker.** `--tracker-backend internal` uses the two-person heuristic (parent = largest bbox at frame 0, IoU continuity after). `--tracker-backend roboflow --tracker-name bytetrack` uses ByteTrack with `lost_track_buffer=60` and recycles IDs into stable `0..max_persons-1` slots.
