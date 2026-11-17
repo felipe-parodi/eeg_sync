@@ -312,3 +312,109 @@ def test_study_tables_mark_metrics_version(tmp_path: Path) -> None:
 
     assert study.loc["1019v4", "metrics_version"].iloc[0] == METRICS_VERSION
     assert study.loc["1012v3", "metrics_version"] == "before-2026-11-16"
+
+
+# ---- report.html as the results page (portal-revamp plan, phase 6) ----
+
+
+def _split_session_with_valid_time(session: Path) -> None:
+    """The split session, with valid time per block and overlay clips."""
+    _write_split_session(session)
+    cam = session / "camera_a"
+    path = cam / "pose_metrics_summary.json"
+    blocks = json.loads(path.read_text(encoding="utf-8"))
+    for block in blocks:
+        block["valid_seconds_both"] = {
+            "grocery_part1": 25.0,
+            "grocery_part2": 50.0,
+            "storybook": 90.0,
+        }[block["block"]]
+    path.write_text(json.dumps(blocks), encoding="utf-8")
+    for name in ("grocery_part1", "grocery_part1_end", "storybook", "storybook_end"):
+        (cam / f"overlay_{name}.mp4").write_bytes(b"")
+
+
+def test_report_task_table_has_verdict_chips_and_reasons(tmp_path: Path) -> None:
+    session = tmp_path / "1019"
+    _split_session_with_valid_time(session)
+
+    html = render_report_html(session, collect_session_rows(session))
+
+    assert 'class="task-table' in html
+    # grocery: 75 s valid, 450/660 = 68% coverage, 10 windows -> usable.
+    assert "chip--ok" in html and "Usable" in html
+    assert "1 min 15 s" in html  # pooled usable time of the two pieces
+    assert "1 min 30 s" in html  # storybook
+    # Verdict text comes with a symbol, not color alone.
+    assert 'class="chip__icon" aria-hidden="true">✓<' in html
+    # Pieces are joined and inclusion is left to the lab.
+    assert "joined" in html and "lab" in html
+    # Per-piece table kept, collapsed.
+    assert "<details" in html and "Per piece" in html
+    assert "grocery_part2" in html
+
+
+def test_report_task_table_shows_check_reasons_in_plain_words(tmp_path: Path) -> None:
+    session = tmp_path / "1019"
+    _split_session_with_valid_time(session)
+    path = session / "camera_a" / "pose_metrics_summary.json"
+    blocks = json.loads(path.read_text(encoding="utf-8"))
+    for block in blocks:
+        if block["block"] == "storybook":
+            block["valid_seconds_both"] = 30.0
+    path.write_text(json.dumps(blocks), encoding="utf-8")
+
+    html = render_report_html(session, collect_session_rows(session))
+
+    assert "chip--insufficient" in html and "Not enough data" in html
+    assert "Both people tracked for only 30 s" in html
+
+
+def test_report_task_table_hides_synchrony_below_minimum_windows(
+    tmp_path: Path,
+) -> None:
+    session = tmp_path / "1019"
+    _split_session_with_valid_time(session)
+    sync = pd.read_csv(session / "camera_a" / "pose_metrics_sync.csv")
+    # storybook keeps only 2 of its 10 windows.
+    keep = sync[sync["block"] != "storybook"]
+    story = sync[sync["block"] == "storybook"].head(2)
+    pd.concat([keep, story]).to_csv(
+        session / "camera_a" / "pose_metrics_sync.csv", index=False
+    )
+
+    html = render_report_html(session, collect_session_rows(session))
+    task_table = html.split('class="task-table')[1].split("</table>")[0]
+
+    assert "0.18 (chance 0.03)" in task_table.replace(
+        ' <span class="muted">', " "
+    ).replace("</span>", "")
+    assert "too few unbroken 20-second stretches" in task_table
+    assert "0.50" not in task_table
+
+
+def test_report_embeds_clips_with_relative_sources(tmp_path: Path) -> None:
+    session = tmp_path / "1019"
+    _split_session_with_valid_time(session)
+
+    html = render_report_html(session, collect_session_rows(session))
+
+    assert '<video controls preload="none" src="camera_a/overlay_storybook.mp4"' in html
+    assert 'src="camera_a/overlay_storybook_end.mp4"' in html
+    assert 'href="camera_a/overlay_storybook.mp4" download' in html
+    # Grouped by block: storybook start and end clips under one heading.
+    block_html = html.split('data-block="storybook"')[1].split("data-block=")[0]
+    assert "overlay_storybook_end.mp4" in block_html
+
+
+def test_report_is_self_contained(tmp_path: Path) -> None:
+    import re
+
+    session = tmp_path / "1019"
+    _split_session_with_valid_time(session)
+
+    html = render_report_html(session, collect_session_rows(session))
+
+    assert not re.search(r"""(?:src|href)\s*=\s*["']?(?:https?:)?//""", html)
+    assert "@import" not in html and "<link" not in html
+    assert "--color-accent" in html  # the portal's tokens, inlined

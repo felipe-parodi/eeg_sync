@@ -1906,12 +1906,39 @@ def job_detail(
         job_id=safe_job_id,
         show_annotate=view["annotate_url"] is not None,
         show_download=bool(result_zip and Path(result_zip).exists()),
+        results_url=_results_url(job_dir) if is_complete else None,
         # A new or failed run must not show an earlier run's table.
         coverage_rows=_coverage_rows(job_dir) if is_complete else None,
         dropped_parts=_dropped_part_rows(job_dir),
         min_part_s=f"{MIN_PART_S:g}",
         show_log_link=(job_dir / "job.log").exists(),
     )
+
+
+def _results_url(job_dir: Path) -> str | None:
+    """Return the session report link for a finished job.
+
+    Args:
+        job_dir: Portal job directory.
+
+    Returns:
+        ``/sessions/<session_id>`` when the job's session has a
+        ``report.html``, else None.
+    """
+    config_path = job_dir / "job_config.json"
+    if not config_path.exists():
+        return None
+    try:
+        session_id = json.loads(config_path.read_text(encoding="utf-8")).get(
+            "session_id"
+        )
+    except ValueError:
+        return None
+    if not session_id or not _session_dir_is_addressable(str(session_id)):
+        return None
+    if not (OUTPUT_ROOT / str(session_id) / SESSION_REPORT_HTML).is_file():
+        return None
+    return f"/sessions/{session_id}"
 
 
 def _dropped_part_rows(job_dir: Path) -> list[dict[str, str]]:
@@ -1989,6 +2016,24 @@ def download_all_sessions_table(
     out = OUTPUT_ROOT / ALL_SESSIONS_CSV
     build_all_sessions_table(OUTPUT_ROOT).to_csv(out, index=False)
     return FileResponse(out, filename=ALL_SESSIONS_CSV, media_type="text/csv")
+
+
+@app.get("/metrics/all_sessions_task_metrics.csv")
+def download_study_task_table(
+    _: Annotated[None, Depends(require_auth)],
+) -> FileResponse:
+    """Download the study task table (one row per session, camera and task).
+
+    The session-report step rewrites it after every finished job.
+    """
+    from video_analysis.session_report import ALL_SESSIONS_TASK_CSV
+
+    path = OUTPUT_ROOT / ALL_SESSIONS_TASK_CSV
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404, detail="No study task table yet: finish a session first"
+        )
+    return FileResponse(path, filename=ALL_SESSIONS_TASK_CSV, media_type="text/csv")
 
 
 def _gaze_label_context(job_id: str) -> tuple[str, Path, dict[str, list], float]:

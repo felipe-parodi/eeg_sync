@@ -412,3 +412,62 @@ def test_session_file_rejects_symlink_escaping_session(
     response = client.get("/sessions/1019v3/files/camera_a/linked.csv")
 
     assert response.status_code == 404
+
+
+# --- study task table download -----------------------------------------------
+
+
+def test_home_links_study_task_table(client: TestClient) -> None:
+    text = client.get("/").text
+
+    assert 'href="/metrics/all_sessions_task_metrics.csv"' in text
+    assert "Download study task table" in text
+
+
+def test_study_task_table_is_served(client: TestClient, portal_env: Path) -> None:
+    (portal_env / "all_sessions_task_metrics.csv").write_text(
+        "session_id,camera_id,task\n1019v3,camera_a,grocery\n", encoding="utf-8"
+    )
+
+    response = client.get("/metrics/all_sessions_task_metrics.csv")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "all_sessions_task_metrics.csv" in response.headers["content-disposition"]
+    assert "1019v3,camera_a,grocery" in response.text
+
+
+def test_study_task_table_missing_is_404(client: TestClient) -> None:
+    assert client.get("/metrics/all_sessions_task_metrics.csv").status_code == 404
+
+
+def test_study_task_table_requires_auth(portal_env: Path) -> None:
+    (portal_env / "all_sessions_task_metrics.csv").write_text("x\n", encoding="utf-8")
+    anonymous = TestClient(portal_app.app)
+
+    response = anonymous.get(
+        "/metrics/all_sessions_task_metrics.csv", follow_redirects=False
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_session_report_step_writes_study_tables(tmp_path: Path) -> None:
+    from portal.jobs import PortalJobConfig, SessionBlock, build_session_report_step
+
+    config = PortalJobConfig(
+        job_id="j",
+        session_id="1019v3",
+        video_a=tmp_path / "a.mp4",
+        video_b=None,
+        job_dir=tmp_path / "j",
+        output_root=tmp_path / "output",
+        session_config_path=tmp_path / "j" / "session_config.json",
+        blocks=[SessionBlock(name="grocery", start_s=0.0, end_s=60.0)],
+    )
+
+    command = build_session_report_step(config).argv
+
+    root = command[command.index("--all-sessions-root") + 1]
+    assert Path(root) == tmp_path / "output"

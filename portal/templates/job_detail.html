@@ -17,11 +17,11 @@
     {% if job.log_tail %}<p class="muted">Last lines of the job log</p><pre>{{ job.log_tail }}</pre>{% endif %}
   </details>{% endif %}
   {% if show_annotate %}<p class="cta"><a class="button-link" href="/jobs/{{ job_id }}/annotate">Label parent vs child to continue</a></p>{% endif %}
-  {% if show_download %}<p class="cta"><a href="/jobs/{{ job_id }}/download">Download results zip</a></p>{% endif %}
+  {% if results_url or show_download %}<p class="cta">{% if results_url %}<a class="button-link" href="{{ results_url }}">Open results</a> {% endif %}{% if show_download %}<a href="/jobs/{{ job_id }}/download">Download results zip</a>{% endif %}</p>{% endif %}
   {% if job.notes %}<h3>Notes</h3><ul class="job-notes">
     {%- for note in job.notes %}<li>{{ note }}</li>{% endfor -%}
   </ul>{% endif %}
-  {% if coverage_rows is not none %}<h3>Both people tracked, per block</h3><p class="muted">Metrics use only frames where both people were found. The zip's report.html has the full summary.</p><div class="table-wrap"><table><thead><tr><th>Camera</th><th>Block</th><th>Coverage</th><th></th></tr></thead><tbody>
+  {% if coverage_rows is not none %}<h3>Both people tracked, per block</h3><p class="muted">Metrics use only frames where both people were found. The session report has the data check per task and the clips.</p><div class="table-wrap"><table><thead><tr><th>Camera</th><th>Block</th><th>Coverage</th><th></th></tr></thead><tbody>
     {%- for row in coverage_rows -%}
     <tr><td>{{ row.camera_id }}</td><td>{{ row.block }}</td><td>{{ row.coverage }}</td><td>{% if row.low %}{{ chip("check", "Low: check the overlay clips") }}{% else %}{{ chip("ok", "OK") }}{% endif %}</td></tr>
     {%- endfor -%}

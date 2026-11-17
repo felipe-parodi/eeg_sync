@@ -79,8 +79,11 @@ at; you can close the browser and come back.
 
 ## 6. Read the results
 
-When the job is done, open the session from the **Sessions** page, or
-download the results zip and open `report.html`.
+When the job is done, click **Open results** on the job page (or open the
+session from the **Sessions** page). The same report is `report.html` in the
+results zip. It starts with one row per camera and task, with the verdict
+and the reasons for it; the pieces of a task are under **Per piece**, and
+the overlay clips play in the page.
 
 **Check the clips first.** Each block has short overlay clips (start and end)
 with skeletons drawn. Make sure the boxes follow the parent and the child,
@@ -103,7 +106,7 @@ at the results, and use the same rule for every session.
 |---|---|---|
 | `task_metrics.csv` | camera and task, pieces joined back together | analyses at the task level |
 | `session_metrics.csv` | camera and block (piece) | checking individual pieces |
-| `all_sessions_task_metrics.csv` (portal home page) | every session, camera and task | the study table |
+| `all_sessions_task_metrics.csv` (home page, **Download study task table**) | every session, camera and task | the study table |
 
 Key columns:
 

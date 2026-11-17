@@ -321,33 +321,281 @@ def _coverage_cell(row: pd.Series) -> str:
     )
 
 
-def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
-    """Render the one-page session report.
+# Styling copied from portal/static/portal.css (same tokens), inlined because
+# report.html must work offline from the results zip.
+REPORT_CSS = """
+:root { color-scheme: light;
+  --color-bg:#f7f7f5; --color-surface:#ffffff; --color-surface-muted:#fafaf8;
+  --color-border:#e2e4e8; --color-border-strong:#c6cad1;
+  --color-text:#1b2430; --color-text-muted:#5a6472;
+  --color-accent:#0072b2; --color-accent-strong:#005a8c;
+  --color-ok-text:#00704f; --color-ok-bg:#e6f4ef; --color-ok-edge:#009e73;
+  --color-warn-text:#8a5a00; --color-warn-bg:#fdf3da; --color-warn-edge:#e69f00;
+  --color-bad-text:#a63f00; --color-bad-bg:#fbeae0; --color-bad-edge:#d55e00;
+  --color-neutral-text:#4b5563; --color-neutral-bg:#f0f1f3; --color-neutral-edge:#9aa1ab;
+  --good:var(--color-ok-edge); --bad:var(--color-bad-edge);
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-5:24px;
+  --space-6:32px; --radius-sm:4px; --radius-md:8px; --radius-lg:12px;
+  --font-sans:system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --text-xs:0.75rem; --text-sm:0.875rem; --text-lg:1.25rem; --text-xl:1.5rem;
+  --text-2xl:1.875rem; }
+*, *::before, *::after { box-sizing:border-box; }
+body { margin:0 auto; max-width:1040px; padding:var(--space-6) var(--space-5);
+  font-family:var(--font-sans); line-height:1.5; color:var(--color-text);
+  background:var(--color-bg); -webkit-font-smoothing:antialiased; }
+h1, h2, h3, h4 { line-height:1.25; margin:0 0 var(--space-3); }
+h1 { font-size:var(--text-2xl); letter-spacing:-0.01em; }
+h2 { font-size:var(--text-lg); }
+h4 { font-size:var(--text-sm); margin:var(--space-4) 0 var(--space-2); }
+p { margin:0 0 var(--space-3); }
+a { color:var(--color-accent-strong); text-underline-offset:2px; }
+code { font-size:0.9em; }
+.card { background:var(--color-surface); border:1px solid var(--color-border);
+  border-radius:var(--radius-lg); box-shadow:0 1px 2px rgba(27,36,48,.06);
+  padding:var(--space-5); margin-bottom:var(--space-5); }
+.muted, figcaption { color:var(--color-text-muted); font-size:var(--text-sm); }
+.camera-tag { display:inline-block; padding:0 6px; border-radius:var(--radius-sm);
+  background:var(--color-neutral-bg); color:var(--color-neutral-text);
+  font-size:var(--text-xs); font-weight:700; margin-right:var(--space-1); }
+.table-wrap { overflow-x:auto; margin-bottom:var(--space-3); }
+table { width:100%; border-collapse:collapse; font-size:var(--text-sm);
+  background:var(--color-surface); }
+th, td { border-bottom:1px solid var(--color-border); padding:var(--space-2) var(--space-3);
+  text-align:left; vertical-align:top; }
+th { font-size:var(--text-xs); font-weight:600; text-transform:uppercase;
+  letter-spacing:0.04em; color:var(--color-text-muted);
+  background:var(--color-surface-muted); }
+.chip { display:inline-flex; align-items:center; gap:6px; padding:2px 10px 2px 6px;
+  border-radius:999px; border:1px solid; font-size:var(--text-xs); font-weight:600;
+  line-height:1.6; white-space:nowrap; }
+.chip__icon { display:inline-flex; align-items:center; justify-content:center;
+  width:15px; height:15px; border-radius:50%; font-size:10px; line-height:1;
+  font-weight:800; color:#fff; }
+.chip--ok { color:var(--color-ok-text); background:var(--color-ok-bg); border-color:var(--color-ok-edge); }
+.chip--ok .chip__icon { background:var(--color-ok-text); }
+.chip--check { color:var(--color-warn-text); background:var(--color-warn-bg); border-color:var(--color-warn-edge); }
+.chip--check .chip__icon { background:var(--color-warn-text); }
+.chip--insufficient, .chip--unknown { color:var(--color-neutral-text);
+  background:var(--color-neutral-bg); border-color:var(--color-neutral-edge); }
+.chip--insufficient .chip__icon, .chip--unknown .chip__icon { background:var(--color-neutral-text); }
+.reasons { margin-top:var(--space-1); color:var(--color-text-muted);
+  font-size:var(--text-xs); max-width:28em; }
+.task-table td[data-label="Data check"] { min-width:14em; }
+.task-table td[data-label="Movement synchrony"] { min-width:11em; }
+.task-table td[data-label="Task"], .task-table td[data-label="Usable time"] {
+  white-space:nowrap; }
+.bar { display:inline-block; width:64px; height:8px; background:var(--color-border);
+  border-radius:4px; margin-right:6px; vertical-align:middle; }
+.bar span { display:block; height:100%; border-radius:4px; }
+.flag { color:var(--color-bad-text); font-weight:600; }
+details.pieces > summary { cursor:pointer; font-weight:600; padding:var(--space-2) 0; }
+details.pieces[open] > summary { margin-bottom:var(--space-3); }
+.notes { padding-left:1.2em; }
+.notes li { margin-bottom:var(--space-2); }
+.clips { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap:var(--space-3); }
+figure { margin:0; }
+.clip video { display:block; width:100%; aspect-ratio:16/9; background:#1b2430;
+  border-radius:var(--radius-md); }
+.figs { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  gap:var(--space-3); margin-top:var(--space-4); }
+.figs img { width:100%; height:auto; border:1px solid var(--color-border);
+  border-radius:var(--radius-md); }
+@media (max-width:640px) {
+  body { padding:var(--space-5) var(--space-4); }
+  h1 { font-size:var(--text-xl); }
+  .card { padding:var(--space-4); }
+  /* The task table becomes one stacked card per row. */
+  .task-table thead { display:none; }
+  .task-table tr { display:block; padding:var(--space-3) 0;
+    border-bottom:1px solid var(--color-border-strong); }
+  .task-table td[data-label] { min-width:0; white-space:normal; }
+  .task-table td { display:grid; grid-template-columns:8.5em minmax(0, 1fr);
+    gap:var(--space-2); border:0; padding:2px 0; }
+  .task-table td::before { content:attr(data-label); font-size:var(--text-xs);
+    color:var(--color-text-muted); font-weight:600; }
+}
+"""
 
-    Links (figures, overlay clips) are relative to the session folder, so the
-    report works after the results zip is extracted.
+# quality_verdict value -> (chip kind, glyph, label). The glyphs match the
+# portal's chips, so the verdict never relies on color alone.
+VERDICT_CHIPS = {
+    "usable": ("ok", "✓", "Usable"),
+    "check": ("check", "!", "Check"),
+    "insufficient": ("insufficient", "–", "Not enough data"),
+}
+
+GAZE_COLUMNS = [
+    ("gaze_mutual_gaze_pct", "Looking at each other"),
+    ("gaze_joint_attention_pct", "Joint attention"),
+    ("gaze_parent_watching_pct", "Parent watching child"),
+    ("gaze_child_watching_pct", "Child watching parent"),
+    ("gaze_unknown_pct", "Gaze unknown"),
+]
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or (isinstance(value, float) and pd.isna(value))
+
+
+def _fmt_duration(seconds: Any) -> str:
+    """Format seconds as "3 min 12 s" ("45 s" under a minute)."""
+    if _is_missing(seconds):
+        return "–"
+    total = int(round(float(seconds)))
+    minutes, secs = divmod(total, 60)
+    if not minutes:
+        return f"{secs} s"
+    return f"{minutes} min {secs} s" if secs else f"{minutes} min"
+
+
+def _verdict_cell(row: pd.Series) -> str:
+    """Verdict chip (text and symbol) with its reasons as plain sentences."""
+    verdict = row.get("quality_verdict")
+    kind, glyph, label = VERDICT_CHIPS.get(
+        "" if _is_missing(verdict) else str(verdict), ("unknown", "?", "Not checked")
+    )
+    chip = (
+        f'<span class="chip chip--{kind}"><span class="chip__icon" '
+        f'aria-hidden="true">{glyph}</span>{label}</span>'
+    )
+    reasons = row.get("quality_reasons")
+    if _is_missing(reasons) or not str(reasons).strip():
+        return chip
+    sentences = [r.strip() for r in str(reasons).split(";") if r.strip()]
+    text = " ".join(f"{s[0].upper()}{s[1:]}." for s in sentences)
+    return f'{chip}<div class="reasons">{html.escape(text)}</div>'
+
+
+def _clip_groups(camera_dir: Path, blocks: list[str]) -> list[tuple[str, list[Path]]]:
+    """Group a camera's overlay clips by block, in table order.
+
+    ``overlay_<block>.mp4`` is the start of the block and
+    ``overlay_<block>_end.mp4`` its end.
+    """
+    groups: dict[str, list[Path]] = {}
+    for path in sorted(camera_dir.glob("overlay_*.mp4")):
+        block = path.stem[len("overlay_") :]
+        if block.endswith("_end"):
+            block = block[: -len("_end")]
+        groups.setdefault(block, []).append(path)
+    order = [b for b in blocks if b in groups] + [b for b in groups if b not in blocks]
+    return [
+        (b, sorted(groups[b], key=lambda p: p.stem.endswith("_end"))) for b in order
+    ]
+
+
+def _clips_html(camera_dir: Path, blocks: list[str]) -> str:
+    """Playable overlay clips for one camera, one group per block."""
+    cam = html.escape(camera_dir.name)
+    groups = []
+    for block, paths in _clip_groups(camera_dir, blocks):
+        figures = []
+        for path in paths:
+            src = f"{cam}/{html.escape(path.name)}"
+            which = "End" if path.stem.endswith("_end") else "Start"
+            figures.append(
+                f'<figure class="clip"><video controls preload="none" src="{src}">'
+                f"</video><figcaption>{which} · "
+                f'<a href="{src}" download>Download</a></figcaption></figure>'
+            )
+        groups.append(
+            f'<div class="clip-group" data-block="{html.escape(block)}">'
+            f"<h4>{html.escape(block)}</h4>"
+            f'<div class="clips">{"".join(figures)}</div></div>'
+        )
+    return "".join(groups) or '<p class="muted">No overlay clips.</p>'
+
+
+def _task_table_html(tasks: pd.DataFrame) -> str:
+    """One row per camera and task, with verdict, usable time and key numbers."""
+    if tasks.empty:
+        return '<p class="muted">No tasks were measured in this session.</p>'
+    gaze_cols = [(c, label) for c, label in GAZE_COLUMNS if c in tasks.columns]
+    labels = [
+        "Camera",
+        "Task",
+        "Data check",
+        "Usable time",
+        "Both people tracked",
+        "Distance (median px)",
+        "Movement synchrony",
+    ] + [f"{label} (%)" for _, label in gaze_cols]
+    head = "".join(f'<th scope="col">{label}</th>' for label in labels)
+    body = []
+    for _, row in tasks.iterrows():
+        n_parts = row.get("n_parts")
+        pieces = (
+            f'<div class="muted">{int(n_parts)} pieces joined</div>'
+            if not _is_missing(n_parts) and int(n_parts) > 1
+            else ""
+        )
+        span = ""
+        if not _is_missing(row.get("task_start_s")):
+            span = (
+                f'<div class="muted">{_fmt_time(row["task_start_s"])}–'
+                f"{_fmt_time(row['task_end_s'])}</div>"
+            )
+        cells = [
+            html.escape(str(row["camera_id"])),
+            f"<strong>{html.escape(str(row['task']))}</strong>{span}{pieces}",
+            _verdict_cell(row),
+            _fmt_duration(row.get("valid_seconds_both")),
+            _coverage_cell(row),
+            _fmt(row.get("proximity_median")),
+            _sync_cell(row),
+        ] + [f"{_fmt(row.get(c))}{_chance(row, c)}" for c, _ in gaze_cols]
+        body.append(
+            "<tr>"
+            + "".join(
+                f'<td data-label="{html.escape(label)}"><div>{cell}</div></td>'
+                for label, cell in zip(labels, cells)
+            )
+            + "</tr>"
+        )
+    return (
+        '<div class="table-wrap"><table class="task-table">'
+        f"<thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+    )
+
+
+def render_report_html(
+    session_dir: Path, rows: pd.DataFrame, tasks: pd.DataFrame | None = None
+) -> str:
+    """Render the one-page session report (the portal's results page).
+
+    The task table (one row per camera and task, pieces joined) comes first,
+    then the per-piece table collapsed, then the overlay clips playable in the
+    page and the figures. Links (figures, clips) are relative to the session
+    folder and the styling is inlined, so the report works offline after the
+    results zip is extracted.
 
     Args:
         session_dir: Session output folder.
         rows: Table from :func:`collect_session_rows`.
+        tasks: Table from :func:`collect_task_rows`; built from
+            ``session_dir`` when omitted.
 
     Returns:
         HTML document text.
     """
     session_dir = Path(session_dir)
+    if tasks is None:
+        tasks = collect_task_rows(session_dir)
     sid = html.escape(session_dir.name)
     has_gaze = any(c.startswith("gaze_") for c in rows.columns)
-    gaze_cols = [
-        ("gaze_mutual_gaze_pct", "Looking at each other"),
-        ("gaze_joint_attention_pct", "Joint attention"),
-        ("gaze_parent_watching_pct", "Parent watching child"),
-        ("gaze_child_watching_pct", "Child watching parent"),
-        ("gaze_unknown_pct", "Gaze unknown"),
-    ]
-    gaze_cols = [(c, label) for c, label in gaze_cols if c in rows.columns]
+    gaze_cols = [(c, label) for c, label in GAZE_COLUMNS if c in rows.columns]
+    camera_dirs = _camera_dirs(session_dir)
+    cameras = (
+        "".join(
+            f'<span class="camera-tag">{html.escape(p.name)}</span>'
+            for p in camera_dirs
+        )
+        or '<span class="muted">none</span>'
+    )
 
     head = (
-        "<tr><th>Camera</th><th>Block</th><th>Time in video</th>"
+        "<tr><th>Camera</th><th>Piece</th><th>Time in video</th>"
         "<th>Both people tracked</th><th>Mean distance (px)</th>"
         "<th>Movement synchrony</th>"
         + "".join(f"<th>{label} (%)</th>" for _, label in gaze_cols)
@@ -370,35 +618,13 @@ def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
             + "</tr>"
         )
 
-    low = rows[
-        rows.get("low_coverage", pd.Series(False, index=rows.index))  # noqa: E712
-        == True
-    ]
-    if len(low):
-        items = "".join(
-            f"<li>{html.escape(str(r.camera_id))} / {html.escape(str(r.block))}: "
-            f"both people tracked in only {float(r.coverage_both):.0%} of the block.</li>"
-            for r in low.itertuples()
-        )
-        warning = (
-            '<div class="warn"><strong>Check before using these blocks.</strong> '
-            "Their numbers describe only the moments when both people were "
-            f"visible, which may not represent the whole block.<ul>{items}</ul>"
-            "Watch the overlay clips below to see why (someone off camera, "
-            "hidden behind the other person, or missed by the tracker).</div>"
-        )
-    else:
-        warning = (
-            '<p class="ok">Both people were tracked in at least half of every '
-            "block.</p>"
-        )
-
     media = []
-    for camera_dir in _camera_dirs(session_dir):
+    for camera_dir in camera_dirs:
         cam = html.escape(camera_dir.name)
-        clips = "".join(
-            f'<li><a href="{cam}/{html.escape(p.name)}">{html.escape(p.stem)}</a></li>'
-            for p in sorted(camera_dir.glob("overlay_*.mp4"))
+        blocks = (
+            [str(b) for b in rows.loc[rows["camera_id"] == camera_dir.name, "block"]]
+            if {"camera_id", "block"} <= set(rows.columns)
+            else []
         )
         figures = "".join(
             f'<figure><img src="{cam}/{name}" alt="{html.escape(caption)}">'
@@ -407,9 +633,12 @@ def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
             if (camera_dir / name).exists()
         )
         media.append(
-            f"<h3>{cam}</h3><p>Overlay clips (skeletons drawn on the video):</p>"
-            f"<ul>{clips or '<li>none</li>'}</ul>"
-            f'<div class="figs">{figures}</div>'
+            f'<section class="card"><h2>{cam}: clips and figures</h2>'
+            '<p class="muted">Overlay clips show the video with skeletons drawn. '
+            "Check that the boxes follow the parent and the child, not someone "
+            "else or an object.</p>"
+            f"{_clips_html(camera_dir, blocks)}"
+            f'<div class="figs">{figures}</div></section>'
         )
 
     gaze_note = (
@@ -428,46 +657,39 @@ def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{sid} session report</title>
-<style>
-:root {{ --fg:#1d2433; --muted:#5b6475; --bg:#ffffff; --line:#d9dee7;
-  --good:#2b8a5e; --bad:#c2410c; --warnbg:#fff4e5; }}
-body {{ font-family: system-ui, sans-serif; color:var(--fg); background:var(--bg);
-  max-width: 1100px; margin: 0 auto; padding: 16px; line-height:1.45; }}
-table {{ border-collapse: collapse; width:100%; font-size:14px; }}
-th, td {{ border-bottom:1px solid var(--line); padding:6px 8px; text-align:left;
-  vertical-align: middle; }}
-.table-wrap {{ overflow-x:auto; }}
-.bar {{ display:inline-block; width:80px; height:8px; background:var(--line);
-  border-radius:4px; margin-right:6px; vertical-align:middle; }}
-.bar span {{ display:block; height:100%; border-radius:4px; }}
-.flag {{ color:var(--bad); font-weight:600; }}
-.warn {{ background:var(--warnbg); border-left:4px solid var(--bad); padding:8px 12px; }}
-.ok {{ color:var(--good); }}
-.figs {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap:12px; }}
-figure {{ margin:0; }} img {{ width:100%; border:1px solid var(--line); }}
-figcaption, .muted {{ color:var(--muted); font-size:13px; }}
-</style></head><body>
+<style>{REPORT_CSS}</style></head><body>
 <h1>Session {sid}</h1>
+<p>Cameras: {cameras}</p>
 <p class="muted">Generated {generated}. The same numbers are in
-<code>{SESSION_METRICS_CSV}</code> (one row per camera and block).</p>
-<h2>How much to trust each block</h2>
-{warning}
-<h2>Results per block</h2>
+<code>{TASK_METRICS_CSV}</code> (one row per camera and task) and
+<code>{SESSION_METRICS_CSV}</code> (one row per camera and piece).</p>
+<section class="card">
+<h2>Results per task</h2>
+{_task_table_html(tasks)}
+<p class="muted">When extra-person windows cut a task into pieces, the pieces
+are joined here: distances and synchrony windows are pooled across them. The
+data check says whether there is enough data behind the numbers and which
+clips to watch. Which tasks to include in analyses is the lab's decision;
+make it the same way for every session.</p>
+<details class="pieces"><summary>Per piece ({len(rows)} rows)</summary>
 <div class="table-wrap"><table>{head}{"".join(body)}</table></div>
-<ul class="muted">
-<li><strong>Both people tracked</strong>: share of the block's frames in which
-both the parent and the child were found. Every other number uses only those
-frames.</li>
-<li><strong>Mean distance</strong>: average distance between the parent's and
-the child's torso centers, in image pixels (not comparable across cameras).</li>
+</details>
+<ul class="muted notes">
+<li><strong>Usable time</strong>: time with both the parent and the child
+found. <strong>Both people tracked</strong>: the same as a share of the task.
+Every other number uses only those frames.</li>
+<li><strong>Distance</strong>: distance between the parent's and the child's
+torso centers, in image pixels (compare within a camera, not across
+cameras).</li>
 <li><strong>Movement synchrony</strong>: how closely the amount of whole-body
 movement of the two people rises and falls together, as a correlation in
 20-second windows (0 = unrelated, 1 = identical). <em>Chance</em> is the same
-measure with the child's movement taken from other moments in the block. Only
-the part above chance reflects the interaction.</li>
+measure with the child's movement taken from other moments. Only the part
+above chance reflects the interaction. It is not shown when there are fewer
+than {MIN_SYNC_WINDOWS} unbroken 20-second stretches.</li>
 {gaze_note}
 </ul>
-<h2>Clips and figures</h2>
+</section>
 {"".join(media)}
 </body></html>
 """
@@ -489,7 +711,7 @@ def write_session_outputs(session_dir: Path) -> pd.DataFrame:
     tasks = collect_task_rows(session_dir).assign(metrics_version=METRICS_VERSION)
     tasks.to_csv(session_dir / TASK_METRICS_CSV, index=False)
     (session_dir / REPORT_HTML).write_text(
-        render_report_html(session_dir, rows), encoding="utf-8"
+        render_report_html(session_dir, rows, tasks), encoding="utf-8"
     )
     return rows
 

@@ -57,6 +57,8 @@ PORTAL_DEFAULT_INFER_IMGSZ = 960
 # block (capped at this length), so the colleague sees tracking quality for
 # every block rather than only the first.
 PORTAL_DEFAULT_OVERLAY_SECONDS = 30.0
+# Who research assistants contact when a job fails (``PORTAL_SUPPORT_CONTACT``).
+DEFAULT_SUPPORT_CONTACT = "Felipe"
 # Tracker used in phase 1. "offline" replaced BoT-SORT after a benchmark on 31
 # camera views of past portal sessions (pose_training/bench.py): frames with
 # both parent and child 0.52 -> 0.73, role accuracy on held-out anchor labels
@@ -1360,6 +1362,18 @@ def running_status(
     return payload
 
 
+def support_contact() -> str:
+    """Return who to contact about a failed job.
+
+    Returns:
+        ``PORTAL_SUPPORT_CONTACT`` when set and not blank, else
+        ``DEFAULT_SUPPORT_CONTACT``.
+    """
+    return os.environ.get("PORTAL_SUPPORT_CONTACT", "").strip() or (
+        DEFAULT_SUPPORT_CONTACT
+    )
+
+
 def friendly_failure_message(step_name: str | None, error: BaseException) -> str:
     """Return a short plain message saying where a job stopped.
 
@@ -1380,7 +1394,7 @@ def friendly_failure_message(step_name: str | None, error: BaseException) -> str
         return f"The job stopped while {phrase}. {error}"
     return (
         f"The job stopped while {phrase}. Open the technical details below "
-        "and send them to the person who looks after the portal."
+        f"and send them to {support_contact()}."
     )
 
 

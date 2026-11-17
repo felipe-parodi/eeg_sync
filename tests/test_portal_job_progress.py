@@ -752,3 +752,80 @@ def test_annotate_script_keeps_the_payload_shape() -> None:
     assert "JSON.stringify({ annotations: payload })" in script
     assert "form.dataset.csrfToken" in script
     assert '"x-csrf-token": CSRF_TOKEN' in script
+
+
+# ---------------------------------------------------------------------------
+# Complete job page and support contact (portal-revamp Phases 6-7)
+# ---------------------------------------------------------------------------
+
+
+def _complete_job(root: Path, with_report: bool = True) -> Path:
+    job_dir = _job_dir(root)
+    write_status(job_dir, {"state": "complete", "stage": "report"})
+    (job_dir / "job_config.json").write_text(
+        json.dumps({"session_id": "P001c"}), encoding="utf-8"
+    )
+    session = root / "P001c"
+    (session / "camera_a").mkdir(parents=True)
+    pd.DataFrame(
+        {"camera_id": ["camera_a"], "block": ["free_play"], "coverage_both": [0.9]}
+    ).to_csv(session / "session_metrics.csv", index=False)
+    if with_report:
+        (session / "report.html").write_text("<html></html>", encoding="utf-8")
+    return job_dir
+
+
+def test_complete_job_page_links_to_results(
+    client: TestClient, portal_env: Path
+) -> None:
+    _complete_job(portal_env)
+
+    text = client.get(f"/jobs/{JOB_ID}").text
+
+    assert 'class="button-link" href="/sessions/P001c"' in text
+    assert "Open results" in text
+
+
+def test_complete_job_without_report_has_no_results_button(
+    client: TestClient, portal_env: Path
+) -> None:
+    _complete_job(portal_env, with_report=False)
+
+    text = client.get(f"/jobs/{JOB_ID}").text
+
+    assert "Open results" not in text
+
+
+def test_running_job_page_has_no_results_button(
+    client: TestClient, portal_env: Path
+) -> None:
+    _complete_job(portal_env)
+    write_status(_job_dir(portal_env), jobs.running_status("pose inference", phase=1))
+
+    assert "Open results" not in client.get(f"/jobs/{JOB_ID}").text
+
+
+def test_failure_message_names_support_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = subprocess.CalledProcessError(1, ["python"])
+
+    monkeypatch.delenv("PORTAL_SUPPORT_CONTACT", raising=False)
+    assert friendly_failure_message("compression", error).endswith(
+        "send them to Felipe."
+    )
+    monkeypatch.setenv("PORTAL_SUPPORT_CONTACT", "Dr. <Lab> Admin")
+    assert friendly_failure_message("compression", error).endswith(
+        "send them to Dr. <Lab> Admin."
+    )
+
+
+def test_failed_job_page_escapes_support_contact(
+    client: TestClient, portal_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PORTAL_SUPPORT_CONTACT", "<b>Lab</b>")
+    _failed_job(portal_env)
+
+    text = client.get(f"/jobs/{JOB_ID}").text
+
+    assert "send them to &lt;b&gt;Lab&lt;/b&gt;." in text
