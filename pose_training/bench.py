@@ -300,7 +300,15 @@ def discover_cameras(job_root: Path = JOB_ROOT) -> list[BenchCamera]:
     cameras: list[BenchCamera] = []
     for session_id, job_dir in sorted(latest.items()):
         for cam in ("camera_a", "camera_b"):
-            camera_dir = OUTPUT_ROOT / session_id / cam
+            # Superseded sessions are moved to output/_archive; look there too.
+            camera_dir = next(
+                (
+                    root / session_id / cam
+                    for root in (OUTPUT_ROOT, OUTPUT_ROOT / "_archive")
+                    if (root / session_id / cam / "frames" / "frame_index.csv").exists()
+                ),
+                OUTPUT_ROOT / session_id / cam,
+            )
             if (camera_dir / "frames" / "frame_index.csv").exists() and (
                 job_dir / "anchors" / cam / "anchors.json"
             ).exists():

@@ -187,3 +187,28 @@ def test_kept_confident_rate() -> None:
     )
     a = _assign([(0, 0.0, "parent", (0, 0, 10, 10))])
     assert kept_confident_rate(a, ref) == pytest.approx(0.5)
+
+
+def test_discover_cameras_finds_archived_sessions(tmp_path, monkeypatch) -> None:
+    """Sessions moved to output/_archive stay available to the benchmark."""
+    import json
+
+    from pose_training import bench
+
+    out = tmp_path / "output"
+    jobs = tmp_path / "jobs"
+    job = jobs / "20260101_000000_1010_abcd"
+    (job / "anchors" / "camera_a").mkdir(parents=True)
+    (job / "anchors" / "camera_a" / "anchors.json").write_text("[]", encoding="utf-8")
+    (job / "submission_metadata.json").write_text(
+        json.dumps({"session_id": "1010"}), encoding="utf-8"
+    )
+    frames = out / "_archive" / "1010" / "camera_a" / "frames"
+    frames.mkdir(parents=True)
+    (frames / "frame_index.csv").write_text("frame_idx,timestamp_s\n", encoding="utf-8")
+    monkeypatch.setattr(bench, "OUTPUT_ROOT", out)
+
+    cams = bench.discover_cameras(jobs)
+
+    assert [c.key for c in cams] == ["1010_camera_a"]
+    assert cams[0].camera_dir == out / "_archive" / "1010" / "camera_a"
