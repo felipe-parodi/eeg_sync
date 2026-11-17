@@ -1349,7 +1349,7 @@ def anchor_image(
 @app.get("/jobs/{job_id}/annotate", response_class=HTMLResponse)
 def annotate_job(
     job_id: str,
-    _: Annotated[None, Depends(require_auth)],
+    session_token: Annotated[str, Depends(require_auth)],
 ) -> HTMLResponse:
     """Render the parent/child annotation page for a job."""
     safe_job_id = _slug(job_id)
@@ -1381,7 +1381,7 @@ def annotate_job(
         cameras.append({"camera_id": camera_id, "cards": cards})
     # The page is GET-only; the form's POST goes through require_csrf, so the
     # token is handed to annotate.js through a data attribute on the form.
-    csrf = csrf_token_for_session(_require_session_or_redirect_passthrough())
+    csrf = csrf_token_for_session(session_token)
     return _render_page(
         "annotate.html",
         f"Annotate {safe_job_id}",
@@ -1441,29 +1441,6 @@ async def submit_annotations(
     )
     background_tasks.add_task(resume_portal_job_phase2_background, safe_job_id, job_dir)
     return JSONResponse({"job_id": safe_job_id, "status_url": f"/jobs/{safe_job_id}"})
-
-
-def _require_session_or_redirect_passthrough() -> str:
-    """Return the current session token without re-validating.
-
-    Used only by the annotate page where we need the CSRF token inline in
-    the HTML. The page itself is already auth-gated by ``annotate_job``'s
-    Depends(require_auth).
-    """
-    # Find any active session token. The annotate endpoint already
-    # passed Depends(require_auth) so at least one valid session exists in
-    # SESSION_TOKENS for this caller; pick the most recently created.
-    now = time.time()
-    candidates = [
-        (token, state)
-        for token, state in SESSION_TOKENS.items()
-        if state.expires_at > now
-    ]
-    if not candidates:
-        # Defensive: should not happen because require_auth ran upstream.
-        raise HTTPException(status_code=401, detail="No active session")
-    candidates.sort(key=lambda item: item[1].expires_at, reverse=True)
-    return candidates[0][0]
 
 
 def main() -> None:

@@ -785,7 +785,7 @@ def test_annotate_page_track_buttons_use_dark_readable_text(
     monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
     monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
     portal_app.SESSION_TOKENS.clear()
-    portal_app.create_session_token()
+    session_token = portal_app.create_session_token()
 
     camera_dir = tmp_path / "job-001" / "anchors" / "camera_a"
     camera_dir.mkdir(parents=True)
@@ -807,7 +807,7 @@ def test_annotate_page_track_buttons_use_dark_readable_text(
         encoding="utf-8",
     )
 
-    response = portal_app.annotate_job("job-001", None)
+    response = portal_app.annotate_job("job-001", session_token)
     text = response.body.decode("utf-8")
 
     # The track buttons sit on a light tinted background; the global button
@@ -1431,3 +1431,43 @@ def test_phase2_resume_uses_achieved_frame_rate(tmp_path: Path, monkeypatch) -> 
         pass
 
     assert seen == [4.0]
+
+
+def test_annotate_page_uses_the_callers_own_csrf_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """With two people logged in, each sees their own CSRF token.
+
+    The page used to embed the most recently created session's token, so the
+    earlier user's submit was rejected with 403.
+    """
+    monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
+    monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
+    portal_app.SESSION_TOKENS.clear()
+    first = portal_app.create_session_token()
+    second = portal_app.create_session_token()
+    # The second person logged in later, so their session expires later.
+    portal_app.SESSION_TOKENS[second].expires_at += 600
+
+    camera_dir = tmp_path / "job-001" / "anchors" / "camera_a"
+    camera_dir.mkdir(parents=True)
+    (camera_dir / "manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "anchor_idx": 0,
+                    "image_filename": "anchor_000.jpg",
+                    "frame_idx": 10,
+                    "timestamp_s": 1.25,
+                    "tracks": [{"track_id": 1, "color_bgr": [0, 255, 0]}],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    text = portal_app.annotate_job("job-001", first).body.decode("utf-8")
+
+    assert portal_app.csrf_token_for_session(first) in text
+    assert portal_app.csrf_token_for_session(second) not in text
