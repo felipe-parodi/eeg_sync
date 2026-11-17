@@ -116,3 +116,150 @@ def test_report_shows_body_synchrony_with_chance(tmp_path: Path) -> None:
     assert "0.21" in html and "(chance 0.03)" in html
     assert "20-second" in html
     assert "0.50" not in html  # the old torso cross-correlation is not shown
+
+
+# ---- Task-level table: parts rejoined (metrics-validity plan, phase 5) ----
+
+
+def _write_split_session(session: Path) -> None:
+    """camera_a: grocery split into two parts, storybook whole."""
+    cam = session / "camera_a"
+    cam.mkdir(parents=True)
+    blocks = [
+        ("grocery_part1", 100.0, 150.0, 300, 150, 0.3, 0.05, 4),
+        ("grocery_part2", 200.0, 260.0, 360, 300, 0.1, 0.01, 6),
+        ("storybook", 400.0, 500.0, 600, 540, 0.5, 0.00, 10),
+    ]
+    (cam / "pose_metrics_summary.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block": name,
+                    "block_start_s": start,
+                    "block_end_s": end,
+                    "block_frames": frames,
+                    "frames_with_both": both,
+                    "coverage_both": both / frames,
+                    "low_coverage": both / frames < 0.5,
+                    "sync_mean": sync,
+                    "sync_chance_mean": chance,
+                    "sync_minus_chance": sync - chance,
+                    "sync_n_windows": n_win,
+                }
+                for name, start, end, frames, both, sync, chance, n_win in blocks
+            ]
+        ),
+        encoding="utf-8",
+    )
+    # Per-frame distances: part1 all 10 px (150 frames), part2 all 40 px (300).
+    prox = pd.DataFrame(
+        {
+            "frame_idx": range(450 + 540),
+            "timestamp_s": range(450 + 540),
+            "torso_distance_px": [10.0] * 150 + [40.0] * 300 + [25.0] * 540,
+            "block": ["grocery_part1"] * 150
+            + ["grocery_part2"] * 300
+            + ["storybook"] * 540,
+        }
+    )
+    prox.to_csv(cam / "pose_metrics_proximity.csv", index=False)
+    sync_rows = []
+    for name, *_rest, sync, _chance, n_win in blocks:
+        sync_rows += [{"block": name, "sync_r": sync, "segment_id": 0}] * n_win
+    pd.DataFrame(sync_rows).assign(window_start_s=0.0, window_end_s=20.0).to_csv(
+        cam / "pose_metrics_sync.csv", index=False
+    )
+    (cam / "gaze_metrics_summary.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block": "grocery_part1",
+                    "n_frames": 100,
+                    "mutual_gaze_pct": 10.0,
+                    "mutual_gaze_chance_pct": 2.0,
+                },
+                {
+                    "block": "grocery_part2",
+                    "n_frames": 300,
+                    "mutual_gaze_pct": 2.0,
+                    "mutual_gaze_chance_pct": 2.0,
+                },
+                {
+                    "block": "storybook",
+                    "n_frames": 500,
+                    "mutual_gaze_pct": 5.0,
+                    "mutual_gaze_chance_pct": 1.0,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_task_rows_rejoin_parts_by_pooling(tmp_path: Path) -> None:
+    from video_analysis.session_report import collect_task_rows
+
+    session = tmp_path / "1019"
+    _write_split_session(session)
+
+    tasks = collect_task_rows(session).set_index("task")
+
+    g = tasks.loc["grocery"]
+    assert g["n_parts"] == 2
+    assert g["parts"] == "grocery_part1;grocery_part2"
+    assert g["duration_s"] == 110.0
+    assert g["frames_with_both"] == 450 and g["block_frames"] == 660
+    assert abs(g["coverage_both"] - 450 / 660) < 1e-9
+    # Pooled frames: (150*10 + 300*40) / 450 = 30; median of pooled frames = 40
+    # (averaging the two part medians would wrongly give 25).
+    assert abs(g["proximity_mean"] - 30.0) < 1e-9
+    assert g["proximity_median"] == 40.0
+    assert g["proximity_n_frames"] == 450
+    # Pooled windows: (4*0.3 + 6*0.1) / 10 = 0.18; chance weighted the same way.
+    assert abs(g["sync_mean"] - 0.18) < 1e-9
+    assert g["sync_n_windows"] == 10
+    assert abs(g["sync_chance_mean"] - (4 * 0.05 + 6 * 0.01) / 10) < 1e-9
+    assert abs(g["sync_minus_chance"] - (g["sync_mean"] - g["sync_chance_mean"])) < 1e-9
+    # Gaze shares weighted by gaze frames: (100*10 + 300*2) / 400 = 4.
+    assert abs(g["gaze_mutual_gaze_pct"] - 4.0) < 1e-9
+    assert abs(g["gaze_mutual_gaze_chance_pct"] - 2.0) < 1e-9
+    assert g["gaze_n_frames"] == 400
+
+    s = tasks.loc["storybook"]
+    assert s["n_parts"] == 1 and s["proximity_median"] == 25.0
+    assert abs(s["sync_mean"] - 0.5) < 1e-9
+
+
+def test_write_session_outputs_writes_task_table_and_study_table(
+    tmp_path: Path,
+) -> None:
+    from video_analysis.session_report import (
+        ALL_SESSIONS_TASK_CSV,
+        TASK_METRICS_CSV,
+        build_all_sessions_task_table,
+    )
+
+    _write_split_session(tmp_path / "1019")
+    _write_split_session(tmp_path / "1020")
+    for sid in ("1019", "1020"):
+        write_session_outputs(tmp_path / sid)
+        assert (tmp_path / sid / TASK_METRICS_CSV).exists()
+    (tmp_path / "_archive").mkdir()  # never a session
+
+    study = build_all_sessions_task_table(tmp_path)
+
+    assert sorted(study["session_id"].unique()) == ["1019", "1020"]
+    assert len(study) == 4  # 2 sessions x (grocery, storybook)
+    assert ALL_SESSIONS_TASK_CSV == "all_sessions_task_metrics.csv"
+
+
+def test_cli_writes_study_task_table(tmp_path: Path) -> None:
+    from video_analysis.session_report import ALL_SESSIONS_TASK_CSV, main
+
+    _write_split_session(tmp_path / "1019")
+    main(
+        ["--session-dir", str(tmp_path / "1019"), "--all-sessions-root", str(tmp_path)]
+    )
+
+    study = pd.read_csv(tmp_path / ALL_SESSIONS_TASK_CSV)
+    assert sorted(study["task"]) == ["grocery", "storybook"]

@@ -1317,6 +1317,7 @@ frame).
   README.md                <- this file
   report.html              <- START HERE: one-page summary (open in a browser)
   session_metrics.csv      <- all headline numbers, one row per camera x block
+  task_metrics.csv         <- the same, one row per camera x task (parts rejoined)
   session_summary.json     <- run-level config + validation status
 {camera_tree}
   portal_metadata/         <- provenance: what you submitted + the run log
@@ -1333,7 +1334,10 @@ how much of the block had both people tracked, the headline numbers, and
 links to the overlay clips and figures.
 
 **`session_metrics.csv`** holds the same numbers as a table (one row per
-camera and block) for stats software. The portal also keeps a combined table
+camera and block) for stats software. **`task_metrics.csv`** has one row per
+camera and task: when extra-person windows split a task into `_part1`,
+`_part2`, ..., the parts are rejoined by pooling their frames (distance, gaze)
+and their 20-second windows (movement synchrony). The portal also keeps a combined table
 for every processed session; download it from the portal's home page
 ("Download all sessions table").
 

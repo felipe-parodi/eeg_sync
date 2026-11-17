@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ import pandas as pd
 SESSION_METRICS_CSV = "session_metrics.csv"
 ALL_SESSIONS_CSV = "all_sessions_metrics.csv"
 REPORT_HTML = "report.html"
+TASK_METRICS_CSV = "task_metrics.csv"
+ALL_SESSIONS_TASK_CSV = "all_sessions_task_metrics.csv"
 
 # Leading columns, in order; any other metric columns follow.
 LEAD_COLUMNS = [
@@ -100,6 +103,130 @@ def collect_session_rows(session_dir: Path) -> pd.DataFrame:
         return table
     lead = [c for c in LEAD_COLUMNS if c in table.columns]
     return table[lead + [c for c in table.columns if c not in lead]]
+
+
+_PART_SUFFIX = re.compile(r"_part\d+$")
+
+
+def task_name(block: str) -> str:
+    """Task a block belongs to: the block name without a ``_partN`` suffix."""
+    return _PART_SUFFIX.sub("", str(block))
+
+
+def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+    keep = values.notna() & weights.notna() & (weights > 0)
+    if not keep.any():
+        return float("nan")
+    return float((values[keep] * weights[keep]).sum() / weights[keep].sum())
+
+
+def _read_csv(path: Path) -> pd.DataFrame:
+    return pd.read_csv(path, dtype={"block": str}) if path.exists() else pd.DataFrame()
+
+
+def collect_task_rows(session_dir: Path) -> pd.DataFrame:
+    """One row per camera and task, rejoining blocks split by extra-person windows.
+
+    Parts ``<task>_part1``, ``<task>_part2``, ... are pooled, not averaged:
+
+    - distance: mean, median and sd recomputed from the per-frame file
+      (``pose_metrics_proximity.csv``), so a median is never an average of
+      part medians;
+    - movement synchrony: the 20 s windows of all parts pooled
+      (``pose_metrics_sync.csv``); the chance level is the parts' chance
+      levels weighted by their window counts; windows never cross the gaps
+      between parts;
+    - gaze shares, their chance levels and convergence: weighted by each
+      part's gaze frame count;
+    - coverage: frame counts summed.
+
+    Args:
+        session_dir: ``video_inference/output/<session_id>``.
+
+    Returns:
+        Task table (empty if the session has no metrics).
+    """
+    session_dir = Path(session_dir)
+    blocks = collect_session_rows(session_dir)
+    if blocks.empty:
+        return pd.DataFrame()
+    blocks = blocks.assign(task=blocks["block"].map(task_name))
+    rows: list[dict[str, Any]] = []
+    for (camera_id, task), parts in blocks.groupby(["camera_id", "task"], sort=False):
+        camera_dir = session_dir / str(camera_id)
+        names = list(parts["block"])
+        row: dict[str, Any] = {
+            "session_id": session_dir.name,
+            "camera_id": camera_id,
+            "task": task,
+            "n_parts": len(names),
+            "parts": ";".join(names),
+            "task_start_s": float(parts["block_start_s"].min()),
+            "task_end_s": float(parts["block_end_s"].max()),
+            "duration_s": float((parts["block_end_s"] - parts["block_start_s"]).sum()),
+        }
+        for col in ("block_frames", "frames_with_both"):
+            if col in parts:
+                row[col] = int(parts[col].fillna(0).sum())
+        if row.get("block_frames"):
+            row["coverage_both"] = row.get("frames_with_both", 0) / row["block_frames"]
+
+        prox = _read_csv(camera_dir / "pose_metrics_proximity.csv")
+        if not prox.empty and "block" in prox:
+            dist = prox.loc[prox["block"].isin(names), "torso_distance_px"]
+            if len(dist):
+                row["proximity_mean"] = float(dist.mean())
+                row["proximity_median"] = float(dist.median())
+                row["proximity_std"] = float(dist.std())
+                row["proximity_n_frames"] = int(len(dist))
+
+        sync = _read_csv(camera_dir / "pose_metrics_sync.csv")
+        if not sync.empty and "block" in sync:
+            windows = sync.loc[sync["block"].isin(names), "sync_r"]
+            if len(windows):
+                row["sync_mean"] = float(windows.mean())
+                row["sync_std"] = float(windows.std())
+                row["sync_n_windows"] = int(len(windows))
+                if {"sync_chance_mean", "sync_n_windows"} <= set(parts.columns):
+                    chance = _weighted_mean(
+                        parts["sync_chance_mean"], parts["sync_n_windows"]
+                    )
+                    row["sync_chance_mean"] = chance
+                    row["sync_minus_chance"] = row["sync_mean"] - chance
+
+        if "gaze_n_frames" in parts:
+            weight = parts["gaze_n_frames"]
+            row["gaze_n_frames"] = int(weight.fillna(0).sum())
+            for col in parts.columns:
+                if col.startswith("gaze_") and col.endswith("_pct"):
+                    row[col] = _weighted_mean(parts[col], weight)
+        if "gaze_convergence_n_frames" in parts:
+            weight = parts["gaze_convergence_n_frames"]
+            row["gaze_convergence_n_frames"] = int(weight.fillna(0).sum())
+            for col in ("gaze_convergence_mean", "gaze_convergence_chance"):
+                if col in parts:
+                    row[col] = _weighted_mean(parts[col], weight)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def build_all_sessions_task_table(output_root: Path) -> pd.DataFrame:
+    """Stack every session's ``task_metrics.csv`` under ``output_root``.
+
+    Args:
+        output_root: Directory holding one folder per session.
+
+    Returns:
+        Combined task table (empty if no session has one yet).
+    """
+    tables = [
+        pd.read_csv(path, dtype={"session_id": str, "camera_id": str, "task": str})
+        for path in sorted(Path(output_root).glob(f"*/{TASK_METRICS_CSV}"))
+        if not path.parent.name.startswith("_")
+    ]
+    if not tables:
+        return pd.DataFrame(columns=["session_id", "camera_id", "task"])
+    return pd.concat(tables, ignore_index=True, sort=False)
 
 
 def build_all_sessions_table(output_root: Path) -> pd.DataFrame:
@@ -208,8 +335,9 @@ def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
         )
 
     low = rows[
-        rows.get("low_coverage", pd.Series(False, index=rows.index)) == True
-    ]  # noqa: E712
+        rows.get("low_coverage", pd.Series(False, index=rows.index))  # noqa: E712
+        == True
+    ]
     if len(low):
         items = "".join(
             f"<li>{html.escape(str(r.camera_id))} / {html.escape(str(r.block))}: "
@@ -310,7 +438,7 @@ the part above chance reflects the interaction.</li>
 
 
 def write_session_outputs(session_dir: Path) -> pd.DataFrame:
-    """Write ``session_metrics.csv`` and ``report.html`` for one session.
+    """Write ``session_metrics.csv``, ``task_metrics.csv`` and ``report.html``.
 
     Args:
         session_dir: Session output folder.
@@ -321,6 +449,7 @@ def write_session_outputs(session_dir: Path) -> pd.DataFrame:
     session_dir = Path(session_dir)
     rows = collect_session_rows(session_dir)
     rows.to_csv(session_dir / SESSION_METRICS_CSV, index=False)
+    collect_task_rows(session_dir).to_csv(session_dir / TASK_METRICS_CSV, index=False)
     (session_dir / REPORT_HTML).write_text(
         render_report_html(session_dir, rows), encoding="utf-8"
     )
@@ -345,6 +474,10 @@ def main(argv: list[str] | None = None) -> None:
         out = args.all_sessions_root / ALL_SESSIONS_CSV
         table.to_csv(out, index=False)
         print(f"[session-report] {len(table)} rows across sessions -> {out}")
+        tasks = build_all_sessions_task_table(args.all_sessions_root)
+        tasks_out = args.all_sessions_root / ALL_SESSIONS_TASK_CSV
+        tasks.to_csv(tasks_out, index=False)
+        print(f"[session-report] {len(tasks)} task rows across sessions -> {tasks_out}")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ What lives where after a pipeline run, with column dictionaries for every CSV. U
 video_inference/output/<session_id>/
 ├── session_summary.json                  # written by video-infer run
 ├── session_metrics.csv                   # ← `video-session-report`: one row per camera × block
+├── task_metrics.csv                      # ← `video-session-report`: one row per camera × task (parts rejoined)
 ├── report.html                           # ← `video-session-report`: one-page summary (start here)
 └── <camera>/                             # camera_a, camera_b
     ├── manifest.json                     # provenance + assumptions
@@ -224,7 +225,17 @@ block:
 - Gaze metrics, prefixed `gaze_`.
 - Whole-camera tracking stats from `two_person_summary.json`, prefixed `tracking_`.
 
-`video_inference/output/all_sessions_metrics.csv` stacks every session's table.
+`task_metrics.csv` has one row per camera × task. A task split by extra-person
+windows (`grocery_part1`, `grocery_part2`, ...) is rejoined by pooling, not
+averaging: distance mean/median/sd are recomputed from all per-frame
+distances; movement synchrony pools the 20 s windows of all parts (windows
+never cross the gaps between parts) and weights the parts' chance levels by
+their window counts; gaze shares and convergence are weighted by gaze frames;
+coverage sums frame counts. Extra columns: `task`, `n_parts`, `parts`,
+`task_start_s`, `task_end_s`, `duration_s` (analysed time, gaps excluded).
+
+`video_inference/output/all_sessions_metrics.csv` stacks every session's block
+table, and `all_sessions_task_metrics.csv` every session's task table.
 The portal home page offers it as "Download all sessions table". `report.html`
 shows the same numbers with coverage warnings, chance levels, figures, and
 links to the overlay clips.
