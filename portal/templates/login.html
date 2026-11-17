@@ -1,6 +1,7 @@
 {% extends "base.html" %}
-{% block body %}<form method="post" action="/login">
+{% block body %}<div class="login-card"><form method="post" action="/login">
+  <h1>Log in</h1>
   <label for="password">Password</label>
-  <input id="password" name="password" type="password" autocomplete="current-password">
+  <input id="password" name="password" type="password" autocomplete="current-password" autofocus>
   <button type="submit">Log in</button>
-</form>{% endblock %}
+</form></div>{% endblock %}
