@@ -1358,3 +1358,76 @@ def test_gaze_step_uses_page_by_default_and_gazelle_on_request(tmp_path: Path) -
     cfg.gaze_model = "gazelle"
     gaze = [s for s in build_phase2_steps(cfg) if s.name.startswith("gaze inference")]
     assert all("gaze_analysis.gazelle_runner" in s.argv for s in gaze)
+
+
+# ---- Frame timing (metrics-validity plan, phase 0) ----
+
+
+def _write_extraction_info(config, camera_id: str, achieved: float) -> None:
+    frames = config.session_output_dir / camera_id / "frames"
+    frames.mkdir(parents=True, exist_ok=True)
+    (frames / "extraction_info.json").write_text(
+        json.dumps({"achieved_frame_rate": achieved}), encoding="utf-8"
+    )
+
+
+def test_portal_defaults_give_even_5_fps() -> None:
+    """Portal compression at 10 fps divides evenly into the 5 fps analysis rate."""
+    from portal.jobs import PORTAL_DEFAULT_FRAME_RATE, CompressionSettings
+
+    assert PORTAL_DEFAULT_FRAME_RATE == 5.0
+    assert CompressionSettings().target_fps == 10.0
+
+
+def test_session_frame_rate_uses_achieved_rate(tmp_path: Path) -> None:
+    from portal.jobs import achieved_session_frame_rate
+
+    config = _job_config_two_cameras(tmp_path)
+    _write_extraction_info(config, "camera_a", 5.0)
+    _write_extraction_info(config, "camera_b", 5.0)
+
+    assert achieved_session_frame_rate(config) == 5.0
+
+
+def test_session_frame_rate_falls_back_without_extraction_info(tmp_path: Path) -> None:
+    from portal.jobs import achieved_session_frame_rate
+
+    config = _job_config_two_cameras(tmp_path)
+
+    assert achieved_session_frame_rate(config) == config.frame_rate
+
+
+def test_session_frame_rate_mismatch_stops_with_plain_message(tmp_path: Path) -> None:
+    from portal.jobs import achieved_session_frame_rate
+
+    config = _job_config_two_cameras(tmp_path)
+    _write_extraction_info(config, "camera_a", 5.0)
+    _write_extraction_info(config, "camera_b", 4.0)
+
+    with pytest.raises(ValueError, match="frames per second"):
+        achieved_session_frame_rate(config)
+
+
+def test_phase2_resume_uses_achieved_frame_rate(tmp_path: Path, monkeypatch) -> None:
+    """Phase 2 rebuilds its config from the upload; it must re-read the rate."""
+    import portal.jobs as jobs
+
+    config = _job_config_two_cameras(tmp_path)
+    config.job_dir.mkdir(parents=True, exist_ok=True)
+    _write_extraction_info(config, "camera_a", 4.0)
+    _write_extraction_info(config, "camera_b", 4.0)
+    seen: list[float] = []
+
+    def fake_build(cfg, anchors_json_by_camera=None):
+        seen.append(cfg.frame_rate)
+        raise RuntimeError("stop after step building")
+
+    monkeypatch.setattr(jobs, "build_phase2_steps", fake_build)
+    monkeypatch.setattr(jobs, "resolve_anchors_json_paths", lambda cfg: {})
+
+    try:
+        jobs.resume_portal_job_phase2(config, tmp_path)
+    except RuntimeError:
+        pass
+
+    assert seen == [4.0]

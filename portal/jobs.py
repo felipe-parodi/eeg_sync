@@ -13,10 +13,11 @@ from typing import Any, Iterable, Sequence
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4"}
 CHUNK_CAMERA_IDS = {"camera_a", "camera_b"}
-# 6 fps balances temporal resolution against inference cost: it still yields
-# ~30 samples per 5 s synchrony window (plenty for the cross-correlation) while
-# cutting frames vs 8 fps, and phase-2 interpolation fills the grid in between.
-PORTAL_DEFAULT_FRAME_RATE = 6.0
+# 5 fps: every 2nd frame of the 10 fps portal-compressed videos, so frames are
+# evenly spaced (6 fps from 10 fps alternated 100/200 ms steps, which put a
+# 2 Hz artifact into every person's measured movement). The rate actually
+# achieved for each video is read back after frame extraction.
+PORTAL_DEFAULT_FRAME_RATE = 5.0
 PORTAL_DEFAULT_IMAGE_WIDTH = 854
 PORTAL_DEFAULT_IMAGE_HEIGHT = 480
 # Two detections per frame: the parent and the child. Extra-person windows
@@ -83,7 +84,9 @@ class ExclusionWindow:
 class CompressionSettings:
     """Compression settings used before inference."""
 
-    target_fps: float = 8.0
+    # 10 fps divides evenly into the 5 fps analysis rate (8 fps could only
+    # give an even 4 fps).
+    target_fps: float = 10.0
     max_width: int = 854
     quality: int = 34
     cpu_preset: str = "ultrafast"
@@ -261,6 +264,45 @@ def build_blocks_arg(blocks: Sequence[SessionBlock]) -> str:
         f"{block.name},{format_seconds_for_cli(block.start_s)},{format_seconds_for_cli(block.end_s)}"
         for block in blocks
     )
+
+
+def achieved_session_frame_rate(config: PortalJobConfig) -> float:
+    """Frame rate actually kept by frame extraction, shared by all cameras.
+
+    Frame extraction keeps every k-th source frame, so the achieved rate is
+    the source rate divided by k (5 fps from a 10 fps video, 4 fps from an
+    8 fps one). Everything after extraction must use this rate.
+
+    Args:
+        config: Portal job configuration (after phase 1 has run).
+
+    Returns:
+        The achieved rate, or ``config.frame_rate`` when extraction did not
+        record one (older runs).
+
+    Raises:
+        ValueError: If the cameras ended up at different rates.
+    """
+    from video_inference.frames import read_achieved_frame_rate
+
+    rates = {
+        camera_id: read_achieved_frame_rate(
+            config.session_output_dir / camera_id / "frames", config.frame_rate
+        )
+        for camera_id in active_camera_ids(config)
+    }
+    distinct = sorted({round(rate, 6) for rate in rates.values()})
+    if len(distinct) > 1:
+        detail = ", ".join(
+            f"Video {camera_id[-1].upper()} {rate:g}"
+            for camera_id, rate in rates.items()
+        )
+        raise ValueError(
+            "The two videos ended up at different frames per second "
+            f"({detail}). Compress both videos with the portal compressor "
+            "(10 frames per second) and submit the session again."
+        )
+    return float(distinct[0]) if distinct else config.frame_rate
 
 
 def active_camera_ids(config: PortalJobConfig) -> list[str]:
@@ -1204,7 +1246,7 @@ def make_result_zip(
     Skips intermediate artifacts the colleague never opens: extracted
     JPEG frames under any ``frames/`` directory and the raw inference
     JSON under any ``intermediate/`` directory. These can be hundreds
-    of MB at 8 fps over a 10-minute block; the per-frame information
+    of MB at 5 fps over a 10-minute block; the per-frame information
     is already encoded in the CSVs that *are* included.
 
     Args:
@@ -1317,7 +1359,7 @@ The other CSVs are earlier stages kept for transparency and debugging:
 | 1. raw | `tracks_2d.csv` | `pose_3d.csv` | Every detection from every tracked person, before role assignment. |
 | 2. filtered | `tracks_2d_filtered.csv` | `pose_3d_filtered.csv` | The parent and the child, identified across the whole recording using your anchor labels. |
 | 2b. refined | | `pose_3d_refined.csv` | Same people, keypoints re-estimated by a stronger pose model (ViTPose-Large) for steadier joints. Present for new jobs. |
-| 3. interpolated | `tracks_2d_interpolated.csv` | `pose_3d_interpolated.csv` | Detection gaps up to 1 s linearly filled so boxes/joints do not flicker. Longer gaps are left empty. Filled rows are flagged in the `interpolated` column. |
+| 3. interpolated | `tracks_2d_interpolated.csv` | `pose_3d_interpolated.csv` | Short detection gaps (1 s or less, inside one block) linearly filled so boxes/joints do not flicker. Longer gaps are left completely empty. Only real video frame times are filled. Filled rows are flagged in the `interpolated` column. |
 | 4. smooth | `tracks_2d_smooth.csv` | `pose_3d_smooth.csv` | Stage 3 + temporal EMA smoothing. **Use these.** |
 
 After stage 2, `track_id` is canonical: **`0` = parent, `1` = child**
@@ -1602,6 +1644,8 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
             config.session_output_dir / active_camera_ids(config)[0],
             (config.image_width, config.image_height),
         )
+        # Use the frame rate extraction actually achieved from here on.
+        config.frame_rate = achieved_session_frame_rate(config)
         write_session_config(config)
         _write_json(config.job_dir / "job_config.json", job_config_to_dict(config))
 
@@ -1654,6 +1698,9 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
     """
     log_path = config.job_dir / "job.log"
     try:
+        # The config is rebuilt from the upload, so re-read the frame rate
+        # that frame extraction actually achieved in phase 1.
+        config.frame_rate = achieved_session_frame_rate(config)
         anchors_map = resolve_anchors_json_paths(config)
         steps = build_phase2_steps(config, anchors_json_by_camera=anchors_map)
 

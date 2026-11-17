@@ -70,6 +70,10 @@ Split into focused modules with a backward-compatible `__init__.py`:
 
 All public symbols are re-exported from `sync_eeg_vid.__init__`, so `from sync_eeg_vid import find_sync_pulse` still works.
 
+### Frame timing (critical)
+
+Frames are extracted at 5 fps by keeping every k-th source frame (k = round(source fps / 5); 10 fps portal uploads give every 2nd frame), counted from the start of the video so all blocks share one time grid. `frames/frame_index.csv` holds each frame's true source time; `frames/extraction_info.json` holds the achieved rate, which the portal uses for everything downstream. Do not go back to ffmpeg's `fps=` filter: with a rate that does not divide the source rate it produces uneven frame spacing under evenly spaced timestamps.
+
 ### Video Inference (`video_inference/`)
 
 Pipeline stages run in sequence: **compress -> extract frames -> infer -> track -> schema export -> validate**.
@@ -92,7 +96,7 @@ Post-inference cleanup, metrics, and visualization. Each module exposes a `build
 - **`track_filter.py`:** `video-filter-tracks`. Keeps top-N persistent tracks per named time block and assigns `parent=0`/`child=1` by mean bbox area within that block. Legacy; the portal uses `video_inference.offline_assoc` when a detection cache exists.
 - **`track_annotator.py`:** `video-annotate-tracks`. Interactive OpenCV viewer — click bbox, press `0`-`3` to reassign, `P` to propagate forward, `S` to save. Writes `track_corrections.json`.
 - **`track_correction.py`:** `video-correct-tracks`. Applies the annotator's JSON with atomic per-frame ID remapping (handles `0↔1` swaps correctly). Writes `*_corrected.csv`.
-- **`interpolate.py`:** `video-interpolate`. Linear upsampling of low-FPS track/pose data (e.g., 1 FPS -> 8 FPS). Gap-aware: won't interpolate across large timestamp gaps. **Optional** — 5 FPS native is usually sufficient.
+- **`interpolate.py`:** `video-interpolate`. Fills short gaps (<= `--max-gap-seconds`, default 1 s) at the extracted frame times in `frames/frame_index.csv`, never across blocks; longer gaps stay empty. Filled rows are flagged `interpolated`.
 - **`temporal_smooth.py`:** `video-smooth`. Confidence-gated bidirectional EMA smoothing. High-confidence keypoints pass through raw; only low-confidence ones get smoothed. Default `tau=0.15`, `conf_gate=0.3`.
 - **`pose_metrics.py`:** `video-pose-metrics`. Per-block torso proximity + windowed movement cross-correlation + tracking coverage (`coverage_both`, `low_coverage`). Uses the camera's own blocks (`--camera-id`).
 - **`session_report.py`:** `video-session-report`. `session_metrics.csv` (one row per camera x block), `report.html`, and the study-wide `all_sessions_metrics.csv`.
