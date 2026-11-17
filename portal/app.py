@@ -1753,6 +1753,7 @@ async def finish_chunked_upload(
             raise
         for camera_id, duration_s in durations.items():
             meta["videos"][camera_id]["duration_s"] = duration_s
+        meta["upload_finished_at"] = datetime.now().isoformat(timespec="seconds")
         if must_archive:
             archived = archive_session_dir(str(meta["session_id"]))
             meta["archived_previous_results"] = str(archived) if archived else None

@@ -1518,17 +1518,27 @@ def run_command_step(step: CommandStep, cwd: Path, log_path: Path) -> None:
         cwd: Working directory.
         log_path: Log file path.
     """
-    with log_path.open("a", encoding="utf-8") as log_file:
-        log_file.write(f"\n\n== {step.name} ==\n")
-        log_file.write(" ".join(step.argv) + "\n")
-        log_file.flush()
-        subprocess.run(
-            step.argv,
-            cwd=cwd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            check=True,
-            text=True,
+    from portal import run_log
+
+    started = run_log.now()
+    ok = False
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"\n\n== {step.name} ==\n")
+            log_file.write(" ".join(step.argv) + "\n")
+            log_file.flush()
+            subprocess.run(
+                step.argv,
+                cwd=cwd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                check=True,
+                text=True,
+            )
+        ok = True
+    finally:
+        run_log.record_step(
+            Path(log_path).parent, step.name, step.camera_id, started, run_log.now(), ok
         )
 
 
@@ -2112,6 +2122,9 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
                 log_path=str(log_path),
             ),
         )
+        from portal import run_log
+
+        run_log.write_run_record(config, "failed", error=error)
         raise
 
 
@@ -2170,6 +2183,11 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
         current_step = "results zip"
         write_status(config.job_dir, running_status(current_step, phase=2))
 
+        # Run record (timings, versions, outcome); written before the zip so
+        # the session's copy ships with the results.
+        from portal import run_log
+
+        run_log.write_run_record(config, "complete")
         zip_path = config.job_dir / f"{config.session_id}_results.zip"
         metadata_root = Path(config.session_id) / "portal_metadata"
         readme_path = config.job_dir / "README.md"
@@ -2224,4 +2242,7 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
                 log_path=str(log_path),
             ),
         )
+        from portal import run_log
+
+        run_log.write_run_record(config, "failed", error=error)
         raise

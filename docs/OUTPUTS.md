@@ -284,3 +284,19 @@ table against these labels.
 ## EEG-side outputs (sync workflow only)
 
 `sync_results.json` — produced by `eeg-sync`. Documented in [`../README.md`](../README.md#sync_resultsjson-schema).
+
+## `run_info.json` and `portal_runs.jsonl` (portal run records)
+
+For troubleshooting and planning, every portal job writes a run record:
+`run_info.json` in the job folder and in the session folder (so it is in the
+results zip), plus one line per job in `video_inference/output/portal_runs.jsonl`,
+which survives portal restarts. Fields: job and session id, state (`complete` /
+`failed`), submission and upload-finished times, code (`git_commit`,
+`metrics_version`, pose and gaze model, frame rate), GPUs, per video (file
+name, size, length, source fps, achieved frame rate, frames extracted), tasks
+submitted and pieces skipped, durations in seconds (`upload`, `phase1`,
+`label_wait` = waiting for the parent labels, `phase2`, `processing` =
+phase 1 + phase 2 wall time), every step with its duration and success, the
+per-task verdicts, and for failures the failing step, the error and the last
+30 log lines. Per-step timings are also in the job folder's
+`step_timings.jsonl`.
