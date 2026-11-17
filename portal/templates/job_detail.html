@@ -11,6 +11,9 @@
     <tr><td>{{ row.camera_id }}</td><td>{{ row.block }}</td><td>{{ row.coverage }}</td><td>{% if row.low %}{{ chip("check", "Low: check the overlay clips") }}{% else %}{{ chip("ok", "OK") }}{% endif %}</td></tr>
     {%- endfor -%}
   </tbody></table></div><p><a href="/jobs/{{ job_id }}/gaze-label">Optional: label what people are looking at</a> <span class="muted">(helps us check gaze accuracy)</span></p>{% endif %}
+  {% if dropped_parts %}<h3>Skipped because shorter than {{ min_part_s }} s</h3><p class="muted">These pieces were left over between extra-person windows and are too short to measure reliably, so they are not analysed.</p><ul class="dropped-parts">
+    {%- for part in dropped_parts %}<li><strong>{{ part.name }}</strong> <span class="muted">{{ part.video }}, {{ part.start }} to {{ part.end }} ({{ part.duration }})</span></li>{% endfor -%}
+  </ul>{% endif %}
   {% if show_log_link %}<p><a href="/jobs/{{ job_id }}/log">View job log</a></p>{% endif %}
   {% if auto_refresh %}<p class="muted">This page refreshes automatically while the job runs.</p><script>setTimeout(() => window.location.reload(), 10000);</script>{% endif %}
   <p><a href="/">Back to sessions</a></p>

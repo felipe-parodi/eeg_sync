@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import zipfile
@@ -24,6 +25,10 @@ PORTAL_DEFAULT_IMAGE_HEIGHT = 480
 # (e.g. an experimenter in the room) are excluded from the analysis blocks
 # before inference, so a third tracked person is noise we do not want to keep.
 PORTAL_DEFAULT_MAX_PERSONS = 2
+# Shortest analysis part kept after extra-person windows are removed. Shorter
+# pieces (e.g. a 4 s gap between two windows) hold too few frames for stable
+# metrics, so they are dropped and listed on the job page instead.
+MIN_PART_S = 10.0
 # Domain-adapted pose model. ``yolo11l-pose-dense.pt`` is a yolo11l-pose
 # fine-tuned on 3-teacher consensus pseudo-labels (yolo11x-pose + ViTPose-Huge +
 # RTMPose, box-matched and majority-voted) sampled from the timing-windowed,
@@ -144,8 +149,18 @@ class PortalJobConfig:
         return self.output_root / self.session_id
 
 
+_TIME_FORMS_HINT = "Use seconds (90), M:SS (1:30) or H:MM:SS (1:01:30)."
+_SECONDS_RE = re.compile(r"^\d+(?:\.\d+)?$")
+_CLOCK_RE = re.compile(r"^(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$")
+
+
 def parse_timecode(value: str) -> float:
-    """Parse seconds, MM:SS, or HH:MM:SS into seconds.
+    """Parse seconds, M:SS, or H:MM:SS into seconds.
+
+    Minutes and hours must be whole numbers; only the seconds field may have
+    a decimal part. In H:MM:SS, minutes must be under 60; seconds must be
+    under 60 whenever a colon is used. M:SS accepts any number of minutes
+    (``75:30`` is 75 minutes 30 seconds).
 
     Args:
         value: User-entered time string.
@@ -154,24 +169,58 @@ def parse_timecode(value: str) -> float:
         Time in seconds.
 
     Raises:
-        ValueError: If the value cannot be parsed.
+        ValueError: With a plain-language message when the value is empty,
+            negative, not a number (``nan``, ``inf``, ``1e3``), malformed
+            (``1.5:30``), or has 60 or more seconds/minutes in a field.
     """
     text = value.strip()
     if not text:
-        raise ValueError("time value cannot be empty")
-
-    if ":" not in text:
+        raise ValueError("Time is empty.")
+    if text.startswith("-") and (
+        _SECONDS_RE.match(text[1:]) or _CLOCK_RE.match(text[1:])
+    ):
+        raise ValueError(
+            f'"{text}" is negative. Times count from the start of the video.'
+        )
+    if _SECONDS_RE.match(text):
         return float(text)
+    match = _CLOCK_RE.match(text)
+    if not match:
+        raise ValueError(f'"{text}" is not a time. {_TIME_FORMS_HINT}')
+    hours_raw, minutes_raw, seconds_raw = match.groups()
+    seconds = float(seconds_raw)
+    minutes = int(minutes_raw)
+    if seconds >= 60:
+        raise ValueError(
+            f'"{text}" has {seconds_raw.lstrip("0") or "0"} seconds. '
+            "Seconds must be under 60."
+        )
+    if hours_raw is None:
+        return minutes * 60 + seconds
+    if minutes >= 60:
+        raise ValueError(f'"{text}" has {minutes} minutes. Minutes must be under 60.')
+    return int(hours_raw) * 3600 + minutes * 60 + seconds
 
-    parts = text.split(":")
-    if len(parts) == 2:
-        minutes, seconds = parts
-        return int(minutes) * 60 + float(seconds)
-    if len(parts) == 3:
-        hours, minutes, seconds = parts
-        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
-    raise ValueError(f"cannot parse time value: {value!r}")
+def format_clock(seconds: float) -> str:
+    """Format seconds as M:SS, or H:MM:SS from one hour on.
+
+    Args:
+        seconds: Non-negative time in seconds.
+
+    Returns:
+        Clock text such as ``"13:26"``, ``"13:06:00"`` or ``"1:05.5"`` (one
+        decimal only when the time is not a whole second).
+    """
+    total = round(float(seconds), 1)
+    whole = int(total)
+    fraction = round(total - whole, 1)
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    sec_text = f"{secs:02d}" if fraction == 0 else f"{secs + fraction:04.1f}"
+    if hours:
+        return f"{hours}:{minutes:02d}:{sec_text}"
+    return f"{minutes}:{sec_text}"
 
 
 def format_seconds_for_cli(seconds: float) -> str:
@@ -249,6 +298,38 @@ def split_blocks_for_exclusions(
             )
 
     return result
+
+
+def split_blocks_with_min_part(
+    blocks: Sequence[SessionBlock],
+    exclusions: Sequence[ExclusionWindow],
+    min_part_s: float = MIN_PART_S,
+) -> tuple[list[SessionBlock], list[SessionBlock]]:
+    """Remove exclusion windows, then drop parts shorter than ``min_part_s``.
+
+    Parts are numbered before short ones are dropped, so the kept names do
+    not change when a neighbour is dropped (``grocery_part1`` and
+    ``grocery_part3`` when ``grocery_part2`` is a 4 s sliver). The browser
+    form mirrors this logic in ``portal/static/index.js`` for its preview.
+
+    Args:
+        blocks: Original analysis blocks.
+        exclusions: Windows where extra people are visible.
+        min_part_s: Shortest part to keep, in seconds.
+
+    Returns:
+        ``(kept, dropped)`` analysis blocks.
+    """
+    kept: list[SessionBlock] = []
+    dropped: list[SessionBlock] = []
+    # Any piece longer than zero is numbered, so the numbering never depends
+    # on the minimum length.
+    for part in split_blocks_for_exclusions(blocks, exclusions, min_duration_s=1e-9):
+        if part.end_s - part.start_s >= min_part_s:
+            kept.append(part)
+        else:
+            dropped.append(part)
+    return kept, dropped
 
 
 def build_blocks_arg(blocks: Sequence[SessionBlock]) -> str:
@@ -395,6 +476,48 @@ def probe_video_path(path: Path, ffprobe_bin: str = "ffprobe") -> None:
         raise RuntimeError(f"ffprobe returned invalid JSON for {path.name}") from error
     if not payload.get("streams"):
         raise ValueError(f"No video stream found in uploaded file: {path.name}")
+
+
+def probe_video_duration(path: Path, ffprobe_bin: str = "ffprobe") -> float:
+    """Return a video's length in seconds as reported by ffprobe.
+
+    Args:
+        path: Video path to probe.
+        ffprobe_bin: ffprobe executable name or path.
+
+    Returns:
+        Duration in seconds.
+
+    Raises:
+        RuntimeError: If ffprobe is unavailable, fails, or reports no
+            usable duration.
+    """
+    command = [
+        ffprobe_bin,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"'{ffprobe_bin}' not found. Install ffmpeg/ffprobe or set PORTAL_FFPROBE_BIN."
+        ) from error
+    except subprocess.CalledProcessError as error:
+        stderr = error.stderr.strip() if error.stderr else "no stderr"
+        raise RuntimeError(f"ffprobe could not read {path.name}: {stderr}") from error
+    try:
+        duration = float(json.loads(result.stdout or "{}")["format"]["duration"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"Could not read the length of {path.name}.") from error
+    if not duration > 0 or duration == float("inf"):
+        raise RuntimeError(f"Could not read the length of {path.name}.")
+    return duration
 
 
 def validate_video_path(

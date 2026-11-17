@@ -255,14 +255,18 @@ def build_all_sessions_table(output_root: Path) -> pd.DataFrame:
     """Stack every session's ``session_metrics.csv`` under ``output_root``.
 
     Args:
-        output_root: Directory holding one folder per session.
+        output_root: Directory holding one folder per session. Folders whose
+            name starts with ``_`` (such as ``_archive``) are skipped.
 
     Returns:
         Combined table (empty if no session has metrics yet).
     """
+    # Folders starting with "_" (the portal's ``_archive`` of replaced runs)
+    # are not sessions.
     tables = [
         pd.read_csv(path, dtype={"session_id": str, "camera_id": str, "block": str})
         for path in sorted(Path(output_root).glob(f"*/{SESSION_METRICS_CSV}"))
+        if not path.parent.name.startswith("_")
     ]
     if not tables:
         return pd.DataFrame(columns=LEAD_COLUMNS)

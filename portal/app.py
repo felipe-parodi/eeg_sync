@@ -38,6 +38,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from .jobs import (
+    MIN_PART_S,
     PORTAL_DEFAULT_FRAME_RATE,
     PORTAL_DEFAULT_MAX_PERSONS,
     PORTAL_DEFAULT_MODEL_PATH,
@@ -48,12 +49,14 @@ from .jobs import (
     PortalJobConfig,
     SessionBlock,
     final_upload_path_for,
+    format_clock,
     mark_chunk_received,
     parse_timecode,
+    probe_video_duration,
     read_status,
     resume_portal_job_phase2,
     run_portal_job,
-    split_blocks_for_exclusions,
+    split_blocks_with_min_part,
     validate_direct_chunked_upload,
     write_status,
 )
@@ -367,36 +370,115 @@ def _slug(value: str) -> str:
     return cleaned
 
 
-def _parse_blocks_text(text: str) -> list[SessionBlock]:
+VIDEO_LABELS = {"camera_a": "Video A", "camera_b": "Video B"}
+# Offered in the task-name box; any other name is allowed.
+TASK_NAME_SUGGESTIONS = ("grocery", "storybook", "synchrony")
+
+
+def _parse_time_field(raw: str, what: str, field_name: str) -> float:
+    """Parse one form time, naming the task or window in any error.
+
+    Args:
+        raw: Time text as typed.
+        what: Plain description of the row, e.g. ``'Video A task "grocery"'``.
+        field_name: ``"start"`` or ``"end"``.
+
+    Returns:
+        Time in seconds.
+
+    Raises:
+        ValueError: With the row, the field and the parsing problem.
+    """
+    try:
+        return parse_timecode(raw)
+    except ValueError as error:
+        raise ValueError(f"{what} has a bad {field_name} time. {error}") from error
+
+
+def _parse_blocks_text(text: str, video: str = "Video A") -> list[SessionBlock]:
+    """Parse one camera's task lines (``name,start,end[,color]``).
+
+    Args:
+        text: Task text as posted by the form, one task per line.
+        video: Plain camera name used in messages (``"Video A"``).
+
+    Returns:
+        Parsed tasks with slugged names.
+
+    Raises:
+        ValueError: With a plain message for a malformed line, a bad time,
+            an empty name, end not after start, a task under ``MIN_PART_S``,
+            or two tasks with the same (slugged) name.
+    """
     blocks: list[SessionBlock] = []
+    raw_names: dict[str, str] = {}
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
         if not line:
             continue
         parts = [part.strip() for part in line.split(",")]
         if len(parts) not in {3, 4}:
-            raise ValueError(
-                f"Block line {line_number} must be: name,start,end[,color]"
-            )
+            raise ValueError(f"{video} task line {line_number} must be: name,start,end")
         name, start_raw, end_raw = parts[:3]
-        start_s = parse_timecode(start_raw)
-        end_s = parse_timecode(end_raw)
+        try:
+            safe_name = _slug(name)
+        except ValueError as error:
+            raise ValueError(
+                f'{video} task {line_number} name "{name}" has no letters or numbers.'
+                if name
+                else f"{video} task {line_number} has no name."
+            ) from error
+        what = f'{video} task "{name}"'
+        start_s = _parse_time_field(start_raw, what, "start")
+        end_s = _parse_time_field(end_raw, what, "end")
         if end_s <= start_s:
-            raise ValueError(f"Block line {line_number} end must be after start")
+            raise ValueError(
+                f"{what} must end after it starts (start {start_raw}, end {end_raw})."
+            )
+        if end_s - start_s < MIN_PART_S:
+            raise ValueError(
+                f"{what} is only {end_s - start_s:g} s long. "
+                f"Tasks must be at least {MIN_PART_S:g} s."
+            )
+        if safe_name in raw_names:
+            other = raw_names[safe_name]
+            if other == name:
+                raise ValueError(
+                    f'{video} has two tasks named "{name}". '
+                    "Give each task a different name."
+                )
+            raise ValueError(
+                f'{video} task names "{other}" and "{name}" both become '
+                f'"{safe_name}" in file names. Give each task a different name.'
+            )
+        raw_names[safe_name] = name
         blocks.append(
             SessionBlock(
-                name=_slug(name),
+                name=safe_name,
                 start_s=start_s,
                 end_s=end_s,
                 color=parts[3] if len(parts) == 4 and parts[3] else "gray",
             )
         )
     if not blocks:
-        raise ValueError("At least one analysis block is required")
+        raise ValueError(f"{video} needs at least one task.")
     return blocks
 
 
-def _parse_exclusions_text(text: str) -> list[ExclusionWindow]:
+def _parse_exclusions_text(text: str, video: str = "Video A") -> list[ExclusionWindow]:
+    """Parse one camera's extra-person windows (``start,end[,reason]``).
+
+    Args:
+        text: Window text as posted by the form, one window per line.
+        video: Plain camera name used in messages (``"Video A"``).
+
+    Returns:
+        Parsed windows.
+
+    Raises:
+        ValueError: With a plain message for a malformed line, a bad time,
+            or end not after start.
+    """
     exclusions: list[ExclusionWindow] = []
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
@@ -405,15 +487,85 @@ def _parse_exclusions_text(text: str) -> list[ExclusionWindow]:
         parts = [part.strip() for part in line.split(",", maxsplit=2)]
         if len(parts) < 2:
             raise ValueError(
-                f"Exclusion line {line_number} must be: start,end[,reason]"
+                f"{video} extra-person window line {line_number} must be: "
+                "start,end,reason"
             )
-        start_s = parse_timecode(parts[0])
-        end_s = parse_timecode(parts[1])
+        what = f"{video} extra-person window {line_number}"
+        start_s = _parse_time_field(parts[0], what, "start")
+        end_s = _parse_time_field(parts[1], what, "end")
         if end_s <= start_s:
-            raise ValueError(f"Exclusion line {line_number} end must be after start")
+            raise ValueError(
+                f"{what} must end after it starts (start {parts[0]}, end {parts[1]})."
+            )
         reason = parts[2] if len(parts) == 3 else ""
         exclusions.append(ExclusionWindow(start_s=start_s, end_s=end_s, reason=reason))
     return exclusions
+
+
+def _part_number(name: str) -> int:
+    """Return N for ``<task>_partN`` names, else 0 (for sorting)."""
+    tail = name.rsplit("_part", 1)[-1]
+    return int(tail) if "_part" in name and tail.isdigit() else 0
+
+
+def plan_camera_blocks(
+    blocks: list[SessionBlock],
+    exclusions: list[ExclusionWindow],
+    video: str = "Video A",
+) -> tuple[list[SessionBlock], list[SessionBlock]]:
+    """Split one camera's tasks around its extra-person windows and check them.
+
+    Args:
+        blocks: The camera's parsed tasks.
+        exclusions: The camera's extra-person windows.
+        video: Plain camera name used in messages (``"Video A"``).
+
+    Returns:
+        ``(kept, dropped)``: analysis parts to process, and parts shorter
+        than ``MIN_PART_S`` that are skipped.
+
+    Raises:
+        ValueError: If a task lies entirely inside a window, if every piece
+            of a task is too short, or if a task's name equals a part name
+            generated for another task (``story_part1`` when ``story`` is
+            split).
+    """
+    kept: list[SessionBlock] = []
+    dropped: list[SessionBlock] = []
+    generated_by: dict[str, tuple[str, list[str]]] = {}
+    for block in blocks:
+        block_kept, block_dropped = split_blocks_with_min_part([block], exclusions)
+        if not block_kept and not block_dropped:
+            raise ValueError(
+                f'{video} task "{block.name}" ({format_clock(block.start_s)} to '
+                f"{format_clock(block.end_s)}) is entirely inside an extra-person "
+                "window, so none of it can be analysed. Remove the task or "
+                "correct the window."
+            )
+        if not block_kept:
+            raise ValueError(
+                "After removing extra-person windows, every piece of "
+                f'{video} task "{block.name}" is shorter than {MIN_PART_S:g} s. '
+                "Remove the task or correct the windows."
+            )
+        part_names = sorted(
+            (part.name for part in block_kept + block_dropped), key=_part_number
+        )
+        if part_names != [block.name]:
+            for part_name in part_names:
+                generated_by[part_name] = (block.name, part_names)
+        kept.extend(block_kept)
+        dropped.extend(block_dropped)
+    for block in blocks:
+        if block.name in generated_by:
+            owner, part_names = generated_by[block.name]
+            listed = ", ".join(part_names[:-1]) + f" and {part_names[-1]}"
+            raise ValueError(
+                f'{video} task name "{block.name}" clashes with a piece of task '
+                f'"{owner}", which an extra-person window splits into {listed}. '
+                f'Rename "{block.name}".'
+            )
+    return kept, dropped
 
 
 def build_submission_metadata(
@@ -429,6 +581,7 @@ def build_submission_metadata(
     include_gaze: bool,
     blocks_text_b: str | None = None,
     exclusions_text_b: str | None = None,
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     """Build the durable metadata record for one submitted portal run.
 
@@ -449,9 +602,12 @@ def build_submission_metadata(
         exclusions_text_b: Raw extra-person window text for camera B, in Video
             B's own time. Defaults to ``exclusions_text`` for backward
             compatibility.
+        replace_existing: Whether the user agreed to move an existing
+            ``OUTPUT_ROOT/<session_id>`` folder to the archive.
 
     Returns:
-        JSON-serializable submission metadata.
+        JSON-serializable submission metadata. ``dropped_parts_by_camera``
+        lists the parts skipped for being shorter than ``MIN_PART_S``.
 
     Raises:
         ValueError: If the supplied block or exclusion text is invalid.
@@ -471,30 +627,39 @@ def build_submission_metadata(
     # The two GoPros have different clocks, so each camera's extra-person
     # windows are entered (and removed) in that camera's own time.
     exclusions_by_camera = {
-        "camera_a": _parse_exclusions_text(exclusions_text_a),
-        "camera_b": _parse_exclusions_text(exclusions_text_b),
+        "camera_a": _parse_exclusions_text(exclusions_text_a, "Video A"),
+        "camera_b": _parse_exclusions_text(exclusions_text_b, "Video B"),
     }
 
     input_blocks_by_camera: dict[str, list[SessionBlock]] = {}
     analysis_blocks_by_camera: dict[str, list[SessionBlock]] = {}
-    if has_video_a:
-        camera_a_blocks = _parse_blocks_text(blocks_text_a)
-        camera_a_analysis_blocks = split_blocks_for_exclusions(
-            camera_a_blocks, exclusions_by_camera["camera_a"]
+    dropped_parts_by_camera: dict[str, list[dict[str, Any]]] = {}
+    for camera_id, has_video, camera_blocks_text in (
+        ("camera_a", has_video_a, blocks_text_a),
+        ("camera_b", has_video_b, blocks_text_b),
+    ):
+        if not has_video:
+            continue
+        video = VIDEO_LABELS[camera_id]
+        camera_blocks = _parse_blocks_text(camera_blocks_text, video)
+        kept, dropped = plan_camera_blocks(
+            camera_blocks, exclusions_by_camera[camera_id], video
         )
-        if not camera_a_analysis_blocks:
-            raise ValueError("Exclusions removed all Video A analysis time")
-        input_blocks_by_camera["camera_a"] = camera_a_blocks
-        analysis_blocks_by_camera["camera_a"] = camera_a_analysis_blocks
-    if has_video_b:
-        camera_b_blocks = _parse_blocks_text(blocks_text_b)
-        camera_b_analysis_blocks = split_blocks_for_exclusions(
-            camera_b_blocks, exclusions_by_camera["camera_b"]
-        )
-        if not camera_b_analysis_blocks:
-            raise ValueError("Exclusions removed all Video B analysis time")
-        input_blocks_by_camera["camera_b"] = camera_b_blocks
-        analysis_blocks_by_camera["camera_b"] = camera_b_analysis_blocks
+        input_blocks_by_camera[camera_id] = camera_blocks
+        analysis_blocks_by_camera[camera_id] = kept
+        dropped_parts_by_camera[camera_id] = [
+            {
+                "name": part.name,
+                "start_s": part.start_s,
+                "end_s": part.end_s,
+                "duration_s": round(part.end_s - part.start_s, 3),
+                "reason": (
+                    f"shorter than {MIN_PART_S:g} s after removing "
+                    "extra-person windows"
+                ),
+            }
+            for part in dropped
+        ]
 
     legacy_blocks = next(iter(analysis_blocks_by_camera.values()))
     videos: dict[str, dict[str, Any]] = {}
@@ -552,6 +717,9 @@ def build_submission_metadata(
             for camera_id, blocks in analysis_blocks_by_camera.items()
         },
         "blocks": [asdict(block) for block in legacy_blocks],
+        "min_part_s": MIN_PART_S,
+        "dropped_parts_by_camera": dropped_parts_by_camera,
+        "replace_existing": replace_existing,
         "videos": videos,
         "video_a_name": video_a_name,
         "video_b_name": video_b_name,
@@ -903,6 +1071,9 @@ def session_rows() -> list[dict[str, Any]]:
         return []
     found: list[tuple[float, dict[str, Any]]] = []
     for session_dir in OUTPUT_ROOT.iterdir():
+        if session_dir.name.startswith("_"):
+            # ``_archive`` (replaced runs) and other portal-internal folders.
+            continue
         metrics_path = session_dir / SESSION_METRICS_CSV
         if not session_dir.is_dir() or not metrics_path.is_file():
             continue
@@ -951,6 +1122,224 @@ def _session_dir(session_id: str) -> Path:
     if not (session_dir / SESSION_METRICS_CSV).is_file():
         raise HTTPException(status_code=404, detail="Session not found")
     return session_dir
+
+
+ARCHIVE_DIR_NAME = "_archive"
+# A task may end this much after the measured video end (container rounding,
+# browser vs ffprobe disagreement) before it counts as past the end.
+VIDEO_END_TOLERANCE_S = 1.0
+
+
+class SessionIdInUseError(ValueError):
+    """The session ID already has results or a running job (HTTP 409)."""
+
+
+def _reserved_session_ids() -> set[str]:
+    """Return folder names under ``OUTPUT_ROOT`` that are not sessions.
+
+    Returns:
+        Lower-cased names (compared case-insensitively, as on Windows).
+    """
+    return {JOB_ROOT.name.lower(), ARCHIVE_DIR_NAME}
+
+
+def _active_job_for_session(safe_id: str, ignore_job_id: str = "") -> str | None:
+    """Return a job that is still uploading or processing this session.
+
+    Args:
+        safe_id: Slugged session ID.
+        ignore_job_id: Job to leave out (the caller's own job).
+
+    Returns:
+        The job ID, or None.
+    """
+    if not JOB_ROOT.is_dir():
+        return None
+    for meta_path in JOB_ROOT.glob("*/upload_meta.json"):
+        job_dir = meta_path.parent
+        if job_dir.name == ignore_job_id:
+            continue
+        if read_status(job_dir).get("state") not in ACTIVE_JOB_STATES:
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if str(meta.get("session_id", "")).lower() == safe_id.lower():
+            return job_dir.name
+    return None
+
+
+def session_id_status(session_id: str) -> dict[str, Any]:
+    """Describe whether a session ID can be used for a new run.
+
+    Args:
+        session_id: Session ID as typed.
+
+    Returns:
+        ``session_id`` (slugged, as used for folders), ``valid`` (false for
+        empty or reserved IDs), ``exists`` (``OUTPUT_ROOT/<id>`` exists),
+        ``active_job`` (another job is uploading or processing it) and a
+        plain ``message`` for invalid IDs.
+    """
+    try:
+        safe_id = _slug(session_id)
+    except ValueError:
+        return {
+            "session_id": "",
+            "valid": False,
+            "exists": False,
+            "active_job": False,
+            "message": "The session ID needs at least one letter or number.",
+        }
+    if safe_id.lower() in _reserved_session_ids():
+        return {
+            "session_id": safe_id,
+            "valid": False,
+            "exists": False,
+            "active_job": False,
+            "message": (
+                f'"{safe_id}" is used by the portal itself. '
+                "Choose another session ID."
+            ),
+        }
+    return {
+        "session_id": safe_id,
+        "valid": True,
+        "exists": (OUTPUT_ROOT / safe_id).exists(),
+        "active_job": _active_job_for_session(safe_id) is not None,
+        "message": "",
+    }
+
+
+def check_session_id_free(
+    safe_id: str, replace_existing: bool, ignore_job_id: str = ""
+) -> bool:
+    """Refuse a session ID that would mix a new run with earlier results.
+
+    Args:
+        safe_id: Slugged session ID.
+        replace_existing: Whether the user ticked "Replace the earlier
+            results".
+        ignore_job_id: The caller's own job, left out of the running-job
+            check.
+
+    Returns:
+        True when ``OUTPUT_ROOT/<safe_id>`` exists (and replacing was
+        allowed), so the caller should archive it.
+
+    Raises:
+        ValueError: For a reserved ID.
+        SessionIdInUseError: When results exist and replacing was not allowed, or
+            another job is still working on the same session.
+    """
+    if safe_id.lower() in _reserved_session_ids():
+        raise ValueError(
+            f'"{safe_id}" is used by the portal itself. Choose another session ID.'
+        )
+    if _active_job_for_session(safe_id, ignore_job_id) is not None:
+        raise SessionIdInUseError(
+            f'Session "{safe_id}" is already being processed. Wait for that job '
+            "to finish, or choose a new session ID."
+        )
+    exists = (OUTPUT_ROOT / safe_id).exists()
+    if exists and not replace_existing:
+        raise SessionIdInUseError(
+            f'Session "{safe_id}" already has results. Choose a new session ID, '
+            'or tick "Replace the earlier results" to move the old results to '
+            "the archive folder."
+        )
+    return exists
+
+
+def archive_session_dir(safe_id: str, stamp: str | None = None) -> Path | None:
+    """Move a session's earlier results to ``OUTPUT_ROOT/_archive``.
+
+    Nothing is deleted and nothing is overwritten: the folder becomes
+    ``_archive/<id>_<YYYYmmdd_HHMMSS>`` (with ``_2``, ``_3``... if that name
+    is taken). The home page and the study-wide table ignore ``_archive``.
+
+    Args:
+        safe_id: Slugged session ID.
+        stamp: Timestamp text; defaults to now.
+
+    Returns:
+        The archived folder, or None when there was nothing to move.
+    """
+    source = OUTPUT_ROOT / safe_id
+    if not source.exists():
+        return None
+    stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_root = OUTPUT_ROOT / ARCHIVE_DIR_NAME
+    archive_root.mkdir(parents=True, exist_ok=True)
+    target = archive_root / f"{safe_id}_{stamp}"
+    suffix = 2
+    while target.exists():
+        target = archive_root / f"{safe_id}_{stamp}_{suffix}"
+        suffix += 1
+    shutil.move(str(source), str(target))
+    return target
+
+
+def _plural(count: int, unit: str) -> str:
+    """Return ``"1 minute"`` / ``"6 minutes"``."""
+    return f"{count} {unit}{'' if count == 1 else 's'}"
+
+
+def check_uploaded_video_lengths(upload_dir: Path, meta: dict) -> dict[str, float]:
+    """Check every uploaded video and that no task ends after its video does.
+
+    Runs ffprobe on each assembled upload (``PORTAL_FFPROBE_BIN``). This is
+    the server's re-check of the browser's length check, and also catches
+    hours typed where minutes were meant (``13:06:00`` for ``13:06``).
+
+    Args:
+        upload_dir: The job's upload folder.
+        meta: The job's ``upload_meta.json`` contents.
+
+    Returns:
+        Video length in seconds per camera ID.
+
+    Raises:
+        ValueError: Naming the task and the video length when a task ends
+            after the video does.
+        FileNotFoundError, RuntimeError: When an upload is incomplete or
+            ffprobe cannot read it.
+    """
+    ffprobe_bin = os.environ.get("PORTAL_FFPROBE_BIN", "ffprobe")
+    tasks_by_camera = meta.get("input_analysis_blocks_by_camera", {})
+    durations: dict[str, float] = {}
+    for camera_id, video_meta in meta["videos"].items():
+        path = validate_direct_chunked_upload(
+            upload_dir=upload_dir,
+            camera_id=camera_id,
+            original_filename=video_meta["original_filename"],
+            total_chunks=int(video_meta["chunk_count"]),
+            expected_size_bytes=int(video_meta["size_bytes"]),
+            probe=True,
+            ffprobe_bin=ffprobe_bin,
+        )
+        duration_s = probe_video_duration(path, ffprobe_bin)
+        durations[camera_id] = duration_s
+        video = VIDEO_LABELS.get(camera_id, camera_id)
+        for task in tasks_by_camera.get(camera_id, []):
+            end_s = float(task["end_s"])
+            if end_s <= duration_s + VIDEO_END_TOLERANCE_S:
+                continue
+            message = (
+                f'{video} task "{task["name"]}" ends at {format_clock(end_s)}, '
+                f"but {video} is only {format_clock(duration_s)} long. "
+                "Check the task times."
+            )
+            hours, rest = divmod(int(end_s), 3600)
+            minutes, seconds = divmod(rest, 60)
+            if hours and seconds == 0 and end_s == int(end_s):
+                message += (
+                    f" For {_plural(hours, 'minute')} {_plural(minutes, 'second')}, "
+                    f"type {hours}:{minutes:02d}."
+                )
+            raise ValueError(message)
+    return durations
 
 
 def resolve_session_file(session_dir: Path, relative_path: str) -> Path:
@@ -1077,6 +1466,9 @@ def new_session(session_token: Annotated[str, Depends(require_auth)]) -> HTMLRes
         session_token=session_token,
         chunk_size=CHUNK_SIZE_BYTES,
         csrf_token=csrf_token_for_session(session_token),
+        min_part_s=MIN_PART_S,
+        video_end_tolerance_s=VIDEO_END_TOLERANCE_S,
+        task_suggestions=TASK_NAME_SUGGESTIONS,
     )
 
 
@@ -1097,6 +1489,19 @@ def session_report(
     return RedirectResponse(
         f"/sessions/{session_dir.name}/files/{SESSION_REPORT_HTML}", status_code=303
     )
+
+
+@app.get("/sessions/{session_id}/exists")
+def session_exists(
+    session_id: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> JSONResponse:
+    """Tell the new-session form whether this ID already has results.
+
+    The form shows a warning and asks for "Replace the earlier results";
+    ``/uploads/init`` enforces the same rule.
+    """
+    return JSONResponse(session_id_status(session_id))
 
 
 @app.get("/sessions/{session_id}/files/{file_path:path}")
@@ -1128,10 +1533,24 @@ async def init_chunked_upload(
     exclusions_text_a: Annotated[str | None, Form()] = None,
     exclusions_text_b: Annotated[str | None, Form()] = None,
     include_gaze: Annotated[str | None, Form()] = None,
+    replace_existing: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
-    """Create upload metadata for a chunked browser upload."""
+    """Create upload metadata for a chunked browser upload.
+
+    Refuses (409) a session ID that already has results unless
+    ``replace_existing`` is ``"yes"``, and any ID another job is still
+    working on. The earlier results are archived only when the upload
+    finishes.
+    """
     try:
-        safe_session_id = _slug(session_id)
+        try:
+            safe_session_id = _slug(session_id)
+        except ValueError as error:
+            raise ValueError(
+                "The session ID needs at least one letter or number."
+            ) from error
+        replace = replace_existing == "yes"
+        check_session_id_free(safe_session_id, replace)
         active_video_names = [
             name
             for name, size in (
@@ -1155,8 +1574,6 @@ async def init_chunked_upload(
         job_id = f"{stamp}_{safe_session_id}_{uuid.uuid4().hex[:8]}"
         upload_dir = UPLOAD_ROOT / job_id
         job_dir = JOB_ROOT / job_id
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        job_dir.mkdir(parents=True, exist_ok=True)
 
         metadata = build_submission_metadata(
             job_id=job_id,
@@ -1175,7 +1592,10 @@ async def init_chunked_upload(
             video_a_size=video_a_size,
             video_b_size=video_b_size,
             include_gaze=include_gaze == "yes",
+            replace_existing=replace,
         )
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        job_dir.mkdir(parents=True, exist_ok=True)
         _write_submission_metadata(job_dir, metadata)
         write_status(
             job_dir,
@@ -1192,6 +1612,8 @@ async def init_chunked_upload(
                 "status_url": f"/jobs/{job_id}",
             }
         )
+    except SessionIdInUseError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -1280,12 +1702,37 @@ async def finish_chunked_upload(
     background_tasks: BackgroundTasks,
     _: Annotated[str, Depends(require_csrf)],
 ) -> JSONResponse:
-    """Assemble chunks and start processing."""
+    """Check the uploaded videos and start processing.
+
+    Before queueing: ffprobe re-checks every task against its video's real
+    length, the session ID is re-checked, and when the user chose to replace
+    earlier results they are moved to ``OUTPUT_ROOT/_archive``. A failed
+    check marks the job failed with the same plain message.
+    """
     try:
         safe_job_id = _slug(job_id)
         upload_dir = UPLOAD_ROOT / safe_job_id
         job_dir = JOB_ROOT / safe_job_id
-        _read_upload_meta(job_dir)
+        meta = _read_upload_meta(job_dir)
+        try:
+            durations = check_uploaded_video_lengths(upload_dir, meta)
+            must_archive = check_session_id_free(
+                str(meta["session_id"]),
+                bool(meta.get("replace_existing", False)),
+                ignore_job_id=safe_job_id,
+            )
+        except Exception as error:
+            write_status(
+                job_dir,
+                {"state": "failed", "message": str(error), "current_step": None},
+            )
+            raise
+        for camera_id, duration_s in durations.items():
+            meta["videos"][camera_id]["duration_s"] = duration_s
+        if must_archive:
+            archived = archive_session_dir(str(meta["session_id"]))
+            meta["archived_previous_results"] = str(archived) if archived else None
+        _write_submission_metadata(job_dir, meta)
         write_status(
             job_dir,
             {
@@ -1300,6 +1747,8 @@ async def finish_chunked_upload(
         return JSONResponse(
             {"job_id": safe_job_id, "status_url": f"/jobs/{safe_job_id}"}
         )
+    except SessionIdInUseError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -1314,6 +1763,7 @@ def job_detail(
     job_dir = JOB_ROOT / safe_job_id
     status = read_status(job_dir)
     result_zip = status.get("result_zip")
+    is_complete = status.get("state") == "complete"
     return _render_page(
         "job_detail.html",
         f"Job {safe_job_id}",
@@ -1325,10 +1775,43 @@ def job_detail(
         message=str(status.get("message", "")),
         show_annotate=status.get("state") == "awaiting_annotation",
         show_download=bool(result_zip and Path(result_zip).exists()),
-        coverage_rows=_coverage_rows(job_dir),
+        # A new or failed run must not show an earlier run's table.
+        coverage_rows=_coverage_rows(job_dir) if is_complete else None,
+        dropped_parts=_dropped_part_rows(job_dir),
+        min_part_s=f"{MIN_PART_S:g}",
         show_log_link=(job_dir / "job.log").exists(),
         auto_refresh=status.get("state") in {"uploading", "queued", "running"},
     )
+
+
+def _dropped_part_rows(job_dir: Path) -> list[dict[str, str]]:
+    """List the analysis parts skipped for being shorter than ``MIN_PART_S``.
+
+    Args:
+        job_dir: Portal job directory.
+
+    Returns:
+        Dicts with ``video``, ``name``, ``start``, ``end`` and ``duration``
+        (display text); empty when nothing was skipped or the job has no
+        metadata.
+    """
+    try:
+        meta = _read_upload_meta(job_dir)
+    except (FileNotFoundError, ValueError):
+        return []
+    rows: list[dict[str, str]] = []
+    for camera_id, parts in (meta.get("dropped_parts_by_camera") or {}).items():
+        for part in parts:
+            rows.append(
+                {
+                    "video": VIDEO_LABELS.get(camera_id, camera_id),
+                    "name": str(part.get("name", "")),
+                    "start": format_clock(float(part["start_s"])),
+                    "end": format_clock(float(part["end_s"])),
+                    "duration": f"{float(part['duration_s']):g} s",
+                }
+            )
+    return rows
 
 
 def _coverage_rows(job_dir: Path) -> list[dict[str, Any]] | None:
