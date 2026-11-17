@@ -8,7 +8,7 @@ import pytest
 
 import portal.app as portal_app
 from portal.app import build_submission_metadata
-from portal.app import index as render_index
+from portal.app import new_session as render_upload_page
 from portal.jobs import (
     PORTAL_DEFAULT_FRAME_RATE,
     PORTAL_DEFAULT_MAX_PERSONS,
@@ -34,7 +34,7 @@ def test_upload_page_exposes_drag_and_drop_targets(monkeypatch) -> None:
     monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
     monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
     portal_app.SESSION_TOKENS.clear()
-    response = render_index(portal_app.create_session_token())
+    response = render_upload_page(portal_app.create_session_token())
     text = response.body.decode("utf-8")
 
     assert response.status_code == 200
@@ -55,9 +55,6 @@ def test_upload_page_exposes_drag_and_drop_targets(monkeypatch) -> None:
     assert "Video A Analysis Blocks" in text
     assert "Video B Analysis Blocks" in text
     assert 'class="info-icon"' in text
-    assert "Proximity" in text
-    assert "Movement synchrony" in text
-    assert "Gaze estimation" in text
 
 
 def test_portal_password_and_secret_must_be_configured(monkeypatch) -> None:
@@ -162,7 +159,7 @@ def test_index_embeds_session_csrf_token(monkeypatch) -> None:
     session_token = portal_app.create_session_token()
     csrf_token = portal_app.csrf_token_for_session(session_token)
 
-    response = render_index(session_token)
+    response = render_upload_page(session_token)
     text = response.body.decode("utf-8")
 
     assert f'const CSRF_TOKEN = "{csrf_token}";' in text
@@ -1323,7 +1320,9 @@ def test_gaze_label_page_lists_frames(tmp_path: Path, monkeypatch) -> None:
     assert "/gaze-frames/" in text
 
 
-def test_gaze_label_submission_is_saved_with_outputs(tmp_path: Path, monkeypatch) -> None:
+def test_gaze_label_submission_is_saved_with_outputs(
+    tmp_path: Path, monkeypatch
+) -> None:
     from portal.gaze_labels import load_gaze_labels
 
     _gaze_label_job(tmp_path, monkeypatch)

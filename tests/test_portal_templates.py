@@ -188,7 +188,7 @@ def test_pages_redirect_to_login_without_cookie(portal_env: Path) -> None:
     assert response.headers["location"] == "/login"
 
 
-def test_index_renders_form_and_escapes_job_rows(
+def test_index_renders_sessions_home_and_escapes_job_rows(
     client: TestClient, portal_env: Path
 ) -> None:
     write_status(
@@ -200,7 +200,21 @@ def test_index_renders_form_and_escapes_job_rows(
 
     assert response.status_code == 200
     text = response.text
-    assert "<title>Submit Job</title>" in text
+    assert "<title>Sessions</title>" in text
+    assert 'id="logout-button"' in text
+    assert 'href="/new"' in text
+    assert f'href="/jobs/{JOB_ID}"' in text
+    assert "Download all sessions table" in text
+    assert EVIL not in text
+    assert EVIL_ESCAPED in text
+
+
+def test_new_session_page_renders_upload_form(client: TestClient) -> None:
+    response = client.get("/new")
+
+    assert response.status_code == 200
+    text = response.text
+    assert "<title>New session</title>" in text
     for element_id in (
         'id="upload-form"',
         'id="logout-button"',
@@ -214,10 +228,6 @@ def test_index_renders_form_and_escapes_job_rows(
     ):
         assert element_id in text
     assert f'const CSRF_TOKEN = "{_csrf(client)}";' in text
-    assert f'href="/jobs/{JOB_ID}"' in text
-    assert "Download all sessions table" in text
-    assert EVIL not in text
-    assert EVIL_ESCAPED in text
 
 
 def test_index_shows_empty_job_table(client: TestClient) -> None:
@@ -357,7 +367,7 @@ def test_every_page_static_reference_resolves(
     client: TestClient, portal_env: Path
 ) -> None:
     _finished_job(portal_env)
-    pages = ["/login", "/", f"/jobs/{JOB_ID}", f"/jobs/{JOB_ID}/log"]
+    pages = ["/login", "/", "/new", f"/jobs/{JOB_ID}", f"/jobs/{JOB_ID}/log"]
     for page in pages:
         response = client.get(page)
         assert response.status_code == 200, page

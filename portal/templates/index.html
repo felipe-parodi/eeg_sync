@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chip %}
+{% block body %}<div class="page-head">
+  <h1>Sessions</h1>
+  <a class="button" href="/new">New session</a>
+</div>
+
+<section class="section" aria-labelledby="jobs-heading">
+  <div class="section__head">
+    <h2 id="jobs-heading">Jobs</h2>
+    <span class="muted">Jobs started since the portal was last restarted</span>
+  </div>
+  <div class="card card--flush">
+    {% if jobs %}<ul class="job-list">
+      {% for job in jobs %}<li class="job-item{% if job.chip_kind in ('running', 'waiting') %} job-item--active{% endif %}">
+        <span class="job-item__id">{{ job.job_id }}</span>
+        <span>{{ chip(job.chip_kind, job.chip_label) }}</span>
+        <span class="job-item__message">{{ job.message }}</span>
+        <a class="job-item__link" href="/jobs/{{ job.job_id }}">{% if job.chip_kind == 'waiting' %}Continue{% else %}Open{% endif %}<span class="visually-hidden"> job {{ job.job_id }}</span></a>
+      </li>{% endfor %}
+    </ul>{% else %}<p class="empty">No jobs yet.</p>{% endif %}
+  </div>
+</section>
+
+<section class="section" aria-labelledby="sessions-heading">
+  <div class="section__head">
+    <h2 id="sessions-heading">Processed sessions</h2>
+    <span class="muted">{{ sessions|length }} session{{ '' if sessions|length == 1 else 's' }}</span>
+  </div>
+  <div class="card card--flush">
+    {% if sessions %}<div class="table-wrap"><table class="sessions-table">
+      <thead><tr><th scope="col">Session</th><th scope="col">Cameras</th><th scope="col">Processed</th><th scope="col">Overall</th><th scope="col"><span class="visually-hidden">Open</span></th></tr></thead>
+      <tbody>{% for s in sessions %}
+        <tr>
+          <td class="cell-session"><span class="session-id">{{ s.session_id }}</span></td>
+          <td class="cell-cameras"><span class="cameras">{% for cam in s.cameras %}<span class="camera-tag" title="Camera {{ cam }}">{{ cam }}</span>{% else %}<span class="muted">none</span>{% endfor %}</span></td>
+          <td class="cell-date">{{ s.processed }}</td>
+          <td class="cell-verdict">{{ chip(s.verdict_kind, s.verdict_label) }}</td>
+          <td class="cell-open">{% if s.link %}<a href="{{ s.link }}">View report<span class="visually-hidden"> for {{ s.session_id }}</span></a>{% else %}<span class="muted" title="This folder name has characters the portal cannot open. Open report.html from the results folder instead.">Open from folder</span>{% endif %}</td>
+        </tr>{% endfor %}
+      </tbody>
+    </table></div>{% else %}<p class="empty">No processed sessions yet.</p>{% endif %}
+    <div class="table-footer">
+      <a href="/metrics/all_sessions.csv">Download all sessions table</a>
+      <span class="muted">One row per session, camera, and block, for every processed session (CSV).</span>
+    </div>
+  </div>
+</section>
+
+<details class="explainer">
+  <summary>What the results contain</summary>
+  <div class="output-grid">
+    <div class="output-card">
+      <h3>Proximity</h3>
+      <p class="muted">Parent-child torso distance inside each analysis block.</p>
+      <ul>
+        <li>Figure: proximity over time and block comparison</li>
+        <li>Table: per-frame torso distance and per-block summary</li>
+      </ul>
+    </div>
+    <div class="output-card">
+      <h3>Movement synchrony</h3>
+      <p class="muted">How closely parent and child movements follow each other over time.</p>
+      <ul>
+        <li>Figure: synchrony strength and who leads</li>
+        <li>Table: peak correlation and lag per window</li>
+      </ul>
+    </div>
+    <div class="output-card">
+      <h3>Gaze</h3>
+      <p class="muted">Optional. Where each person is looking, by category.</p>
+      <ul>
+        <li>Figure: gaze categories and snapshots when enabled</li>
+        <li>Table: share of time in each gaze category</li>
+      </ul>
+    </div>
+  </div>
+</details>{% endblock %}

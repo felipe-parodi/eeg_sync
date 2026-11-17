@@ -170,6 +170,10 @@ TEMPLATES.filters["script_json"] = script_json
 # static mount serves so browsers always run/apply them.
 mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
+# Same for the session files route (report figures, overlay clips, tables).
+mimetypes.add_type("video/mp4", ".mp4")
+mimetypes.add_type("image/svg+xml", ".svg")
+mimetypes.add_type("text/csv", ".csv")
 
 
 class PortalStaticFiles(StaticFiles):
@@ -324,20 +328,34 @@ def require_csrf(request: Request) -> str:
     return session_token
 
 
-def _render_page(template_name: str, title: str, **context: Any) -> HTMLResponse:
+def _render_page(
+    template_name: str,
+    title: str,
+    session_token: str | None = None,
+    **context: Any,
+) -> HTMLResponse:
     """Render one portal page from ``portal/templates``.
 
     Args:
         template_name: Template file name, e.g. ``"index.html"``.
         title: Text for the page ``<title>`` (autoescaped).
+        session_token: Logged-in session token. When given, the header shows
+            the navigation and a Log out button carrying this session's CSRF
+            token.
         **context: Extra template variables for the page.
 
     Returns:
         The rendered page as an HTML response.
     """
     template = TEMPLATES.get_template(template_name)
+    header_csrf = csrf_token_for_session(session_token) if session_token else None
     return HTMLResponse(
-        template.render(title=title, portal_name=PORTAL_DISPLAY_NAME, **context)
+        template.render(
+            title=title,
+            portal_name=PORTAL_DISPLAY_NAME,
+            header_csrf=header_csrf,
+            **context,
+        )
     )
 
 
@@ -746,24 +764,227 @@ def resume_portal_job_phase2_background(safe_job_id: str, job_dir: Path) -> None
         )
 
 
-def _job_rows() -> list[dict[str, str]]:
-    """Return one display row per job folder, newest first.
+# Job state -> (chip kind, plain-language label). Chip kinds map to the
+# ``chip--<kind>`` classes in portal.css (running / waiting / done / failed).
+JOB_STATE_CHIPS: dict[str, tuple[str, str]] = {
+    "uploading": ("running", "Uploading"),
+    "queued": ("running", "Waiting its turn"),
+    "running": ("running", "Running"),
+    "awaiting_annotation": ("waiting", "Waiting for you"),
+    "complete": ("done", "Done"),
+    "failed": ("failed", "Failed"),
+}
+ACTIVE_JOB_STATES = frozenset({"uploading", "queued", "running", "awaiting_annotation"})
+
+
+def job_state_chip(state: str) -> tuple[str, str]:
+    """Return the status chip (kind, label) for a raw job state.
+
+    Args:
+        state: Raw ``state`` value from a job's ``status.json``.
 
     Returns:
-        Dicts with ``job_id``, ``state`` and ``message`` (raw strings; the
-        template escapes them).
+        ``(kind, label)``; an unrecognized state keeps its raw text as the
+        label (escaped by the template) under the ``"unknown"`` kind.
+    """
+    return JOB_STATE_CHIPS.get(state, ("unknown", state or "Unknown"))
+
+
+def _job_rows() -> list[dict[str, str]]:
+    """Return one display row per job folder, active jobs first.
+
+    Jobs that are running or waiting for the user come first; within each
+    group, folders keep their newest-name-first order.
+
+    Returns:
+        Dicts with ``job_id``, ``state``, ``message``, ``chip_kind`` and
+        ``chip_label`` (raw strings; the template escapes them).
     """
     rows = []
     for status_path in sorted(JOB_ROOT.glob("*/status.json"), reverse=True):
         status = read_status(status_path.parent)
+        state = str(status.get("state", "unknown"))
+        kind, label = job_state_chip(state)
         rows.append(
             {
                 "job_id": status_path.parent.name,
-                "state": str(status.get("state", "unknown")),
+                "state": state,
                 "message": str(status.get("message", "")),
+                "chip_kind": kind,
+                "chip_label": label,
             }
         )
+    # Stable sort keeps the newest-first order inside each group.
+    rows.sort(key=lambda row: row["state"] not in ACTIVE_JOB_STATES)
     return rows
+
+
+SESSION_METRICS_CSV = "session_metrics.csv"
+SESSION_REPORT_HTML = "report.html"
+LOW_COVERAGE_THRESHOLD = 0.5
+# File types the session route may serve: report, figures, clips, tables.
+SESSION_FILE_SUFFIXES = frozenset(
+    {".png", ".svg", ".jpg", ".mp4", ".csv", ".json", ".html"}
+)
+
+
+def overall_session_verdict(table: Any) -> tuple[str, str]:
+    """Summarize a session's blocks as one verdict chip.
+
+    When the ``quality_verdict`` column from
+    ``docs/metrics-validity_261116.md`` is present it decides: any
+    ``insufficient`` block gives "Not enough data", any ``check`` block gives
+    "Check", otherwise "Looks OK". Until that column exists, the fallback uses
+    ``coverage_both`` (share of the block with both people tracked): every
+    block at or above 0.5 gives "Looks OK", otherwise "Check N blocks"
+    (missing coverage counts as low).
+
+    Args:
+        table: The session's ``session_metrics.csv`` as a pandas DataFrame.
+
+    Returns:
+        ``(kind, label)`` where kind is ``"ok"``, ``"check"`` or
+        ``"insufficient"`` (the ``chip--<kind>`` class in portal.css).
+    """
+    import pandas as pd
+
+    if len(table) == 0:
+        return ("insufficient", "Not enough data")
+    if "quality_verdict" in table.columns:
+        verdicts = {
+            str(value).strip().lower() for value in table["quality_verdict"].dropna()
+        }
+        if "insufficient" in verdicts:
+            return ("insufficient", "Not enough data")
+        if "check" in verdicts:
+            return ("check", "Check")
+        return ("ok", "Looks OK")
+    if "coverage_both" not in table.columns:
+        return ("insufficient", "Not enough data")
+    coverage = pd.to_numeric(table["coverage_both"], errors="coerce")
+    n_low = int((coverage.isna() | (coverage < LOW_COVERAGE_THRESHOLD)).sum())
+    if n_low == 0:
+        return ("ok", "Looks OK")
+    return ("check", f"Check {n_low} block{'' if n_low == 1 else 's'}")
+
+
+def _session_dir_is_addressable(name: str) -> bool:
+    """Return whether a folder name survives ``_slug`` unchanged.
+
+    Only such folders can be opened through ``/sessions/{session_id}``.
+
+    Args:
+        name: Folder name under ``OUTPUT_ROOT``.
+
+    Returns:
+        True when the session route can address the folder.
+    """
+    try:
+        return _slug(name) == name
+    except ValueError:
+        return False
+
+
+def session_rows() -> list[dict[str, Any]]:
+    """List every processed session under ``OUTPUT_ROOT``, newest first.
+
+    A processed session is a folder holding ``session_metrics.csv``; other
+    folders (job scratch, unfinished runs) and loose files are skipped. The
+    list is rebuilt from disk on every call, so it survives restarts.
+
+    Returns:
+        Dicts with ``session_id``, ``cameras`` (letters, e.g. ``["A", "B"]``),
+        ``processed`` (date text), ``verdict_kind``, ``verdict_label`` and
+        ``link`` (None when the folder name cannot be routed).
+    """
+    import pandas as pd
+
+    if not OUTPUT_ROOT.is_dir():
+        return []
+    found: list[tuple[float, dict[str, Any]]] = []
+    for session_dir in OUTPUT_ROOT.iterdir():
+        metrics_path = session_dir / SESSION_METRICS_CSV
+        if not session_dir.is_dir() or not metrics_path.is_file():
+            continue
+        mtime = metrics_path.stat().st_mtime
+        try:
+            kind, label = overall_session_verdict(pd.read_csv(metrics_path))
+        except (OSError, ValueError):
+            kind, label = ("unknown", "Could not read results")
+        cameras = sorted(
+            child.name.removeprefix("camera_").upper()
+            for child in session_dir.glob("camera_*")
+            if child.is_dir()
+        )
+        name = session_dir.name
+        row = {
+            "session_id": name,
+            "cameras": cameras,
+            "processed": datetime.fromtimestamp(mtime).strftime("%d %b %Y, %H:%M"),
+            "verdict_kind": kind,
+            "verdict_label": label,
+            "link": f"/sessions/{name}" if _session_dir_is_addressable(name) else None,
+        }
+        found.append((mtime, row))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [row for _, row in found]
+
+
+def _session_dir(session_id: str) -> Path:
+    """Return a processed session folder or raise 404.
+
+    Args:
+        session_id: Session id from the URL (sanitized with ``_slug``).
+
+    Returns:
+        The session folder under ``OUTPUT_ROOT``.
+
+    Raises:
+        HTTPException: 404 when the id is invalid or the folder holds no
+            ``session_metrics.csv``.
+    """
+    try:
+        safe_id = _slug(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    session_dir = OUTPUT_ROOT / safe_id
+    if not (session_dir / SESSION_METRICS_CSV).is_file():
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session_dir
+
+
+def resolve_session_file(session_dir: Path, relative_path: str) -> Path:
+    """Resolve a report-linked file strictly inside one session folder.
+
+    Args:
+        session_dir: The session folder.
+        relative_path: Path from the URL, relative to the session folder.
+
+    Returns:
+        The resolved file path.
+
+    Raises:
+        HTTPException: 404 for ``..`` parts, absolute or drive paths,
+            disallowed file types, missing files, and anything (including a
+            symlink target) that resolves outside the session folder.
+    """
+    not_found = HTTPException(status_code=404, detail="File not found")
+    normalized = relative_path.replace("\\", "/")
+    parts = normalized.split("/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or ":" in normalized
+        or any(part in ("", ".", "..") for part in parts)
+    ):
+        raise not_found
+    if Path(normalized).suffix.lower() not in SESSION_FILE_SUFFIXES:
+        raise not_found
+    root = session_dir.resolve()
+    candidate = (root / normalized).resolve()
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        raise not_found
+    return candidate
 
 
 def _client_host(request: Request) -> str:
@@ -837,14 +1058,59 @@ def logout(session_token: Annotated[str, Depends(require_csrf)]) -> RedirectResp
 
 @app.get("/", response_class=HTMLResponse)
 def index(session_token: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
-    """Render the upload form and recent jobs."""
+    """Render the Sessions home page: current jobs, then processed sessions."""
     return _render_page(
         "index.html",
-        "Submit Job",
+        "Sessions",
+        session_token=session_token,
         jobs=_job_rows(),
+        sessions=session_rows(),
+    )
+
+
+@app.get("/new", response_class=HTMLResponse)
+def new_session(session_token: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
+    """Render the new-session upload form."""
+    return _render_page(
+        "new_session.html",
+        "New session",
+        session_token=session_token,
         chunk_size=CHUNK_SIZE_BYTES,
         csrf_token=csrf_token_for_session(session_token),
     )
+
+
+@app.get("/sessions/{session_id}")
+def session_report(
+    session_id: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> RedirectResponse:
+    """Open a session's report.
+
+    The report links its figures and clips relative to the session folder
+    (``camera_a/overlay_x.mp4``), so it is served from the files route, where
+    those links resolve.
+    """
+    session_dir = _session_dir(session_id)
+    if not (session_dir / SESSION_REPORT_HTML).is_file():
+        raise HTTPException(status_code=404, detail="This session has no report yet")
+    return RedirectResponse(
+        f"/sessions/{session_dir.name}/files/{SESSION_REPORT_HTML}", status_code=303
+    )
+
+
+@app.get("/sessions/{session_id}/files/{file_path:path}")
+def session_file(
+    session_id: str,
+    file_path: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> FileResponse:
+    """Serve one file from a session folder (report, figure, clip or table).
+
+    Video clips support HTTP range requests through ``FileResponse``.
+    """
+    path = resolve_session_file(_session_dir(session_id), file_path)
+    return FileResponse(path, content_disposition_type="inline")
 
 
 @app.post("/uploads/init")
@@ -1041,7 +1307,7 @@ async def finish_chunked_upload(
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 def job_detail(
     job_id: str,
-    _: Annotated[None, Depends(require_auth)],
+    session_token: Annotated[str, Depends(require_auth)],
 ) -> HTMLResponse:
     """Render one job status page."""
     safe_job_id = _slug(job_id)
@@ -1051,8 +1317,11 @@ def job_detail(
     return _render_page(
         "job_detail.html",
         f"Job {safe_job_id}",
+        session_token=session_token,
         job_id=safe_job_id,
         state=str(status.get("state", "unknown")),
+        chip_kind=job_state_chip(str(status.get("state", "unknown")))[0],
+        chip_label=job_state_chip(str(status.get("state", "unknown")))[1],
         message=str(status.get("message", "")),
         show_annotate=status.get("state") == "awaiting_annotation",
         show_download=bool(result_zip and Path(result_zip).exists()),
@@ -1174,6 +1443,7 @@ def gaze_label_page(
     return _render_page(
         "gaze_label.html",
         f"Gaze labels {safe_job_id}",
+        session_token=session_token,
         job_id=safe_job_id,
         payload=payload,
     )
@@ -1246,7 +1516,7 @@ def download_job(
 @app.get("/jobs/{job_id}/log", response_class=HTMLResponse)
 def job_log(
     job_id: str,
-    _: Annotated[None, Depends(require_auth)],
+    session_token: Annotated[str, Depends(require_auth)],
 ) -> HTMLResponse:
     """Render the plain-text job log."""
     safe_job_id = _slug(job_id)
@@ -1254,7 +1524,9 @@ def job_log(
     if not log_path.exists():
         raise HTTPException(status_code=404, detail="Log not available")
     text = log_path.read_text(encoding="utf-8", errors="replace")
-    return _render_page("job_log.html", "Job Log", log_text=text)
+    return _render_page(
+        "job_log.html", "Job Log", session_token=session_token, log_text=text
+    )
 
 
 def _read_anchor_manifests(job_dir: Path) -> dict[str, list[dict[str, Any]]]:
@@ -1385,6 +1657,7 @@ def annotate_job(
     return _render_page(
         "annotate.html",
         f"Annotate {safe_job_id}",
+        session_token=session_token,
         job_id=safe_job_id,
         cameras=cameras,
         csrf_token=csrf,

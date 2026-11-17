@@ -1,16 +1,17 @@
 {% extends "base.html" %}
+{% from "_macros.html" import chip %}
 {% block body %}<section class="panel">
   <h2>{{ job_id }}</h2>
-  <p><strong>Status:</strong> {{ state }}</p>
+  <p><strong>Status:</strong> {{ chip(chip_kind, chip_label) }}</p>
   <p><strong>Message:</strong> {{ message }}</p>
   {% if show_annotate %}<p class="cta"><a class="button-link" href="/jobs/{{ job_id }}/annotate">Label parent vs child to continue</a></p>{% endif %}
   {% if show_download %}<p class="cta"><a href="/jobs/{{ job_id }}/download">Download results zip</a></p>{% endif %}
-  {% if coverage_rows is not none %}<h3>Both people tracked, per block</h3><p class="muted">Metrics use only frames where both people were found. The zip's report.html has the full summary.</p><table><thead><tr><th>Camera</th><th>Block</th><th>Coverage</th><th></th></tr></thead><tbody>
+  {% if coverage_rows is not none %}<h3>Both people tracked, per block</h3><p class="muted">Metrics use only frames where both people were found. The zip's report.html has the full summary.</p><div class="table-wrap"><table><thead><tr><th>Camera</th><th>Block</th><th>Coverage</th><th></th></tr></thead><tbody>
     {%- for row in coverage_rows -%}
-    <tr><td>{{ row.camera_id }}</td><td>{{ row.block }}</td><td>{{ row.coverage }}</td><td>{% if row.low %}<span style="color:#c2410c;font-weight:600">Low: check the overlay clips</span>{% else %}OK{% endif %}</td></tr>
+    <tr><td>{{ row.camera_id }}</td><td>{{ row.block }}</td><td>{{ row.coverage }}</td><td>{% if row.low %}{{ chip("check", "Low: check the overlay clips") }}{% else %}{{ chip("ok", "OK") }}{% endif %}</td></tr>
     {%- endfor -%}
-  </tbody></table><p><a href="/jobs/{{ job_id }}/gaze-label">Optional: label what people are looking at</a> <span class="muted">(helps us check gaze accuracy)</span></p>{% endif %}
+  </tbody></table></div><p><a href="/jobs/{{ job_id }}/gaze-label">Optional: label what people are looking at</a> <span class="muted">(helps us check gaze accuracy)</span></p>{% endif %}
   {% if show_log_link %}<p><a href="/jobs/{{ job_id }}/log">View job log</a></p>{% endif %}
   {% if auto_refresh %}<p class="muted">This page refreshes automatically while the job runs.</p><script>setTimeout(() => window.location.reload(), 10000);</script>{% endif %}
-  <p><a href="/">Back to jobs</a></p>
+  <p><a href="/">Back to sessions</a></p>
 </section>{% endblock %}

@@ -1,7 +1,6 @@
-// Upload page: chunked video upload, drag-and-drop, logout.
+// New-session page: chunked video upload and drag-and-drop.
 // CHUNK_SIZE and CSRF_TOKEN are defined by an inline config script in index.html.
 const form = document.getElementById("upload-form");
-const logoutButton = document.getElementById("logout-button");
 const statusEl = document.getElementById("upload-status");
 const progressEl = document.getElementById("upload-progress");
 const dropZones = document.querySelectorAll(".file-drop-zone");
@@ -26,15 +25,6 @@ function updateSelectedFile(input) {
   }
   label.textContent = input.files.length ? input.files[0].name : "No file selected";
 }
-
-logoutButton.addEventListener("click", async () => {
-  await fetch("/logout", {
-    method: "POST",
-    headers: {"X-CSRF-Token": CSRF_TOKEN},
-    credentials: "same-origin"
-  });
-  window.location.href = "/login";
-});
 
 dropZones.forEach((zone) => {
   const input = document.getElementById(zone.dataset.fileInput);
@@ -212,7 +202,7 @@ form.addEventListener("submit", async (event) => {
   } catch (error) {
     setStatus(`Upload failed: ${error.message}`);
     submitButton.disabled = false;
-    submitButton.textContent = "Submit Processing Job";
+    submitButton.textContent = "Start processing";
     uploadInProgress = false;
     document.title = "Submit Job";
   }
