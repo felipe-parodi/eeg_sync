@@ -280,7 +280,8 @@ def compute_movement_xcorr(
         return empty
 
     dt = _frame_interval(pose_df)
-    max_lag_frames = max(1, int(round(max_lag_s / dt)))
+    # Floor (with float tolerance) so the search never exceeds max_lag_s.
+    max_lag_frames = max(1, int(np.floor(max_lag_s / dt + 1e-9)))
     window_frames = max(2 * max_lag_frames + 1, int(round(window_s / dt)))
     step = max(1, window_frames // 2)
 

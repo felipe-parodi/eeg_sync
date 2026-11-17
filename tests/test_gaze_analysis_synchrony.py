@@ -463,3 +463,17 @@ def test_xcorr_position_jump_across_gap_is_not_movement() -> None:
 
     assert not result.empty
     assert (result["peak_xcorr"] == 0.0).all()
+
+
+def test_xcorr_lag_search_stays_within_max_lag() -> None:
+    """At 6 fps a 0.3 s limit allows 1 frame (0.167 s), never 2 (0.333 s)."""
+    rng = np.random.default_rng(3)
+    ts = np.arange(0, 60, 1 / 6.0)
+    parent = 200.0 + np.cumsum(rng.normal(0, 3, len(ts)))
+    child = np.roll(parent, 2)  # child follows by 2 frames = 0.333 s
+    pose_df = _make_pose_df_at(ts, parent, child)
+
+    result = compute_movement_xcorr(pose_df, 0, 1, window_s=5.0, max_lag_s=0.3)
+
+    assert not result.empty
+    assert (result["peak_lag_s"].abs() <= 0.3 + 1e-9).all()
