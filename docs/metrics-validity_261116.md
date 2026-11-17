@@ -93,7 +93,19 @@ people. The user chose 5 fps.
   correlation, longer windows, or keypoint-level motion energy instead of torso
   speed).
 
-## Phase 2b: Alternative synchrony measures (user approved)
+## Phase 2b: Alternative synchrony measures (done 2026-11-16; adopted whole-body lag-0 20 s)
+
+Result on 1011v3-1020v3 (38 blocks; real minus 60 s-shift chance): current
+torso peak 5 s +0.011 (effect 0.27); torso lag-0 20 s +0.127 (1.44); whole-body
+motion energy lag-0 20 s +0.172 (1.68). Controls: regressing out background
+motion +0.16 to +0.18; excluding frames with parent/child keypoints within
+10 px +0.13 to +0.16; cameras static. Box-overlap exclusion is untestable in
+storybook (boxes overlap in 93-97% of frames). Implemented as
+`compute_movement_sync` (`sync_*` columns) with the chance level pooled over
+several shifts (single-shift chance varied up to 0.17 per block); xcorr kept
+as superseded.
+
+## Phase 2b (original plan text)
 
 After Phase 0 re-extraction, compare on 1011-1020: lag-0 correlation, longer
 windows (10-30 s), and whole-body motion energy (all keypoints) against their

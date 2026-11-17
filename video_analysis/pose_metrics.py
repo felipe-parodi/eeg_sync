@@ -17,6 +17,7 @@ import pandas as pd
 
 from gaze_analysis.config import SessionBlock, load_session_config
 from gaze_analysis.synchrony import (
+    compute_movement_sync,
     compute_movement_xcorr,
     compute_movement_xcorr_chance,
     compute_torso_proximity,
@@ -125,6 +126,7 @@ def compute_per_block_metrics(
     """
     all_proximity: List[pd.DataFrame] = []
     all_xcorr: List[pd.DataFrame] = []
+    all_sync: List[pd.DataFrame] = []
     block_stats: List[Dict[str, Any]] = []
 
     for block in blocks:
@@ -174,6 +176,19 @@ def compute_per_block_metrics(
                 stats["xcorr_minus_chance"] = (
                     stats["xcorr_mean"] - stats["xcorr_chance_mean"]
                 )
+        # Whole-body movement synchrony (the reported measure).
+        sync, sync_chance = compute_movement_sync(block_pose, parent_id, child_id)
+        if not sync.empty:
+            sync["block"] = block.name
+            all_sync.append(sync)
+            stats["sync_mean"] = float(sync["sync_r"].mean())
+            stats["sync_std"] = float(sync["sync_r"].std())
+            stats["sync_n_windows"] = len(sync)
+            if not sync_chance.empty:
+                stats["sync_chance_mean"] = float(sync_chance["sync_r"].mean())
+                stats["sync_minus_chance"] = (
+                    stats["sync_mean"] - stats["sync_chance_mean"]
+                )
         block_stats.append(stats)
 
     proximity_df = (
@@ -181,9 +196,12 @@ def compute_per_block_metrics(
     )
     xcorr_df = pd.concat(all_xcorr, ignore_index=True) if all_xcorr else pd.DataFrame()
 
+    sync_df = pd.concat(all_sync, ignore_index=True) if all_sync else pd.DataFrame()
+
     return {
         "proximity_df": proximity_df,
         "xcorr_df": xcorr_df,
+        "sync_df": sync_df,
         "block_stats": block_stats,
     }
 
@@ -407,6 +425,10 @@ def main() -> None:
         results["proximity_df"].to_csv(prox_path, index=False)
         print(f"[pose-metrics] wrote {prox_path} ({len(results['proximity_df'])} rows)")
 
+    if not results["sync_df"].empty:
+        sync_path = camera_dir / "pose_metrics_sync.csv"
+        results["sync_df"].to_csv(sync_path, index=False)
+        print(f"[pose-metrics] wrote {sync_path} ({len(results['sync_df'])} rows)")
     if not results["xcorr_df"].empty:
         xcorr_path = camera_dir / "pose_metrics_xcorr.csv"
         results["xcorr_df"].to_csv(xcorr_path, index=False)
@@ -424,11 +446,11 @@ def main() -> None:
         block = stats["block"]
         prox_mean = stats.get("proximity_mean", 0)
         prox_std = stats.get("proximity_std", 0)
-        xcorr_mean = stats.get("xcorr_mean", 0)
-        lag_mean = stats.get("lag_mean_s", 0)
+        sync_mean = stats.get("sync_mean", float("nan"))
+        sync_chance = stats.get("sync_chance_mean", float("nan"))
         print(
             f"  {block:12s}: proximity={prox_mean:.1f} +/- {prox_std:.1f} px, "
-            f"xcorr={xcorr_mean:.3f}, lag={lag_mean:.3f}s, "
+            f"movement synchrony={sync_mean:.2f} (chance {sync_chance:.2f}), "
             f"both people tracked in {stats['coverage_both']:.0%} of the block"
             + (" (LOW: interpret with care)" if stats["low_coverage"] else "")
         )

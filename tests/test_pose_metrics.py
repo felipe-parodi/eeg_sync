@@ -142,3 +142,16 @@ def test_block_stats_include_synchrony_chance_baseline():
     assert stats["xcorr_minus_chance"] == pytest.approx(
         stats["xcorr_mean"] - stats["xcorr_chance_mean"]
     )
+
+
+def test_block_stats_include_body_synchrony():
+    """Blocks report whole-body synchrony, its chance level, and the difference."""
+    blocks = [SessionBlock("b", 0.0, 120.0, "#999")]
+    pose_df = _make_pose_df(6 * 120, fps=6.0)
+    stats = compute_per_block_metrics(pose_df, blocks, frame_rate=6.0)["block_stats"][0]
+
+    for key in ("sync_mean", "sync_chance_mean", "sync_minus_chance", "sync_n_windows"):
+        assert key in stats
+    assert stats["sync_minus_chance"] == pytest.approx(
+        stats["sync_mean"] - stats["sync_chance_mean"]
+    )

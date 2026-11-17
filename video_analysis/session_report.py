@@ -140,6 +140,13 @@ def _chance(row: pd.Series, column: str) -> str:
     return f' <span class="muted">(chance {float(chance):.0f})</span>'
 
 
+def _sync_chance(row: pd.Series) -> str:
+    chance = row.get("sync_chance_mean")
+    if chance is None or (isinstance(chance, float) and pd.isna(chance)):
+        return ""
+    return f' <span class="muted">(chance {float(chance):.2f})</span>'
+
+
 def _coverage_cell(row: pd.Series) -> str:
     share = float(row.get("coverage_both", 0) or 0)
     low = bool(row.get("low_coverage", share < 0.5))
@@ -193,14 +200,16 @@ def render_report_html(session_dir: Path, rows: pd.DataFrame) -> str:
             f"{_fmt_time(row.get('block_end_s', 0))}</td>"
             f"<td>{_coverage_cell(row)}</td>"
             f"<td>{_fmt(row.get('proximity_mean'))}</td>"
-            f"<td>{_fmt(row.get('xcorr_mean'), 2)}</td>"
+            f"<td>{_fmt(row.get('sync_mean'), 2)}{_sync_chance(row)}</td>"
             + "".join(
                 f"<td>{_fmt(row.get(c))}{_chance(row, c)}</td>" for c, _ in gaze_cols
             )
             + "</tr>"
         )
 
-    low = rows[rows.get("low_coverage", pd.Series(False, index=rows.index)) == True]  # noqa: E712
+    low = rows[
+        rows.get("low_coverage", pd.Series(False, index=rows.index)) == True
+    ]  # noqa: E712
     if len(low):
         items = "".join(
             f"<li>{html.escape(str(r.camera_id))} / {html.escape(str(r.block))}: "
@@ -287,8 +296,11 @@ both the parent and the child were found. Every other number uses only those
 frames.</li>
 <li><strong>Mean distance</strong>: average distance between the parent's and
 the child's torso centers, in image pixels (not comparable across cameras).</li>
-<li><strong>Movement synchrony</strong>: how closely the two people's movements
-follow each other (0 = unrelated, 1 = identical), in 5-second windows.</li>
+<li><strong>Movement synchrony</strong>: how closely the amount of whole-body
+movement of the two people rises and falls together, as a correlation in
+20-second windows (0 = unrelated, 1 = identical). <em>Chance</em> is the same
+measure with the child's movement taken from other moments in the block. Only
+the part above chance reflects the interaction.</li>
 {gaze_note}
 </ul>
 <h2>Clips and figures</h2>

@@ -98,3 +98,21 @@ def test_all_sessions_table_empty_when_no_sessions(tmp_path: Path) -> None:
     table = build_all_sessions_table(tmp_path)
     assert isinstance(table, pd.DataFrame)
     assert table.empty
+
+
+def test_report_shows_body_synchrony_with_chance(tmp_path: Path) -> None:
+    """The synchrony column is the whole-body measure, shown with its chance level."""
+    session = tmp_path / "1012"
+    _write_camera(session, "camera_a", 0.9)
+    summary_path = session / "camera_a" / "pose_metrics_summary.json"
+    blocks = json.loads(summary_path.read_text(encoding="utf-8"))
+    blocks[0].update(
+        {"sync_mean": 0.21, "sync_chance_mean": 0.03, "sync_minus_chance": 0.18}
+    )
+    summary_path.write_text(json.dumps(blocks), encoding="utf-8")
+
+    html = render_report_html(session, collect_session_rows(session))
+
+    assert "0.21" in html and "(chance 0.03)" in html
+    assert "20-second" in html
+    assert "0.50" not in html  # the old torso cross-correlation is not shown

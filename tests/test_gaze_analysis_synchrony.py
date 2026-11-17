@@ -526,3 +526,120 @@ def test_xcorr_chance_short_block_uses_half_its_length() -> None:
 
     assert not chance.empty
     assert chance["peak_xcorr"].mean() < 0.9
+
+
+# ---- Whole-body movement synchrony (adopted measure) ----
+
+
+def _make_body_pose(
+    ts: np.ndarray,
+    parent_dx: np.ndarray,
+    child_dx: np.ndarray,
+    child_conf: float = 0.9,
+    low_conf_jitter: float = 0.0,
+) -> pd.DataFrame:
+    """17 keypoints per person; each moves by the person's dx over time.
+
+    Keypoint kp_016 of the parent gets low confidence and optional jitter, so
+    tests can check it is ignored.
+    """
+    rng = np.random.default_rng(11)
+    rows = []
+    for i, t in enumerate(ts):
+        fidx = int(round(t * 5))
+        for tid, dx, conf in ((0, parent_dx[i], 0.9), (1, child_dx[i], child_conf)):
+            for k in range(17):
+                low = tid == 0 and k == 16
+                x = 100.0 * tid + 5.0 * k + dx
+                if low:
+                    x += low_conf_jitter * rng.normal()
+                rows.append(
+                    {
+                        "frame_idx": fidx,
+                        "timestamp_s": float(t),
+                        "track_id": tid,
+                        "track_label": f"person_{tid:02d}",
+                        "keypoint_name": f"kp_{k:03d}",
+                        "x_m": x,
+                        "y_m": 200.0 + 3.0 * k,
+                        "z_m": 0.0,
+                        "keypoint_confidence": 0.1 if low else conf,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def _random_walk(n: int, seed: int) -> np.ndarray:
+    return np.cumsum(np.random.default_rng(seed).normal(0, 4, n))
+
+
+def test_body_sync_shared_movement_beats_chance() -> None:
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 240, 0.2), 6)
+    walk = _random_walk(len(ts), 1)
+    pose = _make_body_pose(ts, walk, walk)
+
+    real, chance = compute_movement_sync(pose, 0, 1)
+
+    assert real["sync_r"].mean() > 0.9
+    assert real["sync_r"].mean() - chance["sync_r"].mean() > 0.5
+
+
+def test_body_sync_independent_movement_near_zero() -> None:
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 600, 0.2), 6)
+    pose = _make_body_pose(ts, _random_walk(len(ts), 2), _random_walk(len(ts), 3))
+
+    real, chance = compute_movement_sync(pose, 0, 1)
+
+    assert abs(real["sync_r"].mean()) < 0.1
+    assert abs(real["sync_r"].mean() - chance["sync_r"].mean()) < 0.1
+
+
+def test_body_sync_ignores_low_confidence_keypoints() -> None:
+    """Wild jitter on a low-confidence keypoint must not change the result."""
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 120, 0.2), 6)
+    walk = _random_walk(len(ts), 4)
+    clean, _ = compute_movement_sync(_make_body_pose(ts, walk, walk), 0, 1)
+    noisy, _ = compute_movement_sync(
+        _make_body_pose(ts, walk, walk, low_conf_jitter=500.0), 0, 1
+    )
+
+    np.testing.assert_allclose(clean["sync_r"], noisy["sync_r"], atol=1e-9)
+
+
+def test_body_sync_windows_are_20s_inside_gap_free_runs() -> None:
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.concatenate([np.arange(0, 50, 0.2), np.arange(110, 125, 0.2)]), 6)
+    walk = _random_walk(len(ts), 5)
+    real, _ = compute_movement_sync(_make_body_pose(ts, walk, walk), 0, 1)
+
+    span = real["window_end_s"] - real["window_start_s"]
+    assert (span <= 20.0 + 1e-6).all()
+    assert (real["window_end_s"] < 50).all()  # the 15 s run is too short
+    assert set(real.columns) >= {
+        "segment_id",
+        "window_start_s",
+        "window_end_s",
+        "sync_r",
+    }
+
+
+def test_body_sync_chance_averages_several_shifts() -> None:
+    """Long blocks average shifts at 60 s steps (at most 10); short ones use half."""
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 300, 0.2), 6)  # 5 min: shifts 60, 120, 180, 240 s
+    walk = _random_walk(len(ts), 6)
+    _, chance = compute_movement_sync(_make_body_pose(ts, walk, walk), 0, 1)
+    assert sorted(chance["shift_s"].unique()) == [60.0, 120.0, 180.0, 240.0]
+
+    short = np.round(np.arange(0, 90, 0.2), 6)
+    walk = _random_walk(len(short), 7)
+    _, chance = compute_movement_sync(_make_body_pose(short, walk, walk), 0, 1)
+    assert list(chance["shift_s"].unique()) == [45.0]

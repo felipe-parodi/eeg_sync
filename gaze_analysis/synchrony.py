@@ -426,6 +426,199 @@ def compute_movement_xcorr_chance(
 
 
 # ====================================================================
+# Metric 2b: Whole-body movement synchrony (adopted measure)
+# ====================================================================
+
+SYNC_COLUMNS = ["segment_id", "window_start_s", "window_end_s", "sync_r"]
+SYNC_WINDOW_S = 20.0
+SYNC_CONF_MIN = 0.3
+
+
+def _keypoint_arrays(
+    pose_df: pd.DataFrame, track_id: int, frames: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """x, y and confidence per frame (rows) and keypoint (columns) for one person.
+
+    Args:
+        pose_df: Pose DataFrame (pose_3d schema).
+        track_id: Person to extract.
+        frames: frame_idx values to return, in order.
+
+    Returns:
+        Three (len(frames), n_keypoints) arrays; missing entries are NaN.
+    """
+    sub = pose_df[pose_df["track_id"] == track_id]
+    names = sorted(pose_df["keypoint_name"].unique())
+
+    def grid(column: str) -> np.ndarray:
+        table = sub.pivot_table(
+            index="frame_idx", columns="keypoint_name", values=column, aggfunc="first"
+        )
+        return table.reindex(index=frames, columns=names).to_numpy(dtype=float)
+
+    return grid("x_m"), grid("y_m"), grid("keypoint_confidence")
+
+
+def _body_energy(
+    x: np.ndarray, y: np.ndarray, conf: np.ndarray, t: np.ndarray, conf_min: float
+) -> np.ndarray:
+    """Mean keypoint speed per frame, over keypoints tracked confidently.
+
+    Speed is a central difference in time within one gap-free run. Keypoints
+    below ``conf_min`` (or missing) in a frame are ignored there; a frame with
+    no usable keypoint takes the run's mean energy.
+
+    Returns:
+        Motion energy per frame, in pixels per second.
+    """
+    if len(t) < 2:
+        return np.zeros(len(t))
+    speed = np.hypot(np.gradient(x, t, axis=0), np.gradient(y, t, axis=0))
+    speed[(conf < conf_min) | ~np.isfinite(speed)] = np.nan
+    with np.errstate(all="ignore"):
+        energy = np.nanmean(speed, axis=1)
+    fill = float(np.nanmean(energy)) if np.isfinite(energy).any() else 0.0
+    return np.where(np.isfinite(energy), energy, fill)
+
+
+def _lag0_windows(
+    run_ids: list[int],
+    times: list[np.ndarray],
+    parent: list[np.ndarray],
+    child: list[np.ndarray],
+    window_frames: int,
+) -> pd.DataFrame:
+    """Pearson correlation at lag 0 in half-overlapping windows inside each run."""
+    step = max(1, window_frames // 2)
+    rows = []
+    for run_id, ts, p, c in zip(run_ids, times, parent, child):
+        for start in range(0, len(ts) - window_frames + 1, step):
+            pw = (
+                p[start : start + window_frames]
+                - p[start : start + window_frames].mean()
+            )
+            cw = (
+                c[start : start + window_frames]
+                - c[start : start + window_frames].mean()
+            )
+            denom = np.sqrt(pw @ pw) * np.sqrt(cw @ cw)
+            rows.append(
+                {
+                    "segment_id": run_id,
+                    "window_start_s": ts[start],
+                    "window_end_s": ts[start + window_frames - 1],
+                    "sync_r": float(pw @ cw / denom) if denom > 1e-12 else 0.0,
+                }
+            )
+    return pd.DataFrame(rows, columns=SYNC_COLUMNS)
+
+
+def compute_movement_sync(
+    pose_df: pd.DataFrame,
+    parent_track_id: int = 0,
+    child_track_id: int = 1,
+    window_s: float = SYNC_WINDOW_S,
+    conf_min: float = SYNC_CONF_MIN,
+    shift_s: float = XCORR_CHANCE_SHIFT_S,
+    max_shifts: int = 10,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Whole-body movement synchrony and its chance level.
+
+    Each person's motion energy is the mean speed of their confidently tracked
+    keypoints. Parent and child energies are correlated at lag 0 in 20 s
+    windows (50% overlap) placed inside gap-free runs of frames where both are
+    tracked. The chance level repeats this with the child's energy shifted
+    circularly across the concatenated runs, so the child is paired with the
+    parent's movement from another moment; it pools several shifts (multiples
+    of ``shift_s``, at most ``max_shifts``; half the usable data when shorter
+    than two shifts).
+
+    On sessions 1011v3-1020v3 this separated real from shifted data (mean
+    difference +0.17, effect size 1.7), survived removing background motion
+    and frames with possibly shared keypoints, whereas peak torso-speed
+    cross-correlation in 5 s windows did not (+0.01).
+
+    Args:
+        pose_df: Pose DataFrame (pose_3d schema).
+        parent_track_id: Track ID for the parent.
+        child_track_id: Track ID for the child.
+        window_s: Window length in seconds.
+        conf_min: Minimum keypoint confidence for a keypoint to count.
+        shift_s: Step between chance-level shifts of the child, in seconds.
+        max_shifts: Most shifts pooled for the chance level.
+
+    Returns:
+        ``(real, chance)`` tables with segment_id, window_start_s,
+        window_end_s, sync_r (window times are the parent's); ``chance`` also
+        has ``shift_s``.
+    """
+    empty = pd.DataFrame(columns=SYNC_COLUMNS)
+    if pose_df.empty:
+        return empty, empty.copy()
+    times_by_frame = pose_df.groupby("frame_idx")["timestamp_s"].first()
+    tracked = pose_df.groupby("track_id")["frame_idx"].apply(set)
+    if parent_track_id not in tracked or child_track_id not in tracked:
+        return empty, empty.copy()
+    frames = np.array(sorted(tracked[parent_track_id] & tracked[child_track_id]))
+    if len(frames) == 0:
+        return empty, empty.copy()
+    t_all = times_by_frame.reindex(frames).to_numpy(dtype=float)
+    order = np.argsort(t_all)
+    frames, t_all = frames[order], t_all[order]
+
+    dt = _frame_interval(pose_df)
+    window_frames = max(3, int(round(window_s / dt)))
+    px, py, pc = _keypoint_arrays(pose_df, parent_track_id, frames)
+    cx, cy, cc = _keypoint_arrays(pose_df, child_track_id, frames)
+
+    run_ids: list[int] = []
+    times: list[np.ndarray] = []
+    parent: list[np.ndarray] = []
+    child: list[np.ndarray] = []
+    labels = contiguous_runs(t_all, dt)
+    for run_id in np.unique(labels):
+        sel = labels == run_id
+        if sel.sum() < window_frames:
+            continue
+        ts = t_all[sel]
+        run_ids.append(int(run_id))
+        times.append(ts)
+        parent.append(_body_energy(px[sel], py[sel], pc[sel], ts, conf_min))
+        child.append(_body_energy(cx[sel], cy[sel], cc[sel], ts, conf_min))
+    if not run_ids:
+        return empty, empty.copy()
+
+    real = _lag0_windows(run_ids, times, parent, child, window_frames)
+    child_all = np.concatenate(child)
+    bounds = np.cumsum([len(c) for c in child])[:-1]
+    chance_tables = []
+    for shift in _chance_shifts(len(child_all), dt, shift_s, max_shifts):
+        shifted = np.split(np.roll(child_all, -shift), bounds)
+        table = _lag0_windows(run_ids, times, parent, shifted, window_frames)
+        chance_tables.append(table.assign(shift_s=round(shift * dt, 6)))
+    chance = pd.concat(chance_tables, ignore_index=True)
+    return real, chance
+
+
+def _chance_shifts(n: int, dt: float, shift_s: float, max_shifts: int) -> list[int]:
+    """Circular shifts (in frames) for the chance level.
+
+    Multiples of ``shift_s`` that stay at least ``shift_s`` from a full turn,
+    evenly thinned to at most ``max_shifts``; half the data when it is
+    shorter than two shifts. Averaging several shifts steadies the chance
+    level, which a single shift leaves noisy in short blocks.
+    """
+    step = int(round(shift_s / dt))
+    if step <= 0 or n < 2 * step:
+        return [max(1, n // 2)]
+    shifts = list(range(step, n - step + 1, step))
+    if len(shifts) > max_shifts:
+        keep = np.linspace(0, len(shifts) - 1, max_shifts).round().astype(int)
+        shifts = [shifts[i] for i in sorted(set(keep))]
+    return shifts
+
+
+# ====================================================================
 # Metric 3: Gaze Categories
 # ====================================================================
 

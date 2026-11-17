@@ -1411,7 +1411,16 @@ COCO-17 keypoint order (`kp_000`→nose, increasing index):
 | `torso_distance_px` | float | Distance between the parent and child torso centroids, in **image pixels**. Smaller = closer. Pixel scale is camera-dependent; compare within a session, not across cameras. |
 | `block` | str | Which analysis block this frame belongs to. |
 
-### `pose_metrics_xcorr.csv` — movement synchrony (per 5 s window)
+### `pose_metrics_sync.csv` — movement synchrony (per 20 s window)
+
+| column | type | meaning |
+|---|---|---|
+| `segment_id` | int | Which unbroken stretch of the block (both people tracked, no gap) the window comes from. |
+| `window_start_s,window_end_s` | float | The 20 s window analyzed. |
+| `sync_r` | float | Correlation between the parent's and the child's whole-body movement in that window, -1 to 1. Compare with the block's chance level (`sync_chance_mean` in the summary). |
+| `block` | str | Analysis block. |
+
+### `pose_metrics_xcorr.csv` — superseded torso-speed synchrony (per 5 s window)
 
 | column | type | meaning |
 |---|---|---|
@@ -1424,8 +1433,10 @@ COCO-17 keypoint order (`kp_000`→nose, increasing index):
 ### `pose_metrics_summary.json` — per-block roll-up
 
 A list of objects, one per block, with `proximity_mean/std/median/n_frames`
-and `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows`, plus the tracking
-coverage columns described under "Start here".
+and `sync_mean/std`, `sync_n_windows`, `sync_chance_mean`, `sync_minus_chance`
+(movement synchrony; only the part above chance reflects the interaction),
+the superseded `xcorr_*` / `lag_*` columns, plus the tracking coverage columns
+described under "Start here".
 
 ### Figures and video
 
