@@ -1,256 +1,155 @@
-# Quickstart: video → analyzable outputs
+# Quickstart: from session videos to results
 
-**Audience**: research collaborators who have session videos and want pose/gaze metrics out.
-**You will**: install once, then for each session run six commands. End result: per-block plots, CSVs you can analyze in Python/R/Excel, and overlay videos you can sanity-check.
+**Audience**: research assistants processing parent-child sessions.
+**You will**: compress the videos, submit them in the Video Processing Portal,
+label the parent in a few frames, and download the results.
 
-> **Most people should use the Video Processing Portal instead.** It runs
-> every step below in the browser: upload videos, enter each camera's task
-> blocks, click the parent in about 10 frames, download a zip, and open
-> `report.html`. See the portal section of the [README](../README.md). This
-> page is for running the steps by hand.
+The portal does all the processing. You need a web browser, the portal link
+and password, and the two GoPro videos of the session.
 
-If you're driving this with an LLM (Codex, Claude, etc.), point it at this file plus `docs/PIPELINE.md` and `docs/OUTPUTS.md`. Both are written to be machine-readable.
-
----
-
-## 0. Before you start: input contract
-
-Three things have to be true **before** the pipeline will produce trustworthy metrics:
-
-1. **Exactly two people in frame during analyzed segments.** The pipeline assumes parent + child. If an experimenter steps in, that's a third track and metrics like "torso proximity" will mix them in. Two ways to handle it:
-   - Easy: exclude that window from your segment list (see step 2 below).
-   - If you can't exclude it: keep the window but log it in `exclusion_windows.csv`; you'll relabel the extra person to a non-parent/child track with `video-annotate-tracks` later.
-2. **Per-session segment timings.** For each video, the start/end times of the segments you want analyzed, in `MM:SS` (e.g. `"Block 1: 13:26–23:40"`). Template: [`templates/segment_timings.example.csv`](../templates/segment_timings.example.csv).
-3. **Exclusion windows, if any** — moments when someone other than parent + child was visible. Template: [`templates/exclusion_windows.example.csv`](../templates/exclusion_windows.example.csv).
-
-Both CSVs are **inputs to you, the analyst**, not inputs the CLIs read directly. You'll transcribe them into `session_config.json` and the `--blocks` argument below.
+If you want to run the steps by hand instead (for example with an LLM), see
+[By hand](#by-hand) at the end.
 
 ---
 
-## 1. Install (once per machine)
+## 1. Before recording
 
-```bash
-git clone https://github.com/felipe-parodi/eeg_sync.git
-cd eeg_sync
-pip install -e ".[dev,video,gaze]"
+The numbers are only as good as what the cameras see.
+
+- **Keep the lens clear.** Nothing should sit close in front of a camera. In
+  one session an object a few centimetres from camera A covered half the view
+  and the tracker took it for a person.
+- **Frame both people in full** for as much of each task as possible. When the
+  child leaves the view, that time cannot be measured.
+- **Use both cameras.** When one view is blocked, the other often has the
+  data.
+
+## 2. Write down the times
+
+For each video, note in that video's own clock:
+
+- **Tasks**: name, start, end (for example `grocery 13:26 23:40`).
+- **Extra-person windows**: start, end and a reason, for any time someone
+  other than the parent and child is in view (for example the experimenter).
+  These times are removed from the analysis.
+
+The two cameras' clocks differ, so camera B's times are not camera A's.
+
+## 3. Compress the videos
+
+Raw GoPro files are several GB. Compress each one first with the portal
+compressor (it makes 10-frames-per-second copies of a few tens of MB):
+
+```powershell
+python scripts\compress_videos_for_portal.py --video "C:\Videos\1021_A.mov" --video "C:\Videos\1021_B.mov"
 ```
 
-That installs everything: core, video inference (Ultralytics), gaze (Gazelle dependencies), and dev tools. If you only need video pose (no gaze), `pip install -e ".[video]"` is enough.
+Details: [COLLEAGUE_VIDEO_COMPRESSION.md](COLLEAGUE_VIDEO_COMPRESSION.md).
 
-ffmpeg must be on `PATH`. If `which ffmpeg` is empty, `brew install ffmpeg` (macOS) or `conda env create -f environment.yml` (cross-platform).
+## 4. Submit the session
 
-CPU is the default and is fine. The pipeline auto-detects CUDA / Apple Silicon if available.
+Log in and click **New session**. The form has six steps:
 
----
+1. **Session ID**, e.g. `1021`. If that ID already has results, the portal
+   asks before replacing them; earlier results are moved to an archive
+   folder, never deleted.
+2. **Videos**: drop the compressed Video A and Video B. One camera is fine if
+   only one recorded.
+3. **Tasks** for each video, one row per task.
+4. **Extra-person windows** for each video. The preview underneath shows
+   exactly what will be analysed. A task cut by a window becomes pieces
+   (`grocery_part1`, `grocery_part2`, ...); pieces shorter than 10 s are
+   skipped and listed.
+5. **Gaze**: tick to also measure where people look (takes longer).
+6. **Review and start**.
 
-## 2. Set up the session
+The form checks the times as you type (for example `1:75` or a time past the
+end of the video) and tells you what to fix.
 
-For each session, do this once:
+## 5. Label the parent
 
-**a. Drop the raw videos in `video_inference/data/`.** They stay local — that folder is gitignored. Two cameras supported (`video-a`, `video-b`); one camera is fine too.
+After a few minutes the job page says it is waiting for you. Click the link
+and, for each frame shown, pick the box around the **parent** (or skip the
+frame if neither box is the parent). Every task gets at least two frames.
+This takes about two minutes and decides who is parent and who is child for
+the whole recording, so take care.
 
-**b. Copy `templates/session_config.example.json` to `session_config.json`** at repo root, then edit:
+Processing then continues by itself. The job page shows which stage it is
+at; you can close the browser and come back.
 
-```json
-{
-  "session_id": "P001c",
-  "output_dir": "video_inference/output/P001c",
-  "image_width": 854,
-  "image_height": 480,
-  "frame_rate": 5.0,
-  "session_blocks": [
-    {"name": "grocery_free_play",      "start_s":  806, "end_s": 1420, "color": "green"},
-    {"name": "synchrony_intervention", "start_s": 1676, "end_s": 1725, "color": "orange"},
-    {"name": "storybook_reading",      "start_s": 1762, "end_s": 2226, "color": "blue"}
-  ],
-  "camera_mappings": [
-    {"camera_id": "camera_a", "parent_track_id": 0, "child_track_id": 1},
-    {"camera_id": "camera_b", "parent_track_id": 0, "child_track_id": 1}
-  ]
-}
-```
+## 6. Read the results
 
-- `session_blocks.start_s` / `end_s` are **seconds from the start of the video**. Convert `MM:SS` to seconds by hand or use the snippet in [`templates/README.md`](../templates/README.md).
-- You can ignore `camera_mappings` if you plan to run `video-filter-tracks` in step 5 — it auto-assigns parent/child.
+When the job is done, open the session from the **Sessions** page, or
+download the results zip and open `report.html`.
 
----
+**Check the clips first.** Each block has short overlay clips (start and end)
+with skeletons drawn. Make sure the boxes follow the parent and the child,
+not someone else or an object.
 
-## 3. Compress (always)
+**The verdict** next to each block is a data check, not a decision:
 
-Raw GoPro files are 2–10 GB and will make every downstream step painful. Compress first to ≤50 MB.
-
-```bash
-video-compress-rapid \
-  --video video_inference/data/camera_a_raw.mov \
-  --video video_inference/data/camera_b_raw.mov \
-  --output-dir video_inference/compressed
-```
-
-Replace the two `--video …` paths with your actual filenames (e.g. `P001c_Short_Full.mov`). You can also pass `--input-dir video_inference/data/` to compress every video in that folder.
-
-Expect roughly **5–10 minutes per hour of raw footage** on a laptop. You'll see a one-line "Compressing … this can take several minutes" message and then nothing until it prints the output size — that silence is normal, ffmpeg just doesn't report progress.
-
-Output: `video_inference/compressed/<name>_rapid.mp4`. Use those paths everywhere downstream and add `--skip-compress` to the next step.
-
----
-
-## 4. Run pose inference
-
-```bash
-video-infer run \
-  --video-a video_inference/compressed/camera_a_raw_rapid.mp4 \
-  --video-b video_inference/compressed/camera_b_raw_rapid.mp4 \
-  --inference-backend ultralytics \
-  --ultralytics-model-path yolo11m-pose.pt \
-  --tracker-backend roboflow \
-  --tracker-name bytetrack \
-  --max-persons 4 \
-  --frame-rate 5 \
-  --device auto \
-  --skip-compress \
-  --session-id P001c
-```
-
-What this does: extracts frames at 5 fps, detects up to 4 people per frame with YOLO11m-pose, and tracks them across frames with ByteTrack. We allow up to 4 detected people (`--max-persons 4`) so the pipeline doesn't drop the parent/child if an experimenter briefly enters; you'll prune to two in step 5.
-
-Outputs per camera in `video_inference/output/P001c/<camera>/`:
-- `manifest.json`
-- `tracks_2d.csv` (bounding boxes + track IDs)
-- `pose_3d.csv` (17 COCO keypoints per person per frame)
-- `frames/frame_*.jpg`
-- `intermediate/inference_raw.json`
-
-If the run takes too long on CPU, drop to `--frame-rate 1` for a fast preview pass.
-
----
-
-## 5. Clean up tracks (the "experimenter walked in" step)
-
-Most of the time `video-filter-tracks` is all you need. It keeps the two most persistent tracks within each block and assigns parent=0 / child=1 by mean bbox area:
-
-```bash
-video-filter-tracks \
-  --session-dir video_inference/output/P001c \
-  --camera camera_a \
-  --blocks "grocery_free_play,13:26,23:40;synchrony_intervention,27:56,28:45;storybook_reading,29:22,37:06" \
-  --source-fps 5.0 \
-  --n-keep 2
-```
-
-`--source-fps` must match the `--frame-rate` you used in step 4.
-
-Outputs: `tracks_2d_filtered.csv` and `pose_3d_filtered.csv` next to the originals.
-
-**When the auto-assignment is wrong** (parent and child swapped, or filter kept the experimenter and dropped the child), open the interactive annotator:
-
-```bash
-video-annotate-tracks \
-  --session-dir video_inference/output/P001c \
-  --camera camera_a \
-  --start-time 8:00 --end-time 9:00
-```
-
-Controls: click a bounding box, press `0`–`3` to reassign its track ID, `P` to propagate the correction forward, `S` to save, `Q` to quit. Writes `track_corrections.json`. Then apply:
-
-```bash
-video-correct-tracks --session-dir video_inference/output/P001c --camera camera_a
-```
-
-That produces `tracks_2d_corrected.csv` / `pose_3d_corrected.csv`. Re-run `video-filter-tracks` pointing at the corrected files if you want filtered + corrected output.
-
-Repeat for `--camera camera_b` if you have two cameras.
-
----
-
-## 6. Smooth (optional but recommended)
-
-Pose detections jitter frame-to-frame. Smooth with a confidence-gated EMA — high-confidence points are kept as-is, low-confidence points get smoothed:
-
-```bash
-video-smooth \
-  --camera-dir video_inference/output/P001c/camera_a \
-  --pose-input pose_3d_filtered.csv \
-  --tracks-input tracks_2d_filtered.csv \
-  --tau 0.15 --conf-gate 0.3
-```
-
-Outputs: `pose_3d_smooth.csv`, `tracks_2d_smooth.csv`, `smoothing_summary.json`.
-
-> **Always pass `--pose-input` / `--tracks-input` explicitly.** The defaults across CLIs are inconsistent (`video-smooth` looks for `_interpolated.csv`; `video-gaze-metrics` looks for `_filtered_5hz.csv`). Pointing them at the file you actually have is the only safe way.
-
----
-
-## 7. Compute per-block metrics
-
-**Pose metrics** (torso proximity, movement cross-correlation):
-
-```bash
-video-pose-metrics \
-  --camera-dir video_inference/output/P001c/camera_a \
-  --session-config session_config.json \
-  --pose-input pose_3d_smooth.csv
-```
-
-**Gaze metrics** (mutual gaze, joint attention, gaze convergence) — requires running `gaze-infer` first; see [PIPELINE.md](PIPELINE.md#stage-5bd--gaze).
-
-```bash
-gaze-infer \
-  --camera-dir video_inference/output/P001c/camera_a \
-  --session-config session_config.json \
-  --pose-input pose_3d_smooth.csv \
-  --tracks-input tracks_2d_smooth.csv
-
-video-gaze-metrics \
-  --camera-dir video_inference/output/P001c/camera_a \
-  --session-config session_config.json \
-  --pose-input pose_3d_smooth.csv \
-  --tracks-input tracks_2d_smooth.csv
-```
-
-Both metrics CLIs write per-block plots (PNG) and a metrics CSV into the camera directory.
-
----
-
-## 8. Sanity-check the tracking
-
-Overlay videos let you eyeball whether the pose tracking actually matched the right people:
-
-```bash
-# 2D overlay (bounding boxes + skeletons on the frames)
-video-visualize \
-  --camera-dir video_inference/output/P001c/camera_a \
-  --tracks-input tracks_2d_filtered.csv \
-  --pose-input  pose_3d_filtered.csv
-
-# 3D skeletons in matplotlib (optional)
-video-visualize-3d \
-  --pose-csv  video_inference/output/P001c/camera_a/pose_3d_smooth.csv \
-  --output-dir video_inference/output/P001c/camera_a/viz_3d
-```
-
-If the overlay looks wrong, go back to step 5.
-
----
-
-## What you hand back
-
-Per session, the deliverables live under `video_inference/output/<session_id>/<camera>/`:
-
-| File | Purpose |
+| Verdict | Meaning |
 |---|---|
-| `tracks_2d_smooth.csv`, `pose_3d_smooth.csv` | Cleaned per-frame data for downstream analysis |
-| `pose_metrics_*.png`, `gaze_metrics_*.png` | Per-block summary plots |
-| `synchrony_metrics.csv`, `gaze_metrics.csv` | Numeric metrics per block, one row per frame |
-| `viz/*.mp4` | Sanity-check overlay videos |
+| Usable | Enough data with both people tracked. |
+| Check | Both people tracked less than half the time, or too few unbroken 20-second stretches to measure movement synchrony. Watch the clips. |
+| Not enough data | Both people tracked for less than 60 s in total. |
 
-Full schema definitions: [OUTPUTS.md](OUTPUTS.md).
+Which blocks to include in analyses is a lab decision. Make it before looking
+at the results, and use the same rule for every session.
+
+**The tables** (in the session folder and the zip):
+
+| File | One row per | Use it for |
+|---|---|---|
+| `task_metrics.csv` | camera and task, pieces joined back together | analyses at the task level |
+| `session_metrics.csv` | camera and block (piece) | checking individual pieces |
+| `all_sessions_task_metrics.csv` (portal home page) | every session, camera and task | the study table |
+
+Key columns:
+
+- `coverage_both`, `valid_seconds_both`: share and seconds of the time with
+  both people tracked.
+- `proximity_mean`, `proximity_median`: distance between the two torsos in
+  image pixels. Compare within a camera, not across cameras.
+- `sync_mean` and `sync_chance_mean`: movement synchrony (how closely the
+  amount of whole-body movement of the two rises and falls together, in
+  20-second windows) and the same measure with the child's movement taken
+  from other moments. Only `sync_minus_chance` above zero reflects the
+  interaction.
+- `gaze_<category>_pct` and `gaze_<category>_chance_pct`: share of frames in
+  each gaze category and its chance level. A category means something only
+  when it clearly exceeds chance.
+- `quality_verdict`, `quality_reasons`: the verdict above.
+- `metrics_version`: rows with different versions were computed differently;
+  do not pool them. Re-submit older sessions instead.
+
+Pieces of a task are joined by pooling, not averaging: distances from all
+frames, synchrony from all 20-second windows, gaze shares weighted by frames.
+A window never spans the gap between pieces.
+
+Every column is described in [OUTPUTS.md](OUTPUTS.md); the zip also has a
+`README.md`.
+
+## 7. When something looks off
+
+| You see | Likely cause | What to do |
+|---|---|---|
+| Low coverage in one camera only | That camera's view was blocked or the child was out of view | Use the other camera for that task |
+| Boxes on the wrong person in a clip | A third person, or parent/child mixed up | Add an extra-person window, or re-submit and label more carefully |
+| A box on an object | Something close to the lens | Exclude that block; fix camera placement next time |
+| The job failed | Shown on the job page with the stage that failed | Open "technical details" and send them to Felipe |
 
 ---
 
-## When something looks off
+## By hand
 
-- **Two cameras disagree on parent/child**: check `camera_mappings` in `session_config.json`, or re-run `video-filter-tracks` on each camera separately.
-- **A third person shows up in a metric**: re-do step 5 with `video-annotate-tracks`. If the pipeline ran with `--max-persons 2`, redo step 4 with `--max-persons 4` so the extra detection doesn't clobber the real tracks.
-- **Pose looks broken**: bump to `yolo11m-pose.pt` (already in repo root) or try `--inference-backend rtmlib --rtmlib-3d` for a different model. See [PIPELINE.md](PIPELINE.md#backends).
-- **Whole-pipeline reference**: [PIPELINE.md](PIPELINE.md). **Output column dictionaries**: [OUTPUTS.md](OUTPUTS.md). **Inputs (formats, conventions)**: [INPUTS.md](INPUTS.md).
-- **EEG synchronization** (optional, separate workflow): see top-level [README.md](../README.md#optional-eeg-video-synchronization).
+The portal runs a fixed chain of command-line steps (pose inference with the
+offline two-person tracker, parent labels, keypoint refinement, gap filling,
+smoothing, metrics, report). To run them yourself, follow
+[PIPELINE.md](PIPELINE.md); output columns are in [OUTPUTS.md](OUTPUTS.md) and
+input formats in [INPUTS.md](INPUTS.md). Install with `uv`
+(`uv pip install -e ".[dev,video,gaze]"`); ffmpeg must be on `PATH`. Always
+compress raw videos first.
+
+EEG synchronization is a separate workflow: see the
+[README](../README.md#optional-eeg-video-synchronization).
