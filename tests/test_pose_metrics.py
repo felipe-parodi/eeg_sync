@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -129,3 +130,15 @@ def test_block_stats_report_tracking_coverage() -> None:
     # A block with no tracking at all is still reported, flagged.
     assert stats["empty"]["frames_with_both"] == 0
     assert stats["empty"]["low_coverage"] is True
+
+
+def test_block_stats_include_synchrony_chance_baseline():
+    """Each block reports the shifted-child baseline and the difference."""
+    blocks = [SessionBlock("b", 0.0, 60.0, "#999")]
+    pose_df = _make_pose_df(6 * 60, fps=6.0)
+    stats = compute_per_block_metrics(pose_df, blocks, frame_rate=6.0)["block_stats"][0]
+
+    assert "xcorr_chance_mean" in stats
+    assert stats["xcorr_minus_chance"] == pytest.approx(
+        stats["xcorr_mean"] - stats["xcorr_chance_mean"]
+    )

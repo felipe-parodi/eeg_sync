@@ -61,8 +61,8 @@ New `task_metrics.csv`: one row per camera x task (`<task>_partN` rejoined).
   gaze chance), recompute, and write `xcorr_chance_mean` and
   `xcorr_minus_chance`.
 - Tests: identical signals score well above chance; independent noise gives
-  `xcorr_minus_chance` near 0; blocks shorter than 2 x shift fall back to NaN with
-  a reason.
+  `xcorr_minus_chance` near 0; when less than 2 x shift of usable data exists,
+  shift by half of it (same rule as the gaze chance level).
 - Re-check 1016v3 and 1018v3 after phases 1-2. If synchrony is still at chance,
   report that to the user before going further (possible next steps: lag-0
   correlation, longer windows, or keypoint-level motion energy instead of torso

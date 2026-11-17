@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
@@ -240,6 +241,119 @@ def _window_xcorr(
     return max(0.0, best_r), best_lag
 
 
+# Chance baseline: shift the child's movement by this much (or half the
+# both-tracked data when shorter), matching the gaze chance convention.
+XCORR_CHANCE_SHIFT_S = 60.0
+
+
+@dataclass
+class _SpeedRuns:
+    """Parent and child speed inside each contiguous both-tracked run."""
+
+    run_ids: list[int]
+    timestamps: list[np.ndarray]
+    parent_speed: list[np.ndarray]
+    child_speed: list[np.ndarray]
+    dt: float
+    window_frames: int
+    max_lag_frames: int
+
+
+def _speed_runs(
+    pose_df: pd.DataFrame,
+    parent_track_id: int,
+    child_track_id: int,
+    window_s: float,
+    max_lag_s: float,
+) -> _SpeedRuns | None:
+    """Split both-tracked frames into gap-free runs and compute speed in each.
+
+    Args:
+        pose_df: Pose DataFrame (pose_3d schema).
+        parent_track_id: Track ID for the parent.
+        child_track_id: Track ID for the child.
+        window_s: Window duration in seconds.
+        max_lag_s: Maximum lag in seconds.
+
+    Returns:
+        Speed series for runs at least one window long, or None when there
+        are no both-tracked frames.
+    """
+    if pose_df.empty:
+        return None
+    parent_c = _torso_centroid(pose_df, parent_track_id)
+    child_c = _torso_centroid(pose_df, child_track_id)
+    both = (
+        parent_c.merge(child_c, on="frame_idx", suffixes=("_p", "_c"))
+        .sort_values("timestamp_s_p")
+        .reset_index(drop=True)
+    )
+    if both.empty:
+        return None
+
+    dt = _frame_interval(pose_df)
+    # Floor (with float tolerance) so the search never exceeds max_lag_s.
+    max_lag_frames = max(1, int(np.floor(max_lag_s / dt + 1e-9)))
+    window_frames = max(2 * max_lag_frames + 1, int(round(window_s / dt)))
+    runs = _SpeedRuns([], [], [], [], dt, window_frames, max_lag_frames)
+
+    run_ids = contiguous_runs(both["timestamp_s_p"].to_numpy(float), dt)
+    columns = ["frame_idx", "timestamp_s", "cx", "cy"]
+    for run_id in np.unique(run_ids):
+        run = both[run_ids == run_id]
+        if len(run) < window_frames:
+            continue
+        parent_v = _compute_velocity(
+            run[["frame_idx", "timestamp_s_p", "cx_p", "cy_p"]].set_axis(
+                columns, axis=1
+            )
+        )
+        child_v = _compute_velocity(
+            run[["frame_idx", "timestamp_s_p", "cx_c", "cy_c"]].set_axis(
+                columns, axis=1
+            )
+        )
+        runs.run_ids.append(int(run_id))
+        runs.timestamps.append(parent_v["timestamp_s"].to_numpy(float))
+        runs.parent_speed.append(parent_v["speed"].to_numpy(float))
+        runs.child_speed.append(child_v["speed"].to_numpy(float))
+    return runs
+
+
+def _windowed_xcorr(runs: _SpeedRuns, child_speed: list[np.ndarray]) -> pd.DataFrame:
+    """Slide half-overlapping windows inside each run and score each one.
+
+    Args:
+        runs: Speed runs from :func:`_speed_runs`.
+        child_speed: Child speed per run (the real series, or a shifted one).
+
+    Returns:
+        One row per window with the :data:`XCORR_COLUMNS` columns.
+    """
+    step = max(1, runs.window_frames // 2)
+    results = []
+    for run_id, ts, speed_p, speed_c in zip(
+        runs.run_ids, runs.timestamps, runs.parent_speed, child_speed
+    ):
+        for start_idx in range(0, len(ts) - runs.window_frames + 1, step):
+            end_idx = start_idx + runs.window_frames
+            peak_r, lag = _window_xcorr(
+                speed_p[start_idx:end_idx],
+                speed_c[start_idx:end_idx],
+                runs.max_lag_frames,
+            )
+            results.append(
+                {
+                    "segment_id": run_id,
+                    "window_start_s": ts[start_idx],
+                    "window_end_s": ts[end_idx - 1],
+                    "peak_xcorr": peak_r,
+                    "peak_lag_s": lag * runs.dt,
+                }
+            )
+    return pd.DataFrame(results, columns=XCORR_COLUMNS)
+
+
 def compute_movement_xcorr(
     pose_df: pd.DataFrame,
     parent_track_id: int = 0,
@@ -265,66 +379,50 @@ def compute_movement_xcorr(
         DataFrame with segment_id, window_start_s, window_end_s, peak_xcorr,
         peak_lag_s (positive lag = child follows parent).
     """
-    empty = pd.DataFrame(columns=XCORR_COLUMNS)
-    if pose_df.empty:
-        return empty
+    runs = _speed_runs(pose_df, parent_track_id, child_track_id, window_s, max_lag_s)
+    if runs is None:
+        return pd.DataFrame(columns=XCORR_COLUMNS)
+    return _windowed_xcorr(runs, runs.child_speed)
 
-    parent_c = _torso_centroid(pose_df, parent_track_id)
-    child_c = _torso_centroid(pose_df, child_track_id)
-    both = (
-        parent_c.merge(child_c, on="frame_idx", suffixes=("_p", "_c"))
-        .sort_values("timestamp_s_p")
-        .reset_index(drop=True)
-    )
-    if both.empty:
-        return empty
 
-    dt = _frame_interval(pose_df)
-    # Floor (with float tolerance) so the search never exceeds max_lag_s.
-    max_lag_frames = max(1, int(np.floor(max_lag_s / dt + 1e-9)))
-    window_frames = max(2 * max_lag_frames + 1, int(round(window_s / dt)))
-    step = max(1, window_frames // 2)
+def compute_movement_xcorr_chance(
+    pose_df: pd.DataFrame,
+    parent_track_id: int = 0,
+    child_track_id: int = 1,
+    window_s: float = 5.0,
+    max_lag_s: float = 2.0,
+    shift_s: float = XCORR_CHANCE_SHIFT_S,
+) -> pd.DataFrame:
+    """Movement cross-correlation expected by chance.
 
-    timestamps = both["timestamp_s_p"].to_numpy(float)
-    run_ids = contiguous_runs(timestamps, dt)
+    Same windows as :func:`compute_movement_xcorr`, but the child's speed is
+    shifted circularly by ``shift_s`` (or half the usable data when that is
+    shorter) across the concatenated runs, so it is paired with the parent's
+    movement from a different moment. Real synchrony should clearly exceed
+    this level. Speeds are computed within runs before shifting, so the
+    splice points between runs do not add spurious movement.
 
-    results = []
-    for run_id in np.unique(run_ids):
-        run = both[run_ids == run_id]
-        if len(run) < window_frames:
-            continue
-        parent_v = _compute_velocity(
-            run[["frame_idx", "timestamp_s_p", "cx_p", "cy_p"]].set_axis(
-                ["frame_idx", "timestamp_s", "cx", "cy"], axis=1
-            )
-        )
-        child_v = _compute_velocity(
-            run[["frame_idx", "timestamp_s_p", "cx_c", "cy_c"]].set_axis(
-                ["frame_idx", "timestamp_s", "cx", "cy"], axis=1
-            )
-        )
-        ts = parent_v["timestamp_s"].to_numpy(float)
-        speed_p = parent_v["speed"].to_numpy(float)
-        speed_c = child_v["speed"].to_numpy(float)
+    Args:
+        pose_df: Pose DataFrame (pose_3d schema).
+        parent_track_id: Track ID for the parent.
+        child_track_id: Track ID for the child.
+        window_s: Window duration in seconds.
+        max_lag_s: Maximum lag in seconds for cross-correlation.
+        shift_s: Time shift applied to the child, in seconds.
 
-        for start_idx in range(0, len(ts) - window_frames + 1, step):
-            end_idx = start_idx + window_frames
-            peak_r, lag = _window_xcorr(
-                speed_p[start_idx:end_idx], speed_c[start_idx:end_idx], max_lag_frames
-            )
-            results.append(
-                {
-                    "segment_id": int(run_id),
-                    "window_start_s": ts[start_idx],
-                    "window_end_s": ts[end_idx - 1],
-                    "peak_xcorr": peak_r,
-                    "peak_lag_s": lag * dt,
-                }
-            )
-
-    if not results:
-        return empty
-    return pd.DataFrame(results, columns=XCORR_COLUMNS)
+    Returns:
+        DataFrame with the :data:`XCORR_COLUMNS` columns (window times are
+        the parent's).
+    """
+    runs = _speed_runs(pose_df, parent_track_id, child_track_id, window_s, max_lag_s)
+    if runs is None or not runs.run_ids:
+        return pd.DataFrame(columns=XCORR_COLUMNS)
+    child_all = np.concatenate(runs.child_speed)
+    n = len(child_all)
+    shift = min(int(round(shift_s / runs.dt)), n // 2)
+    shifted = np.roll(child_all, -shift)
+    bounds = np.cumsum([len(s) for s in runs.child_speed])[:-1]
+    return _windowed_xcorr(runs, np.split(shifted, bounds))
 
 
 # ====================================================================

@@ -477,3 +477,52 @@ def test_xcorr_lag_search_stays_within_max_lag() -> None:
 
     assert not result.empty
     assert (result["peak_lag_s"].abs() <= 0.3 + 1e-9).all()
+
+
+# ---- Chance baseline (metrics-validity plan, phase 2) ----
+
+
+def test_xcorr_chance_is_well_below_real_for_shared_movement() -> None:
+    """When the child copies the parent, real synchrony beats the shifted baseline."""
+    from gaze_analysis.synchrony import compute_movement_xcorr_chance
+
+    rng = np.random.default_rng(5)
+    ts = np.arange(0, 180, 1 / 6.0)
+    parent = 200.0 + np.cumsum(rng.normal(0, 3, len(ts)))
+    pose_df = _make_pose_df_at(ts, parent, parent + 40.0)
+
+    real = compute_movement_xcorr(pose_df, 0, 1, window_s=5.0, max_lag_s=2.0)
+    chance = compute_movement_xcorr_chance(pose_df, 0, 1, window_s=5.0, max_lag_s=2.0)
+
+    assert real["peak_xcorr"].mean() - chance["peak_xcorr"].mean() > 0.3
+
+
+def test_xcorr_chance_matches_real_for_independent_movement() -> None:
+    """Unrelated movement: real and shifted baseline are about equal."""
+    from gaze_analysis.synchrony import compute_movement_xcorr_chance
+
+    rng = np.random.default_rng(6)
+    ts = np.arange(0, 600, 1 / 6.0)
+    parent = 200.0 + np.cumsum(rng.normal(0, 3, len(ts)))
+    child = 400.0 + np.cumsum(rng.normal(0, 3, len(ts)))
+    pose_df = _make_pose_df_at(ts, parent, child)
+
+    real = compute_movement_xcorr(pose_df, 0, 1, window_s=5.0, max_lag_s=2.0)
+    chance = compute_movement_xcorr_chance(pose_df, 0, 1, window_s=5.0, max_lag_s=2.0)
+
+    assert abs(real["peak_xcorr"].mean() - chance["peak_xcorr"].mean()) < 0.05
+
+
+def test_xcorr_chance_short_block_uses_half_its_length() -> None:
+    """A 40 s block cannot shift by 60 s; it shifts by half its length instead."""
+    from gaze_analysis.synchrony import compute_movement_xcorr_chance
+
+    rng = np.random.default_rng(7)
+    ts = np.arange(0, 40, 1 / 6.0)
+    parent = 200.0 + np.cumsum(rng.normal(0, 3, len(ts)))
+    pose_df = _make_pose_df_at(ts, parent, parent)
+
+    chance = compute_movement_xcorr_chance(pose_df, 0, 1, window_s=5.0, max_lag_s=2.0)
+
+    assert not chance.empty
+    assert chance["peak_xcorr"].mean() < 0.9

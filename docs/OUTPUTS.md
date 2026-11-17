@@ -199,6 +199,7 @@ that camera's own clock.
 | `low_coverage` | `true` when `coverage_both` < 0.5: interpret the block's metrics with care. |
 | `proximity_mean/std/median/n_frames` | Torso distance (pixels). |
 | `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows` | Movement synchrony in 5 s windows. Windows sit inside unbroken stretches where both people are tracked and never cross a gap; stretches shorter than 5 s give no window. |
+| `xcorr_chance_mean`, `xcorr_minus_chance` | The same synchrony score with the child's movement shifted 60 s (half the usable data when shorter), i.e. the level expected by chance, and the real score minus it. Synchrony is meaningful only when `xcorr_minus_chance` is clearly above 0. |
 
 Frame-level tables: `pose_metrics_proximity.csv` and `pose_metrics_xcorr.csv`.
 

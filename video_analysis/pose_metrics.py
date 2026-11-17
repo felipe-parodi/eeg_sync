@@ -18,6 +18,7 @@ import pandas as pd
 from gaze_analysis.config import SessionBlock, load_session_config
 from gaze_analysis.synchrony import (
     compute_movement_xcorr,
+    compute_movement_xcorr_chance,
     compute_torso_proximity,
 )
 
@@ -165,6 +166,14 @@ def compute_per_block_metrics(
             stats["lag_mean_s"] = float(xcorr["peak_lag_s"].mean())
             stats["lag_std_s"] = float(xcorr["peak_lag_s"].std())
             stats["xcorr_n_windows"] = len(xcorr)
+            chance = compute_movement_xcorr_chance(
+                block_pose, parent_id, child_id, xcorr_window_s, xcorr_max_lag_s
+            )
+            if not chance.empty:
+                stats["xcorr_chance_mean"] = float(chance["peak_xcorr"].mean())
+                stats["xcorr_minus_chance"] = (
+                    stats["xcorr_mean"] - stats["xcorr_chance_mean"]
+                )
         block_stats.append(stats)
 
     proximity_df = (
