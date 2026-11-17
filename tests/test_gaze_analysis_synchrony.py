@@ -643,3 +643,26 @@ def test_body_sync_chance_averages_several_shifts() -> None:
     walk = _random_walk(len(short), 7)
     _, chance = compute_movement_sync(_make_body_pose(short, walk, walk), 0, 1)
     assert list(chance["shift_s"].unique()) == [45.0]
+
+
+def test_body_sync_brief_low_confidence_outlier_does_not_leak() -> None:
+    """A one-frame, low-confidence position glitch must not raise the speed of
+    the neighbouring (confident) frames, which a plain gradient would do."""
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 120, 0.2), 6)
+    walk = _random_walk(len(ts), 8)
+    clean_pose = _make_body_pose(ts, walk, walk)
+    glitch_pose = clean_pose.copy()
+    hit = (
+        (glitch_pose["track_id"] == 0)
+        & (glitch_pose["keypoint_name"] == "kp_003")
+        & np.isclose(glitch_pose["timestamp_s"], ts[100])
+    )
+    glitch_pose.loc[hit, "x_m"] += 1000.0
+    glitch_pose.loc[hit, "keypoint_confidence"] = 0.1
+
+    clean, _ = compute_movement_sync(clean_pose, 0, 1)
+    glitch, _ = compute_movement_sync(glitch_pose, 0, 1)
+
+    np.testing.assert_allclose(clean["sync_r"], glitch["sync_r"], atol=1e-9)

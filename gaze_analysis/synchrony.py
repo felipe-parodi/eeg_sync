@@ -464,17 +464,23 @@ def _body_energy(
 ) -> np.ndarray:
     """Mean keypoint speed per frame, over keypoints tracked confidently.
 
-    Speed is a central difference in time within one gap-free run. Keypoints
-    below ``conf_min`` (or missing) in a frame are ignored there; a frame with
-    no usable keypoint takes the run's mean energy.
+    Speed is a central difference in time within one gap-free run, using only
+    positions with confidence >= ``conf_min``: a speed is kept only when every
+    position it is computed from is confident (or present). A frame with no
+    usable keypoint takes the run's mean energy.
 
     Returns:
         Motion energy per frame, in pixels per second.
     """
     if len(t) < 2:
         return np.zeros(len(t))
+    # Blank unreliable positions before differencing, so a low-confidence
+    # glitch cannot leak into the speed of its confident neighbours.
+    unreliable = ~(conf >= conf_min)
+    x = np.where(unreliable, np.nan, x)
+    y = np.where(unreliable, np.nan, y)
     speed = np.hypot(np.gradient(x, t, axis=0), np.gradient(y, t, axis=0))
-    speed[(conf < conf_min) | ~np.isfinite(speed)] = np.nan
+    speed[unreliable | ~np.isfinite(speed)] = np.nan
     with np.errstate(all="ignore"):
         energy = np.nanmean(speed, axis=1)
     fill = float(np.nanmean(energy)) if np.isfinite(energy).any() else 0.0
