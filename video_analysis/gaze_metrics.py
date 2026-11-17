@@ -167,16 +167,18 @@ def compute_per_block_gaze_metrics(
             # Chance level: the same block with the child's gaze shifted in
             # time, so only seating positions and box sizes remain.
             shift = chance_shift_rows(frames)
-            for key, value in chance_shares(frames, shift).items():
-                stats[key.replace("_pct", "_chance_pct")] = value
+            if shift > 0:  # blocks under 40 s get no chance level
+                for key, value in chance_shares(frames, shift).items():
+                    stats[key.replace("_pct", "_chance_pct")] = value
         if all_convergence and all_convergence[-1]["block"].iloc[0] == block.name:
             conv_vals = all_convergence[-1]["gaze_convergence_score"]
             stats["convergence_mean"] = float(conv_vals.mean())
             stats["convergence_std"] = float(conv_vals.std())
             stats["convergence_n_frames"] = len(conv_vals)
-            stats["convergence_chance"] = _chance_convergence(
-                heatmaps, hm_keys, block_frames, parent_id, child_id
-            )
+            if chance_shift_rows(frames) > 0:
+                stats["convergence_chance"] = _chance_convergence(
+                    heatmaps, hm_keys, block_frames, parent_id, child_id
+                )
         block_stats.append(stats)
 
     categories_df = (

@@ -62,7 +62,9 @@ def _boxes(series: pd.Series) -> np.ndarray:
     return out
 
 
-def _inside(x: np.ndarray, y: np.ndarray, box: np.ndarray, scale: float = 1.0) -> np.ndarray:
+def _inside(
+    x: np.ndarray, y: np.ndarray, box: np.ndarray, scale: float = 1.0
+) -> np.ndarray:
     cx = (box[:, 0] + box[:, 2]) / 2
     cy = (box[:, 1] + box[:, 3]) / 2
     hw = (box[:, 2] - box[:, 0]) / 2 * scale
@@ -210,9 +212,11 @@ def build_frame_table(
                 "timestamp_s": g["timestamp_s"].to_numpy(float),
                 f"{prefix}_gx": g["gaze_peak_x"].to_numpy(float) * width,
                 f"{prefix}_gy": g["gaze_peak_y"].to_numpy(float) * height,
-                f"{prefix}_in": g["inout_score"].to_numpy(float)
-                if "inout_score" in g
-                else np.ones(len(g)),
+                f"{prefix}_in": (
+                    g["inout_score"].to_numpy(float)
+                    if "inout_score" in g
+                    else np.ones(len(g))
+                ),
             }
         )
         heads = head_boxes_df[head_boxes_df["track_id"] == track_id]
@@ -242,9 +246,7 @@ def build_frame_table(
     return frames.reset_index(drop=True)
 
 
-def gaze_categories(
-    frames: pd.DataFrame, smooth: bool = True
-) -> pd.DataFrame:
+def gaze_categories(frames: pd.DataFrame, smooth: bool = True) -> pd.DataFrame:
     """Classify a frame table and absorb one-frame blips.
 
     Args:
@@ -266,14 +268,25 @@ def gaze_categories(
     )
 
 
+# Shorter shifts leave the child's gaze too close in time to the parent's for
+# the chance level to mean "unrelated"; such blocks get no chance level.
+MIN_CHANCE_SHIFT_S = 20.0
+
+
 def chance_shift_rows(frames: pd.DataFrame, shift_s: float = CHANCE_SHIFT_S) -> int:
-    """Rows corresponding to ``shift_s`` (half the block if it is shorter)."""
+    """Rows corresponding to ``shift_s`` (half the block if it is shorter).
+
+    Returns 0 (no chance level) when that shift would be under
+    ``MIN_CHANCE_SHIFT_S``, i.e. for blocks with under 40 s of data.
+    """
     if len(frames) < 2:
         return 0
     span = float(frames["timestamp_s"].iloc[-1] - frames["timestamp_s"].iloc[0])
+    shift = min(shift_s, span / 2)
+    if shift < MIN_CHANCE_SHIFT_S:
+        return 0
     per_row = span / (len(frames) - 1) if span > 0 else 1.0
-    rows = int(round(min(shift_s, span / 2) / per_row))
-    return max(1, rows)
+    return max(1, int(round(shift / per_row)))
 
 
 def heatmap_overlap(a: np.ndarray, b: np.ndarray) -> float:
@@ -291,4 +304,3 @@ def heatmap_overlap(a: np.ndarray, b: np.ndarray) -> float:
             return 0.0
         out.append(h / s)
     return float(np.minimum(out[0], out[1]).sum())
-

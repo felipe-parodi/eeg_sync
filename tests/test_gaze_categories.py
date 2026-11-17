@@ -29,10 +29,16 @@ def _row(p_pt, c_pt, p_in=0.9, c_in=0.9, **extra):
     row = {
         "frame_idx": 0,
         "timestamp_s": 0.0,
-        "p_gx": p_pt[0], "p_gy": p_pt[1], "p_in": p_in,
-        "c_gx": c_pt[0], "c_gy": c_pt[1], "c_in": c_in,
-        "p_head": P_HEAD, "c_head": C_HEAD,
-        "p_body": P_BODY, "c_body": C_BODY,
+        "p_gx": p_pt[0],
+        "p_gy": p_pt[1],
+        "p_in": p_in,
+        "c_gx": c_pt[0],
+        "c_gy": c_pt[1],
+        "c_in": c_in,
+        "p_head": P_HEAD,
+        "c_head": C_HEAD,
+        "p_body": P_BODY,
+        "c_body": C_BODY,
     }
     row.update(extra)
     return row
@@ -83,7 +89,9 @@ def test_absorb_blips_only_fills_single_consecutive_frames() -> None:
 
 
 def test_category_shares_sum_to_100() -> None:
-    shares = category_shares(pd.Series(["mutual_gaze", "unknown", "unknown", "independent"]))
+    shares = category_shares(
+        pd.Series(["mutual_gaze", "unknown", "unknown", "independent"])
+    )
     assert set(shares) == {f"{c}_pct" for c in CATEGORIES}
     assert shares["unknown_pct"] == 50.0
     assert sum(shares.values()) == pytest.approx(100.0)
@@ -112,24 +120,62 @@ def test_chance_shares_break_the_pairing() -> None:
 def test_build_frame_table_joins_gaze_heads_and_bodies() -> None:
     gaze = pd.DataFrame(
         [
-            {"frame_idx": 5, "timestamp_s": 1.0, "track_id": 0, "gaze_peak_x": 0.75,
-             "gaze_peak_y": 0.4, "inout_score": 0.9},
-            {"frame_idx": 5, "timestamp_s": 1.0, "track_id": 1, "gaze_peak_x": 0.135,
-             "gaze_peak_y": 0.24, "inout_score": 0.8},
+            {
+                "frame_idx": 5,
+                "timestamp_s": 1.0,
+                "track_id": 0,
+                "gaze_peak_x": 0.75,
+                "gaze_peak_y": 0.4,
+                "inout_score": 0.9,
+            },
+            {
+                "frame_idx": 5,
+                "timestamp_s": 1.0,
+                "track_id": 1,
+                "gaze_peak_x": 0.135,
+                "gaze_peak_y": 0.24,
+                "inout_score": 0.8,
+            },
         ]
     )
     heads = pd.DataFrame(
         [
-            {"frame_idx": 5, "track_id": 0, "head_x1": 100 / 960, "head_y1": 100 / 540,
-             "head_x2": 160 / 960, "head_y2": 160 / 540},
-            {"frame_idx": 5, "track_id": 1, "head_x1": 700 / 960, "head_y1": 200 / 540,
-             "head_x2": 740 / 960, "head_y2": 240 / 540},
+            {
+                "frame_idx": 5,
+                "track_id": 0,
+                "head_x1": 100 / 960,
+                "head_y1": 100 / 540,
+                "head_x2": 160 / 960,
+                "head_y2": 160 / 540,
+            },
+            {
+                "frame_idx": 5,
+                "track_id": 1,
+                "head_x1": 700 / 960,
+                "head_y1": 200 / 540,
+                "head_x2": 740 / 960,
+                "head_y2": 240 / 540,
+            },
         ]
     )
     tracks = pd.DataFrame(
         [
-            {"frame_idx": 5, "track_id": 0, "bbox_x1": 80, "bbox_y1": 100, "bbox_x2": 200, "bbox_y2": 500},
-            {"frame_idx": 5, "track_id": 1, "bbox_x1": 680, "bbox_y1": 200, "bbox_x2": 760, "bbox_y2": 450},
+            {
+                "frame_idx": 5,
+                "track_id": 0,
+                "bbox_x1": 80,
+                "bbox_y1": 100,
+                "bbox_x2": 200,
+                "bbox_y2": 500,
+            },
+            {
+                "frame_idx": 5,
+                "track_id": 1,
+                "bbox_x1": 680,
+                "bbox_y1": 200,
+                "bbox_x2": 760,
+                "bbox_y2": 450,
+            },
         ]
     )
     frames = build_frame_table(gaze, heads, tracks, image_size=(960, 540))
@@ -140,3 +186,16 @@ def test_build_frame_table_joins_gaze_heads_and_bodies() -> None:
     assert row["c_in"] == pytest.approx(0.8)
     assert tuple(row["c_head"]) == pytest.approx((700, 200, 740, 240))
     assert classify_frames(frames).tolist() == ["mutual_gaze"]
+
+
+def test_chance_shift_rows_zero_for_very_short_blocks() -> None:
+    """A 2 s block cannot give a meaningful chance level (shift would be 1 s)."""
+    import pandas as pd
+
+    from gaze_analysis.gaze_categories import chance_shift_rows
+
+    short = pd.DataFrame({"timestamp_s": [i * 0.2 for i in range(11)]})
+    long = pd.DataFrame({"timestamp_s": [i * 0.2 for i in range(1000)]})
+
+    assert chance_shift_rows(short) == 0
+    assert chance_shift_rows(long) == 300  # 60 s at 0.2 s per row

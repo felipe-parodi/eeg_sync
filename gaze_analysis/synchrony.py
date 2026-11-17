@@ -28,6 +28,7 @@ from gaze_analysis.config import (
     resolve_time_range,
 )
 from gaze_analysis.gaze_categories import (
+    MIN_CHANCE_SHIFT_S,
     build_frame_table,
     gaze_categories,
     heatmap_overlap,
@@ -602,6 +603,8 @@ def compute_movement_sync(
         shifted = np.split(np.roll(child_all, -shift), bounds)
         table = _lag0_windows(run_ids, times, parent, shifted, window_frames)
         chance_tables.append(table.assign(shift_s=round(shift * dt, 6)))
+    if not chance_tables:
+        return real, empty.copy()
     chance = pd.concat(chance_tables, ignore_index=True)
     return real, chance
 
@@ -616,7 +619,9 @@ def _chance_shifts(n: int, dt: float, shift_s: float, max_shifts: int) -> list[i
     """
     step = int(round(shift_s / dt))
     if step <= 0 or n < 2 * step:
-        return [max(1, n // 2)]
+        half = n // 2
+        # Under 40 s of data the shift would be < 20 s: no chance level.
+        return [half] if half * dt >= MIN_CHANCE_SHIFT_S - 1e-9 else []
     shifts = list(range(step, n - step + 1, step))
     if len(shifts) > max_shifts:
         keep = np.linspace(0, len(shifts) - 1, max_shifts).round().astype(int)

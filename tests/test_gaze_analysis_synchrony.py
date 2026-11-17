@@ -666,3 +666,17 @@ def test_body_sync_brief_low_confidence_outlier_does_not_leak() -> None:
     glitch, _ = compute_movement_sync(glitch_pose, 0, 1)
 
     np.testing.assert_allclose(clean["sync_r"], glitch["sync_r"], atol=1e-9)
+
+
+def test_body_sync_no_chance_level_for_very_short_data() -> None:
+    """Under 40 s of usable data a half-length shift is < 20 s: no chance level."""
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 30, 0.2), 6)
+    walk = _random_walk(len(ts), 9)
+    real, chance = compute_movement_sync(
+        _make_body_pose(ts, walk, walk), 0, 1, window_s=10.0
+    )
+
+    assert not real.empty
+    assert chance.empty

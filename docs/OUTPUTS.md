@@ -203,7 +203,7 @@ that camera's own clock.
 | `valid_seconds_both`, `n_segments`, `longest_segment_s` | Seconds with both people tracked, the number of unbroken stretches of such frames, and the longest one. |
 | `quality_verdict`, `quality_reasons` | Data check: `insufficient` (both people tracked < 60 s), `check` (coverage < 50% or fewer than 3 synchrony windows; synchrony is then not shown in the report), else `usable`. A guide for which overlay clips to watch, not an inclusion rule; thresholds are `MIN_VALID_SECONDS`, `LOW_COVERAGE_THRESHOLD`, `MIN_SYNC_WINDOWS` in `video_analysis/pose_metrics.py`. Also in `task_metrics.csv`, from pooled values. |
 | `sync_mean/std`, `sync_n_windows` | **Movement synchrony (the reported measure).** Each person's whole-body motion energy (mean speed of keypoints with confidence >= 0.3) is correlated between parent and child at lag 0 in 20 s windows (50% overlap) inside unbroken stretches where both are tracked. |
-| `sync_chance_mean`, `sync_minus_chance` | The same measure with the child's movement shifted in time (several shifts at 60 s steps, at most 10; half the data for blocks under 2 min), pooled; and the real value minus it. Only `sync_minus_chance` above 0 reflects the interaction. On 1011v3-1020v3 it averaged +0.18 (grocery +0.12, storybook +0.25). |
+| `sync_chance_mean`, `sync_minus_chance` | The same measure with the child's movement shifted in time (several shifts at 60 s steps, at most 10; half the data for blocks under 2 min; none under 40 s of data, where the shift would be under 20 s), pooled; and the real value minus it. Only `sync_minus_chance` above 0 reflects the interaction. On 1011v3-1020v3 it averaged +0.18 (grocery +0.12, storybook +0.25). |
 | `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows` | *Superseded* (kept so older tables still line up). Movement synchrony in 5 s windows. Windows sit inside unbroken stretches where both people are tracked and never cross a gap; stretches shorter than 5 s give no window. |
 | `xcorr_chance_mean`, `xcorr_minus_chance` | *Superseded.* The same torso-speed score with the child's movement shifted 60 s (half the usable data when shorter), i.e. the level expected by chance, and the real score minus it. Synchrony is meaningful only when `xcorr_minus_chance` is clearly above 0. |
 
@@ -212,7 +212,7 @@ Frame-level tables: `pose_metrics_proximity.csv`, `pose_metrics_sync.csv` (one r
 `video-gaze-metrics` writes `gaze_metrics_summary.json`: per block, `n_frames`
 and `<category>_pct` for every category (summing to 100). It also writes
 `<category>_chance_pct`, the same share with the child's gaze shifted 60 s in
-time. That shift keeps seating positions but breaks the moment-to-moment
+time (half the block when shorter; blocks under 40 s get no chance level). That shift keeps seating positions but breaks the moment-to-moment
 pairing, so a category means something only when it clearly exceeds its
 chance level. `convergence_mean/std/n_frames` and `convergence_chance` give
 the gaze-map overlap. Frame-level tables: `gaze_metrics_categories.csv` and
