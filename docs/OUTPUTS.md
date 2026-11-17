@@ -198,7 +198,7 @@ that camera's own clock.
 | `coverage_both` | `frames_with_both / block_frames`. All dyad metrics use only those frames. |
 | `low_coverage` | `true` when `coverage_both` < 0.5: interpret the block's metrics with care. |
 | `proximity_mean/std/median/n_frames` | Torso distance (pixels). |
-| `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows` | Movement synchrony in 5 s windows. |
+| `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows` | Movement synchrony in 5 s windows. Windows sit inside unbroken stretches where both people are tracked and never cross a gap; stretches shorter than 5 s give no window. |
 
 Frame-level tables: `pose_metrics_proximity.csv` and `pose_metrics_xcorr.csv`.
 

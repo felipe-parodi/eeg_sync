@@ -1373,8 +1373,9 @@ COCO-17 keypoint order (`kp_000`→nose, increasing index):
 
 | column | type | meaning |
 |---|---|---|
+| `segment_id` | int | Which unbroken stretch of the block (both people tracked, no gap) the window comes from. Windows never cross a gap. |
 | `window_start_s,window_end_s` | float | The 5 s window analyzed. |
-| `peak_xcorr` | float | Peak cross-correlation of parent vs child movement in that window, -1…1. Higher = more synchronized motion. |
+| `peak_xcorr` | float | Peak cross-correlation of parent vs child movement in that window, 0…1 (negative values are shown as 0). Higher = more synchronized motion. |
 | `peak_lag_s` | float | Lag at the peak, in seconds. **Positive = child follows parent**; negative = child leads. |
 | `block` | str | Analysis block. |
 

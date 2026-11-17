@@ -154,6 +154,92 @@ def _compute_velocity(
     return df
 
 
+XCORR_COLUMNS = [
+    "segment_id",
+    "window_start_s",
+    "window_end_s",
+    "peak_xcorr",
+    "peak_lag_s",
+]
+
+# A jump in time larger than this many frame intervals ends a contiguous run.
+RUN_GAP_FACTOR = 1.5
+
+
+def _frame_interval(pose_df: pd.DataFrame) -> float:
+    """Estimate the nominal frame interval from all timestamps in the table.
+
+    Uses every frame either person appears in, so the estimate is the frame
+    grid spacing even when both-people frames are sparse.
+
+    Args:
+        pose_df: Pose DataFrame with a ``timestamp_s`` column.
+
+    Returns:
+        Median positive spacing between unique timestamps, in seconds
+        (0.2 s when it cannot be estimated).
+    """
+    ts = np.unique(pose_df["timestamp_s"].to_numpy(float))
+    diffs = np.diff(ts)
+    diffs = diffs[diffs > 0]
+    return float(np.median(diffs)) if len(diffs) else 0.2
+
+
+def contiguous_runs(timestamps: np.ndarray, dt: float) -> np.ndarray:
+    """Label contiguous runs of frames, splitting wherever a gap occurs.
+
+    Args:
+        timestamps: Sorted frame timestamps in seconds.
+        dt: Nominal frame interval in seconds.
+
+    Returns:
+        Integer run id per timestamp, starting at 0.
+    """
+    if len(timestamps) == 0:
+        return np.zeros(0, dtype=int)
+    breaks = np.diff(timestamps) > RUN_GAP_FACTOR * dt
+    return np.concatenate([[0], np.cumsum(breaks)]).astype(int)
+
+
+def _window_xcorr(
+    p_win: np.ndarray, c_win: np.ndarray, max_lag_frames: int
+) -> tuple[float, int]:
+    """Peak normalized cross-correlation of two equal-length speed windows.
+
+    Args:
+        p_win: Parent speed in the window.
+        c_win: Child speed in the window.
+        max_lag_frames: Largest lag searched, in frames.
+
+    Returns:
+        ``(peak_r, lag_frames)``; ``(0.0, 0)`` when either signal is flat.
+        Positive lag means the child follows the parent.
+    """
+    p_norm = p_win - p_win.mean()
+    c_norm = c_win - c_win.mean()
+    if np.std(p_norm) < 1e-8 or np.std(c_norm) < 1e-8:
+        return 0.0, 0
+
+    best_r = -1.0
+    best_lag = 0
+    for lag in range(-max_lag_frames, max_lag_frames + 1):
+        if lag >= 0:
+            p_seg = p_norm[: len(p_norm) - lag]
+            c_seg = c_norm[lag:]
+        else:
+            p_seg = p_norm[-lag:]
+            c_seg = c_norm[: len(c_norm) + lag]
+        if len(p_seg) < 2:
+            continue
+        r = float(np.dot(p_seg, c_seg)) / (
+            np.sqrt(np.dot(p_seg, p_seg)) * np.sqrt(np.dot(c_seg, c_seg)) + 1e-12
+        )
+        if r > best_r:
+            best_r = r
+            best_lag = lag
+    return max(0.0, best_r), best_lag
+
+
 def compute_movement_xcorr(
     pose_df: pd.DataFrame,
     parent_track_id: int = 0,
@@ -163,6 +249,11 @@ def compute_movement_xcorr(
 ) -> pd.DataFrame:
     """Compute windowed normalized cross-correlation of movement speed.
 
+    Only frames where both people are tracked are used. Those frames are split
+    into contiguous runs wherever a gap appears; speed is computed inside each
+    run and windows are placed inside each run, so no window or speed estimate
+    spans a gap. Runs shorter than one window are skipped.
+
     Args:
         pose_df: Pose DataFrame (pose_3d schema).
         parent_track_id: Track ID for the parent.
@@ -171,102 +262,68 @@ def compute_movement_xcorr(
         max_lag_s: Maximum lag in seconds for cross-correlation.
 
     Returns:
-        DataFrame with window_start_s, window_end_s, peak_xcorr, peak_lag_s.
+        DataFrame with segment_id, window_start_s, window_end_s, peak_xcorr,
+        peak_lag_s (positive lag = child follows parent).
     """
+    empty = pd.DataFrame(columns=XCORR_COLUMNS)
+    if pose_df.empty:
+        return empty
+
     parent_c = _torso_centroid(pose_df, parent_track_id)
     child_c = _torso_centroid(pose_df, child_track_id)
-
-    parent_v = _compute_velocity(parent_c)
-    child_v = _compute_velocity(child_c)
-
-    # Merge on frame_idx to align
-    merged = (
-        parent_v[["frame_idx", "timestamp_s", "speed"]]
-        .merge(
-            child_v[["frame_idx", "speed"]],
-            on="frame_idx",
-            suffixes=("_p", "_c"),
-        )
-        .sort_values("timestamp_s")
+    both = (
+        parent_c.merge(child_c, on="frame_idx", suffixes=("_p", "_c"))
+        .sort_values("timestamp_s_p")
         .reset_index(drop=True)
     )
+    if both.empty:
+        return empty
 
-    timestamps = merged["timestamp_s"].values.astype(float)
-    speed_p = merged["speed_p"].values.astype(float)
-    speed_c = merged["speed_c"].values.astype(float)
+    dt = _frame_interval(pose_df)
+    max_lag_frames = max(1, int(round(max_lag_s / dt)))
+    window_frames = max(2 * max_lag_frames + 1, int(round(window_s / dt)))
+    step = max(1, window_frames // 2)
 
-    if len(timestamps) == 0:
-        return pd.DataFrame(
-            columns=["window_start_s", "window_end_s", "peak_xcorr", "peak_lag_s"]
-        )
-
-    # Estimate frame interval
-    if len(timestamps) > 1:
-        dt = float(np.median(np.diff(timestamps)))
-    else:
-        dt = 0.2  # default 5 fps
-
-    max_lag_frames = max(1, int(max_lag_s / dt))
-    window_frames = max(2 * max_lag_frames + 1, int(window_s / dt))
+    timestamps = both["timestamp_s_p"].to_numpy(float)
+    run_ids = contiguous_runs(timestamps, dt)
 
     results = []
-    for start_idx in range(0, len(timestamps) - window_frames + 1, window_frames // 2):
-        end_idx = start_idx + window_frames
-        if end_idx > len(timestamps):
-            break
+    for run_id in np.unique(run_ids):
+        run = both[run_ids == run_id]
+        if len(run) < window_frames:
+            continue
+        parent_v = _compute_velocity(
+            run[["frame_idx", "timestamp_s_p", "cx_p", "cy_p"]].set_axis(
+                ["frame_idx", "timestamp_s", "cx", "cy"], axis=1
+            )
+        )
+        child_v = _compute_velocity(
+            run[["frame_idx", "timestamp_s_p", "cx_c", "cy_c"]].set_axis(
+                ["frame_idx", "timestamp_s", "cx", "cy"], axis=1
+            )
+        )
+        ts = parent_v["timestamp_s"].to_numpy(float)
+        speed_p = parent_v["speed"].to_numpy(float)
+        speed_c = child_v["speed"].to_numpy(float)
 
-        p_win = speed_p[start_idx:end_idx]
-        c_win = speed_c[start_idx:end_idx]
-
-        # Normalize
-        p_norm = p_win - p_win.mean()
-        c_norm = c_win - c_win.mean()
-
-        p_std = np.std(p_norm)
-        c_std = np.std(c_norm)
-
-        if p_std < 1e-8 or c_std < 1e-8:
+        for start_idx in range(0, len(ts) - window_frames + 1, step):
+            end_idx = start_idx + window_frames
+            peak_r, lag = _window_xcorr(
+                speed_p[start_idx:end_idx], speed_c[start_idx:end_idx], max_lag_frames
+            )
             results.append(
                 {
-                    "window_start_s": timestamps[start_idx],
-                    "window_end_s": timestamps[end_idx - 1],
-                    "peak_xcorr": 0.0,
-                    "peak_lag_s": 0.0,
+                    "segment_id": int(run_id),
+                    "window_start_s": ts[start_idx],
+                    "window_end_s": ts[end_idx - 1],
+                    "peak_xcorr": peak_r,
+                    "peak_lag_s": lag * dt,
                 }
             )
-            continue
 
-        # Compute cross-correlation at lags [-max_lag, +max_lag]
-        best_r = -1.0
-        best_lag = 0
-        for lag in range(-max_lag_frames, max_lag_frames + 1):
-            if lag >= 0:
-                p_seg = p_norm[: len(p_norm) - lag]
-                c_seg = c_norm[lag:]
-            else:
-                p_seg = p_norm[-lag:]
-                c_seg = c_norm[: len(c_norm) + lag]
-
-            if len(p_seg) < 2:
-                continue
-
-            r = float(np.dot(p_seg, c_seg)) / (
-                np.sqrt(np.dot(p_seg, p_seg)) * np.sqrt(np.dot(c_seg, c_seg)) + 1e-12
-            )
-            if r > best_r:
-                best_r = r
-                best_lag = lag
-
-        results.append(
-            {
-                "window_start_s": timestamps[start_idx],
-                "window_end_s": timestamps[end_idx - 1],
-                "peak_xcorr": max(0.0, best_r),
-                "peak_lag_s": best_lag * dt,
-            }
-        )
-
-    return pd.DataFrame(results)
+    if not results:
+        return empty
+    return pd.DataFrame(results, columns=XCORR_COLUMNS)
 
 
 # ====================================================================

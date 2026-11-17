@@ -236,14 +236,25 @@ def _heads_and_tracks(frames, parent_head, child_head, missing_child_head=()):
             if tid == 1 and f in missing_child_head:
                 continue
             heads.append(
-                {"frame_idx": f, "track_id": tid, "head_x1": hx - 0.03,
-                 "head_y1": hy - 0.05, "head_x2": hx + 0.03, "head_y2": hy + 0.05}
+                {
+                    "frame_idx": f,
+                    "track_id": tid,
+                    "head_x1": hx - 0.03,
+                    "head_y1": hy - 0.05,
+                    "head_x2": hx + 0.03,
+                    "head_y2": hy + 0.05,
+                }
             )
         for tid, (hx, hy) in ((0, parent_head), (1, child_head)):
             tracks.append(
-                {"frame_idx": f, "track_id": tid, "bbox_x1": (hx - 0.06) * W,
-                 "bbox_y1": (hy - 0.06) * H, "bbox_x2": (hx + 0.06) * W,
-                 "bbox_y2": (hy + 0.5) * H}
+                {
+                    "frame_idx": f,
+                    "track_id": tid,
+                    "bbox_x1": (hx - 0.06) * W,
+                    "bbox_y1": (hy - 0.06) * H,
+                    "bbox_x2": (hx + 0.06) * W,
+                    "bbox_y2": (hy + 0.5) * H,
+                }
             )
     return pd.DataFrame(heads), pd.DataFrame(tracks)
 
@@ -279,7 +290,11 @@ def test_shared_spot_near_the_child_is_watching_not_joint_attention() -> None:
 def test_missing_head_box_aligns_by_frame_idx() -> None:
     """A frame without the child's head box does not borrow another frame's."""
     result = _categories(
-        [(0.7, 0.3)] * 5, [(0.2, 0.3)] * 5, (0.2, 0.3), (0.7, 0.3), n=5,
+        [(0.7, 0.3)] * 5,
+        [(0.2, 0.3)] * 5,
+        (0.2, 0.3),
+        (0.7, 0.3),
+        n=5,
         missing_child_head=(2, 3),
     )
     by_frame = dict(zip(result["frame_idx"], result["gaze_category"]))
@@ -343,3 +358,108 @@ def test_gaze_convergence_partial_overlap() -> None:
     )
     scores = result["gaze_convergence_score"].values
     assert 0.1 < scores.mean() < 0.95
+
+
+# ---- Gap-aware, time-based windows (metrics-validity plan, phase 1) ----
+
+
+def _make_pose_df_at(
+    timestamps: np.ndarray,
+    parent_x: np.ndarray,
+    child_x: np.ndarray,
+    fps: float = 6.0,
+) -> pd.DataFrame:
+    """Build a pose table with explicit timestamps, so tests can insert gaps."""
+    rows = []
+    kps = ["kp_005", "kp_006", "kp_011", "kp_012"]
+    offsets = [(-10, -5), (10, -5), (-10, 5), (10, 5)]
+    for ts, px, cx in zip(timestamps, parent_x, child_x):
+        frame_idx = int(round(ts * fps))
+        for tid, bx in ((0, px), (1, cx)):
+            for kp, (dx, dy) in zip(kps, offsets):
+                rows.append(
+                    {
+                        "frame_idx": frame_idx,
+                        "timestamp_s": float(ts),
+                        "track_id": tid,
+                        "track_label": f"person_{tid:02d}",
+                        "keypoint_name": kp,
+                        "x_m": float(bx) + dx,
+                        "y_m": 200.0 + dy,
+                        "z_m": 0.0,
+                        "keypoint_confidence": 0.9,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def _two_runs_with_gap(fps: float = 6.0) -> tuple[np.ndarray, float, float]:
+    """30 s of frames, a 60 s gap, then 30 s more. Returns (ts, gap_start, gap_end)."""
+    first = np.arange(0, 30, 1 / fps)
+    second = np.arange(90, 120, 1 / fps)
+    return np.concatenate([first, second]), float(first[-1]), float(second[0])
+
+
+def test_xcorr_windows_never_span_a_gap() -> None:
+    """No window may start before a gap and end after it."""
+    rng = np.random.default_rng(0)
+    ts, gap_start, gap_end = _two_runs_with_gap()
+    signal = 200.0 + np.cumsum(rng.normal(0, 3, len(ts)))
+    pose_df = _make_pose_df_at(ts, signal, signal + 50.0)
+
+    result = compute_movement_xcorr(pose_df, 0, 1, window_s=5.0, max_lag_s=2.0)
+
+    assert not result.empty
+    crosses = (result["window_start_s"] <= gap_start) & (
+        result["window_end_s"] >= gap_end
+    )
+    assert not crosses.any()
+    span = result["window_end_s"] - result["window_start_s"]
+    assert (span <= 5.0 + 1 / 6.0 + 1e-9).all()
+
+
+def test_xcorr_reports_segment_id_per_run() -> None:
+    """Windows from separate runs carry different segment ids."""
+    rng = np.random.default_rng(1)
+    ts, gap_start, _ = _two_runs_with_gap()
+    signal = 200.0 + np.cumsum(rng.normal(0, 3, len(ts)))
+    pose_df = _make_pose_df_at(ts, signal, signal)
+
+    result = compute_movement_xcorr(pose_df, 0, 1, window_s=5.0, max_lag_s=2.0)
+
+    assert "segment_id" in result.columns
+    before = result[result["window_end_s"] <= gap_start]["segment_id"].unique()
+    after = result[result["window_start_s"] > gap_start]["segment_id"].unique()
+    assert len(before) == 1 and len(after) == 1
+    assert before[0] != after[0]
+
+
+def test_xcorr_run_shorter_than_window_gives_no_window() -> None:
+    """A 3 s run cannot hold a 5 s window, so it yields nothing."""
+    ts = np.arange(0, 3, 1 / 6.0)
+    x = 200.0 + 10.0 * np.sin(ts)
+    pose_df = _make_pose_df_at(ts, x, x)
+
+    result = compute_movement_xcorr(pose_df, 0, 1, window_s=5.0, max_lag_s=2.0)
+
+    assert result.empty
+    assert {"window_start_s", "window_end_s", "peak_xcorr", "peak_lag_s"} <= set(
+        result.columns
+    )
+
+
+def test_xcorr_position_jump_across_gap_is_not_movement() -> None:
+    """Both people standing still, but at new spots after a gap: no synchrony.
+
+    Computing velocity across the gap would create a matching speed spike in
+    both people and a spurious high correlation.
+    """
+    ts, gap_start, _ = _two_runs_with_gap()
+    parent = np.where(ts <= gap_start, 100.0, 600.0)
+    child = np.where(ts <= gap_start, 150.0, 700.0)
+    pose_df = _make_pose_df_at(ts, parent, child)
+
+    result = compute_movement_xcorr(pose_df, 0, 1, window_s=5.0, max_lag_s=2.0)
+
+    assert not result.empty
+    assert (result["peak_xcorr"] == 0.0).all()
