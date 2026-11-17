@@ -471,3 +471,26 @@ def test_session_report_step_writes_study_tables(tmp_path: Path) -> None:
 
     root = command[command.index("--all-sessions-root") + 1]
     assert Path(root) == tmp_path / "output"
+
+
+def test_session_verdict_uses_task_table_when_present(portal_env: Path) -> None:
+    """Pieces under 60 s each are 'insufficient', but joined into one task they
+    can be enough: the home page follows the task table when it exists."""
+    session = _make_session(
+        portal_env,
+        "1019v4",
+        [0.05, 0.08, 0.36],
+        quality=["insufficient", "insufficient", "insufficient"],
+    )
+    pd.DataFrame(
+        {
+            "session_id": "1019v4",
+            "camera_id": "camera_a",
+            "task": ["grocery"],
+            "quality_verdict": ["check"],
+        }
+    ).to_csv(session / "task_metrics.csv", index=False)
+
+    rows = {row["session_id"]: row for row in portal_app.session_rows()}
+
+    assert rows["1019v4"]["verdict_label"] == "Check"

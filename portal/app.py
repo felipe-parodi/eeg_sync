@@ -1092,8 +1092,12 @@ def session_rows() -> list[dict[str, Any]]:
         if not session_dir.is_dir() or not metrics_path.is_file():
             continue
         mtime = metrics_path.stat().st_mtime
+        # The task table (pieces of a split task joined) is what the lab
+        # analyses; pieces can each be short while their task has enough data.
+        tasks_path = session_dir / "task_metrics.csv"
+        verdict_path = tasks_path if tasks_path.is_file() else metrics_path
         try:
-            kind, label = overall_session_verdict(pd.read_csv(metrics_path))
+            kind, label = overall_session_verdict(pd.read_csv(verdict_path))
         except (OSError, ValueError):
             kind, label = ("unknown", "Could not read results")
         cameras = sorted(
