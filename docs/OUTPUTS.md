@@ -7,18 +7,25 @@ What lives where after a pipeline run, with column dictionaries for every CSV. U
 ```
 video_inference/output/<session_id>/
 ├── session_summary.json                  # written by video-infer run
+├── session_metrics.csv                   # ← `video-session-report`: one row per camera × block
+├── task_metrics.csv                      # ← `video-session-report`: one row per camera × task (parts rejoined)
+├── report.html                           # ← `video-session-report`: one-page summary (start here)
 └── <camera>/                             # camera_a, camera_b
     ├── manifest.json                     # provenance + assumptions
     ├── frames/                           # extracted JPGs
     │   └── frame_000001.jpg, ...
     ├── intermediate/
-    │   └── inference_raw.json            # backend's raw output (pre-tracking)
+    │   ├── inference_raw.json            # backend's raw output (pre-tracking)
+    │   └── detections.npz                # offline tracker: every detection + ReID embedding
     │
     ├── tracks_2d.csv                     # ← raw output of `video-infer`
     ├── pose_3d.csv
     │
-    ├── tracks_2d_filtered.csv            # ← after `video-filter-tracks`
+    ├── tracks_2d_filtered.csv            # ← after `video-filter-tracks` or `offline_assoc`
     ├── pose_3d_filtered.csv
+    ├── two_person_summary.json           # ← `offline_assoc`: frames with parent / child / both
+    ├── pose_3d_refined.csv               # ← `topdown_refine`: ViTPose-refined keypoints
+    ├── keypoint_refinement_summary.json
     │
     ├── track_corrections.json            # ← after `video-annotate-tracks`
     ├── tracks_2d_corrected.csv           # ← after `video-correct-tracks`
@@ -38,10 +45,17 @@ video_inference/output/<session_id>/
     ├── synchrony_summary.json
     ├── synchrony_dashboard.png           # ← after `gaze-plot`
     │
-    ├── pose_metrics_<block>.csv          # ← after `video-pose-metrics`
-    ├── pose_metrics_<block>.png
-    ├── gaze_metrics_<block>.csv          # ← after `video-gaze-metrics`
-    ├── gaze_metrics_<block>.png
+    ├── pose_metrics_summary.json         # ← `video-pose-metrics`: per block, incl. coverage
+    ├── pose_metrics_proximity.csv
+    ├── pose_metrics_sync.csv
+    ├── pose_metrics_xcorr.csv
+    ├── pose_proximity.png / pose_synchrony.png (+ .svg)
+    ├── gaze_metrics_summary.json         # ← `video-gaze-metrics`: per block, with chance levels
+    ├── gaze_metrics_categories.csv
+    ├── gaze_metrics_convergence.csv
+    ├── gaze_categories.png / gaze_convergence.png (+ .svg)
+    ├── gaze_labels.json                  # ← optional portal gaze labels (human coding)
+    ├── overlay_<block>.mp4, overlay_<block>_end.mp4   # ← portal overlay clips
     │
     ├── block_checks/                     # ← after `video-gaze-snapshots`
     │   └── <block>_sample_*.png
@@ -116,17 +130,19 @@ Smoothing-stage files (`pose_3d_smooth.csv`) share the same schema; only values 
 
 ## `gaze_heatmap.csv`
 
-Written by `gaze-infer`. One row per (frame, person).
+Written by `gaze-infer` (PaGE ViT-B; `gaze-infer-gazelle` writes the same
+format with Gaze-LLE). One row per (frame, person). `gaze_summary.json` records
+the model, its pinned revision, and the frame size used.
 
 | Column | Type | Description |
 |---|---|---|
 | `frame_idx` | int | |
 | `timestamp_s` | float | |
 | `track_id` | int | |
-| `gaze_peak_x` | float | x-pixel of the gaze heatmap argmax, in the compressed frame. |
-| `gaze_peak_y` | float | y-pixel of the gaze heatmap argmax. |
+| `gaze_peak_x` | float | Gaze target x as a **fraction of image width** (`0..1`; argmax of the 64×64 heatmap). |
+| `gaze_peak_y` | float | Gaze target y as a fraction of image height. |
 | `gaze_peak_value` | float | Peak heatmap intensity (`0..1`). |
-| `inout_score` | float | Gazelle's in-frame / out-of-frame score (`0..1`; <0.5 means gaze likely out-of-frame). |
+| `inout_score` | float | Probability the gaze target is inside the image (`0..1`; <0.5 = likely looking out of view). |
 | `head_source` | string | `keypoints` (head bbox derived from face keypoints) or `bbox_fallback` (top 30% of body bbox when face keypoints are low-confidence). |
 
 Companion file `gaze_heatmaps.npz` holds the full 64×64 heatmaps. Load with `np.load(...)["heatmaps"]` — shape `(N, 64, 64)` aligned to the CSV rows.
@@ -142,8 +158,22 @@ Written by `gaze-synchrony`. One row per frame (parent and child collapsed into 
 | `frame_idx` | int | |
 | `timestamp_s` | float | |
 | `torso_distance_px` | float | Euclidean distance between parent and child torso centroids (mean of shoulders + hips), in compressed-frame pixels. |
-| `gaze_category` | string | `mutual` (parent ↔ child), `joint` (both looking at a third location), `parent_watching` (parent → child), `child_watching` (child → parent), or `independent`. |
-| `gaze_convergence_score` | float | Cosine similarity of parent and child gaze heatmaps (`0..1`). |
+| `gaze_category` | string | One of the categories below. |
+| `gaze_convergence_score` | float | Overlap of the parent's and child's gaze heatmaps after removing their background (`0` = disjoint, `1` = identical). |
+
+Gaze categories (`gaze_analysis/gaze_categories.py`). Each person's gaze point
+is placed relative to the other person's boxes, in pixels:
+
+| Category | Rule |
+|---|---|
+| `mutual_gaze` | Each gaze point lands on the other's face (head box enlarged 1.5×). |
+| `parent_watching` / `child_watching` | One gaze point lands on the other (face or body); the other's does not land back. |
+| `both_watching` | Each looks at the other, not face to face. |
+| `joint_attention` | Both look at something in view, neither at the other, gaze points within 1.5 mean head-heights. |
+| `independent` | Both look at different things in view. |
+| `unknown` | A gaze is out of view (`inout_score` < 0.5) or a box is missing. |
+
+Single-frame category changes are absorbed into the surrounding category.
 
 Plus a windowed cross-correlation table under `synchrony_summary.json`:
 
@@ -158,25 +188,72 @@ Plus a windowed cross-correlation table under `synchrony_summary.json`:
 
 ---
 
-## Per-block metrics CSVs
+## Per-block metrics
 
-`video-pose-metrics` writes `pose_metrics_<block>.csv`:
+`video-pose-metrics` writes `pose_metrics_summary.json`: one object per block on
+that camera's own clock.
 
-| Column | Description |
+| Key | Description |
 |---|---|
-| `frame_idx`, `timestamp_s` | |
-| `torso_distance_px` | (same as synchrony_metrics) |
-| `movement_xcorr_peak`, `movement_xcorr_lag_s` | Windowed cross-correlation peak in the surrounding window. |
+| `block`, `block_start_s`, `block_end_s`, `block_frames` | The block and its length in frames. |
+| `frames_with_parent`, `frames_with_child`, `frames_with_both` | Frames in which each person (or both) was tracked. |
+| `coverage_both` | `frames_with_both / block_frames`. All dyad metrics use only those frames. |
+| `low_coverage` | `true` when `coverage_both` < 0.5: interpret the block's metrics with care. |
+| `proximity_mean/std/median/n_frames` | Torso distance (pixels). |
+| `valid_seconds_both`, `n_segments`, `longest_segment_s` | Seconds with both people tracked, the number of unbroken stretches of such frames, and the longest one. |
+| `quality_verdict`, `quality_reasons` | Data check and recommended inclusion rule: `insufficient` (both people tracked < 2 min), `check` (coverage < 50% or fewer than 10 synchrony windows; synchrony is then not shown in the report), else `usable`. Basis (1011-1020): a 2 min sample ranks dyads' distance like the full task at r = 0.85; 10 synchrony windows give r ~ 0.87 (3 windows r = 0.66). Always also check the overlay clips. Thresholds are `MIN_VALID_SECONDS`, `LOW_COVERAGE_THRESHOLD`, `MIN_SYNC_WINDOWS` in `video_analysis/pose_metrics.py`. Also in `task_metrics.csv`, from pooled values. |
+| `sync_mean/std`, `sync_n_windows` | **Movement synchrony (the reported measure).** Each person's whole-body motion energy (mean speed of keypoints with confidence >= 0.3) is correlated between parent and child at lag 0 in 20 s windows (50% overlap) inside unbroken stretches where both are tracked. |
+| `sync_chance_mean`, `sync_minus_chance` | The same measure with the child's movement shifted in time (several shifts at 60 s steps, at most 10; half the data for blocks under 2 min; none under 40 s of data, where the shift would be under 20 s), pooled; and the real value minus it. Only `sync_minus_chance` above 0 reflects the interaction. On 1011v3-1020v3 it averaged +0.18 (grocery +0.12, storybook +0.25). |
+| `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows` | *Superseded* (kept so older tables still line up). Movement synchrony in 5 s windows. Windows sit inside unbroken stretches where both people are tracked and never cross a gap; stretches shorter than 5 s give no window. |
+| `xcorr_chance_mean`, `xcorr_minus_chance` | *Superseded.* The same torso-speed score with the child's movement shifted 60 s (half the usable data when shorter), i.e. the level expected by chance, and the real score minus it. Synchrony is meaningful only when `xcorr_minus_chance` is clearly above 0. |
 
-`video-gaze-metrics` writes `gaze_metrics_<block>.csv`:
+Frame-level tables: `pose_metrics_proximity.csv`, `pose_metrics_sync.csv` (one row per 20 s window: `segment_id`, `window_start_s`, `window_end_s`, `sync_r`, `block`) and the superseded `pose_metrics_xcorr.csv`.
 
-| Column | Description |
-|---|---|
-| `frame_idx`, `timestamp_s` | |
-| `gaze_category` | |
-| `gaze_convergence_score` | |
+`video-gaze-metrics` writes `gaze_metrics_summary.json`: per block, `n_frames`
+and `<category>_pct` for every category (summing to 100). It also writes
+`<category>_chance_pct`, the same share with the child's gaze shifted 60 s in
+time (half the block when shorter; blocks under 40 s get no chance level). That shift keeps seating positions but breaks the moment-to-moment
+pairing, so a category means something only when it clearly exceeds its
+chance level. `convergence_mean/std/n_frames` and `convergence_chance` give
+the gaze-map overlap. Frame-level tables: `gaze_metrics_categories.csv` and
+`gaze_metrics_convergence.csv`.
 
-Both also write a paired `.png`: per-block panels comparing parent-child metrics across the named `session_blocks` (colored by `session_blocks[i].color`).
+## `session_metrics.csv` and `all_sessions_metrics.csv`
+
+`video-session-report` joins the per-camera summaries into one row per camera ×
+block:
+- `session_id`, `camera_id`, `block`, and the coverage columns above.
+- Pose metrics, under their own names.
+- Gaze metrics, prefixed `gaze_`.
+- Whole-camera tracking stats from `two_person_summary.json`, prefixed `tracking_`.
+
+`task_metrics.csv` has one row per camera × task. A task split by extra-person
+windows (`grocery_part1`, `grocery_part2`, ...) is rejoined by pooling, not
+averaging: distance mean/median/sd are recomputed from all per-frame
+distances; movement synchrony pools the 20 s windows of all parts (windows
+never cross the gaps between parts) and weights the parts' chance levels by
+their window counts; gaze shares and convergence are weighted by gaze frames;
+coverage sums frame counts. Extra columns: `task`, `n_parts`, `parts`,
+`task_start_s`, `task_end_s`, `duration_s` (analysed time, gaps excluded).
+
+Every row carries `metrics_version` (currently `2026-11-16`; rows from older runs show `before-2026-11-16`). Do not pool rows with different versions: re-process older sessions instead.
+
+`video_inference/output/all_sessions_metrics.csv` stacks every session's block
+table, and `all_sessions_task_metrics.csv` every session's task table.
+The portal home page offers it as "Download all sessions table". `report.html`
+shows the same numbers with coverage warnings, chance levels, figures, and
+links to the overlay clips.
+
+## `gaze_labels.json` (optional, portal gaze labeling page)
+
+A human coder marks, for a sample of frames, what the parent and the child are
+looking at:
+- `target` is one of `partner_face`, `partner_body`, `object`, `elsewhere`, or
+  `cant_tell`.
+- `point` optionally records where they look, as `[x, y]` image fractions.
+
+`gaze-label-eval --camera-dir <cam> --gaze gaze_heatmap.csv` scores any gaze
+table against these labels.
 
 ---
 
@@ -197,7 +274,7 @@ Both also write a paired `.png`: per-block panels comparing parent-child metrics
 
 | File | Produced by | Use |
 |---|---|---|
-| `overlay.mp4` | `video-visualize` | Watch the pose tracking play back over the original frames. The fastest way to spot a swap or a missed detection. |
+| `overlay.mp4` / `overlay_<block>.mp4` | `video-visualize` (portal: first and last 30 s of each block) | Watch the pose tracking play back over the original frames. The fastest way to spot a swap or a missed detection. |
 | `viz_3d/*.png` (+ optional `skeleton.mp4`) | `video-visualize-3d` | Confirm 3D pose looks plausible (limb lengths constant, no jitter to infinity). |
 | `block_checks/<block>_sample_*.png` | `video-gaze-snapshots` | Confirm gaze heatmaps land in plausible places (e.g. on a toy during joint attention). |
 | `synchrony_dashboard.png` | `gaze-plot` | 4-panel summary across the whole session, shaded by block. |
@@ -207,3 +284,19 @@ Both also write a paired `.png`: per-block panels comparing parent-child metrics
 ## EEG-side outputs (sync workflow only)
 
 `sync_results.json` — produced by `eeg-sync`. Documented in [`../README.md`](../README.md#sync_resultsjson-schema).
+
+## `run_info.json` and `portal_runs.jsonl` (portal run records)
+
+For troubleshooting and planning, every portal job writes a run record:
+`run_info.json` in the job folder and in the session folder (so it is in the
+results zip), plus one line per job in `video_inference/output/portal_runs.jsonl`,
+which survives portal restarts. Fields: job and session id, state (`complete` /
+`failed`), submission and upload-finished times, code (`git_commit`,
+`metrics_version`, pose and gaze model, frame rate), GPUs, per video (file
+name, size, length, source fps, achieved frame rate, frames extracted), tasks
+submitted and pieces skipped, durations in seconds (`upload`, `phase1`,
+`label_wait` = waiting for the parent labels, `phase2`, `processing` =
+phase 1 + phase 2 wall time), every step with its duration and success, the
+per-task verdicts, and for failures the failing step, the error and the last
+30 log lines. Per-step timings are also in the job folder's
+`step_timings.jsonl`.

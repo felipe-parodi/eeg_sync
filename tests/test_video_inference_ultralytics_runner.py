@@ -365,3 +365,72 @@ def test_run_ultralytics_pose_rejects_unknown_tracker_backend(tmp_path, monkeypa
 
     with pytest.raises(ValueError, match="boxmot"):
         run_ultralytics_pose_on_images(cfg)
+
+
+def test_run_ultralytics_pose_offline_backend_writes_cache_and_roles(
+    tmp_path, monkeypatch
+):
+    """The offline backend caches detections next to the raw JSON and emits
+    parent/child persons; the payload must be JSON-serializable."""
+    import json
+
+    from video_inference import detection_cache
+    from video_inference.detection_cache import DetCache
+
+    image_folder = tmp_path / "frames"
+    image_folder.mkdir()
+    n = 6
+    for i in range(n):
+        (image_folder / f"frame_{i + 1:06d}.jpg").write_bytes(b"x")
+    (image_folder / "frame_index.csv").write_text(
+        "frame_idx,timestamp_s,image_name\n"
+        + "".join(f"{i},{100 + i / 6:.6f},frame_{i + 1:06d}.jpg\n" for i in range(n)),
+        encoding="utf-8",
+    )
+
+    def fake_build(image_paths, frame_idx, timestamp_s, **kwargs):
+        boxes, kps = [], []
+        for _ in image_paths:
+            for x, h in ((100.0, 300.0), (500.0, 140.0)):
+                boxes.append([x, 100.0, x + h / 2, 100.0 + h])
+                k = np.ones((17, 3), np.float32)
+                k[:, 0] = x + np.linspace(0, h / 2, 17)
+                k[:, 1] = 100.0 + np.linspace(0, h, 17)
+                kps.append(k)
+        emb = np.tile(np.eye(4, dtype=np.float32)[:2], (len(image_paths), 1))
+        return DetCache(
+            frame_idx=np.asarray(frame_idx),
+            timestamp_s=np.asarray(timestamp_s),
+            offsets=np.arange(0, 2 * len(image_paths) + 1, 2),
+            boxes=np.asarray(boxes, np.float32),
+            conf=np.full(len(boxes), 0.9, np.float32),
+            keypoints=np.asarray(kps),
+            embeddings=emb,
+            image_size=(960, 540),
+        )
+
+    monkeypatch.setattr(detection_cache, "build_detection_cache", fake_build)
+    monkeypatch.setitem(
+        sys.modules, "ultralytics", types.SimpleNamespace(YOLO=_FakeYOLO)
+    )
+    output_json = tmp_path / "intermediate" / "inference_raw.json"
+    cfg = UltraRunnerConfig(
+        model_path="fake.pt",
+        image_folder=str(image_folder),
+        output_json=str(output_json),
+        device="cpu",
+        tracker_backend="offline",
+        max_persons=2,
+        frame_rate=6.0,
+    )
+    payload = run_ultralytics_pose_on_images(cfg)
+
+    assert (output_json.parent / "detections.npz").exists()
+    json.loads(output_json.read_text(encoding="utf-8"))
+    assert len(payload["frames"]) == n
+    for frame in payload["frames"]:
+        labels = {p["track_label"]: p for p in frame["persons"]}
+        assert set(labels) == {"parent", "child"}
+        assert labels["parent"]["track_id"] == 0
+        assert labels["parent"]["bbox_xyxy"][0] == 100.0  # the taller person
+        assert len(labels["child"]["keypoints_3d"]) == 17

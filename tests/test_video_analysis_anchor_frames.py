@@ -133,6 +133,20 @@ def test_select_anchor_frames_skips_overlapping_window():
         ), f"anchor at frame {c.frame_idx} fell inside the overlap window"
 
 
+def test_select_anchor_frames_fills_all_anchors_across_block_gap():
+    """Two analysis blocks with a long gap between them: every requested
+    anchor lands on a distinct frame inside the blocks (none wasted on the gap)."""
+    first = _make_two_person_tracks(n_frames=240, fps=8.0)  # 0-30 s
+    second = _make_two_person_tracks(n_frames=240, fps=8.0)
+    second["frame_idx"] += 240
+    second["timestamp_s"] += 600.0  # second block 600-630 s
+    df = pd.concat([first, second], ignore_index=True)
+    candidates = select_anchor_frames(df, n_anchors=10)
+    assert len(candidates) == 10
+    assert len({c.frame_idx for c in candidates}) == 10
+    assert sum(c.timestamp_s < 300 for c in candidates) == 5
+
+
 def test_select_anchor_frames_returns_empty_for_empty_df():
     assert select_anchor_frames(pd.DataFrame(), n_anchors=10) == []
 
@@ -262,3 +276,41 @@ def test_smoke_extract_anchor_frames_from_real_video(tmp_path):
         img_path = tmp_path / "anchors" / m.image_filename
         assert img_path.exists()
         assert img_path.stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: at least two anchors per block (bug hunt finding 7)
+# ---------------------------------------------------------------------------
+
+
+def test_select_anchor_frames_guarantees_two_per_block():
+    """A block whose frames all overlap (child on lap) still gets 2 anchors."""
+    # 8 fps: frames 0-799 = 0-100 s clear (block a); 800-959 = 100-120 s overlap.
+    tracks = _make_two_person_tracks(n_frames=960, fps=8.0, overlap_window=(800, 959))
+    blocks = [("a", 0.0, 99.9), ("b", 100.0, 120.0)]
+
+    picks = select_anchor_frames(tracks, n_anchors=10, blocks=blocks)
+
+    in_b = [c for c in picks if c.timestamp_s >= 100.0]
+    assert len(in_b) >= 2
+    assert len(picks) == 10
+    assert len({c.frame_idx for c in picks}) == len(picks)
+
+
+def test_select_anchor_frames_more_blocks_than_budget():
+    """With more blocks than anchors / 2, every block still gets two."""
+    tracks = _make_two_person_tracks(n_frames=960, fps=8.0)
+    blocks = [(f"p{i}", i * 20.0, i * 20.0 + 19.0) for i in range(6)]
+
+    picks = select_anchor_frames(tracks, n_anchors=10, blocks=blocks)
+
+    for name, start, end in blocks:
+        assert sum(start <= c.timestamp_s <= end for c in picks) >= 2, name
+
+
+def test_select_anchor_frames_without_blocks_is_unchanged():
+    tracks = _make_two_person_tracks(n_frames=960, fps=8.0, overlap_window=(800, 959))
+
+    picks = select_anchor_frames(tracks, n_anchors=10)
+
+    assert all(c.timestamp_s < 100.0 for c in picks)  # overlapping frames skipped

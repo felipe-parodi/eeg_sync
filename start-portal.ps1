@@ -135,8 +135,10 @@ function Start-LocalhostRunTunnel {
 
 $tunnelProc = $null
 if (-not $NoTunnel) {
-    $tunnelLog = Join-Path $repoRoot '.portal_tunnel.log'
-    $tunnelErrLog = Join-Path $repoRoot '.portal_tunnel.err.log'
+    $logDir = Join-Path $repoRoot 'logs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $tunnelLog = Join-Path $logDir 'portal_tunnel.log'
+    $tunnelErrLog = Join-Path $logDir 'portal_tunnel.err.log'
     Remove-Item -ErrorAction SilentlyContinue $tunnelLog, $tunnelErrLog
 
     $result = $null
@@ -168,7 +170,16 @@ if (-not $NoTunnel) {
 Write-Host "Launching portal on port $portForBanner (Ctrl+C to stop) ..."
 
 try {
-    uv run video-processing-portal
+    # Exit code 3 = restart requested with `uv run python -m portal.restart`
+    # and no job running: start the server again with the new code. The
+    # tunnel keeps running, so the public URL stays the same.
+    do {
+        uv run video-processing-portal
+        $portalExit = $LASTEXITCODE
+        if ($portalExit -eq 3) {
+            Write-Host "Restarting the portal with the latest code (same public URL) ..."
+        }
+    } while ($portalExit -eq 3)
 } finally {
     if ($tunnelProc -and -not $tunnelProc.HasExited) {
         Write-Host "Stopping tunnel ..."

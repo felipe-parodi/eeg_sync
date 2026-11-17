@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block body %}<div class="page-head">
+  <h1>What are they looking at? ({{ job_id }})</h1>
+  <a href="/jobs/{{ job_id }}">Back to the job</a>
+</div>
+<section class="card gaze-intro">
+  <p>Optional, about 30&ndash;45 minutes. Your answers let us check how accurate the automatic gaze results are on our own videos.</p>
+  <p class="muted">For each frame, choose what the <strong class="person person--parent">parent (green box)</strong> and the <strong class="person person--child">child (orange box)</strong> are looking at. If you can, also click <em>Mark spot</em> and then click the spot in the image they are looking at. Skip anything you can&#39;t judge. You can save and come back later.</p>
+  <label for="labeler">Your initials</label>
+  <input id="labeler" autocomplete="off">
+</section>
+<p class="annotate-progress" id="progress" aria-live="polite"></p>
+<div id="cards"></div>
+<p><button id="save" class="cta" type="button">Save labels</button> <span id="save-status" class="muted" aria-live="polite"></span></p>
+<script id="gaze-data" type="application/json">{{ payload|script_json }}</script><script src="/static/gaze_label.js"></script>{% endblock %}

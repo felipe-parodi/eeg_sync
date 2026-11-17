@@ -108,6 +108,21 @@ video-infer run \
 |---|---|
 | `--tracker-backend internal` | Two-person heuristic: parent = largest bbox at frame 0, then IoU continuity. Only suitable when `--max-persons 2` and detections are clean. |
 | `--tracker-backend roboflow --tracker-name bytetrack` | ByteTrack with `lost_track_buffer=60` (frames). Recommended for `--max-persons > 2` or any session with possible occlusions. |
+| `--tracker-backend offline` | **Portal default (2 people).** Caches every detection down to conf 0.05 with keypoints and a ReID embedding (`intermediate/detections.npz`), then solves parent/child over the whole recording (`video_inference/offline_assoc.py`). Without anchors the taller person is the parent. Requires `--max-persons 2`. |
+
+With the offline tracker, re-solve identities with anchor labels and write the
+filtered CSVs directly (this replaces `video-filter-tracks`):
+
+```bash
+python -m video_inference.offline_assoc --camera-dir <camera_dir> --anchors-json anchors.json
+# -> tracks_2d_filtered.csv, pose_3d_filtered.csv, two_person_summary.json
+python -m video_inference.topdown_refine --camera-dir <camera_dir>
+# -> pose_3d_refined.csv (ViTPose-Large keypoints, gated against the YOLO ones)
+```
+
+`anchors.json` is the portal's format: a list of `{frame_idx, parent_track_id,
+child_track_id}` (or `{frame_idx, skipped: true}`) referring to `tracks_2d.csv`.
+Benchmark and rationale: `docs/plans/pose-quality-overhaul_261009.md`.
 
 ### Per-camera outputs
 
@@ -197,7 +212,7 @@ Writes `tracks_2d_corrected.csv`, `pose_3d_corrected.csv`. Use these as inputs t
 
 ## Stage 4 — `video-interpolate` (optional)
 
-Linearly upsamples low-FPS outputs (e.g. 1 fps → 8 fps). Gap-aware: won't interpolate across `--max-gap-s` (default ~10 frames worth). Usually **not needed** if you ran inference at 5 fps already.
+Fills short gaps (at most `--max-gap-seconds`, default 1 s) by straight-line interpolation at the extracted frame times listed in `frames/frame_index.csv`. Longer gaps stay empty, and filling never crosses from one block into another. Filled rows are flagged `interpolated`.
 
 ```bash
 video-interpolate \
@@ -241,13 +256,13 @@ video-pose-metrics \
   --xcorr-max-lag 2.0
 ```
 
-Reads `session_blocks` from `session_config.json`. Writes per-block plots + a per-block CSV (`pose_metrics_<block>.csv`).
+Pass `--camera-id`: each camera uses its own blocks (`session_blocks_by_camera` in `session_config.json`, falling back to `session_blocks`). Writes `pose_metrics_summary.json` (per block, including tracking coverage: `frames_with_both`, `coverage_both`, `low_coverage`), `pose_metrics_proximity.csv`, `pose_metrics_xcorr.csv`, and plots.
 
 ---
 
 ## Stage 5b–d — gaze
 
-Three CLIs run in order: `gaze-infer` → `gaze-synchrony` → `gaze-plot`. Requires the optional Gazelle dependencies (`pip install -e ".[gaze]"`) and the `third_party/gazelle` submodule (`git submodule update --init`).
+Three CLIs run in order: `gaze-infer` → `gaze-synchrony` → `gaze-plot`. `gaze-infer` runs PaGE ViT-B (weights from Hugging Face at a pinned revision; `uv sync --extra gaze`). `gaze-infer-gazelle` runs the previous model, Gaze-LLE, with the same outputs. PaGE was preferred in a blind side-by-side on 50 random lab frames and has lower published error on the ChildPlay child-gaze benchmark. Head boxes are normalized by the real frame size read from `frames/`.
 
 ```bash
 gaze-infer \
@@ -268,7 +283,7 @@ gaze-plot \
   --session-config session_config.json
 ```
 
-`gaze-infer` writes `gaze_heatmap.csv` (per-frame scalars) and `gaze_heatmaps.npz` (64×64 heatmaps).
+`gaze-infer` writes `gaze_heatmap.csv` (per-frame scalars) and `gaze_heatmaps.npz` (64×64 heatmaps). Images are found through `frames/frame_index.csv` by time, so gaze covers every block.
 `gaze-synchrony` writes `synchrony_metrics.csv` (one row per frame, all four metrics) and `synchrony_summary.json`.
 `gaze-plot` writes `synchrony_dashboard.png` (4-panel, shaded by `session_blocks` colors).
 
@@ -276,7 +291,7 @@ gaze-plot \
 
 ## Stage 5e — `video-gaze-metrics`
 
-Per-block gaze category proportions (mutual, joint, parent-watching, child-watching, independent) and gaze convergence.
+Per-block gaze category shares, each with a chance level (child's gaze shifted 60 s), and gaze convergence. Categories: mutual gaze, joint attention, parent watching, child watching, both watching, independent, unknown. Rules are in [`OUTPUTS.md`](OUTPUTS.md#synchrony_metricscsv).
 
 ```bash
 video-gaze-metrics \
@@ -288,7 +303,9 @@ video-gaze-metrics \
 
 > **Footgun**: `video-gaze-metrics` (and `video-gaze-snapshots`) default `--pose-input` to `pose_3d_filtered_5hz.csv` — a file the standard colleague workflow never produces. Always pass `--pose-input` and `--tracks-input` explicitly.
 
-Writes `gaze_metrics_<block>.png` and a per-block CSV.
+Writes `gaze_metrics_summary.json`, `gaze_metrics_categories.csv`, `gaze_metrics_convergence.csv`, and plots.
+
+After every camera is done, `video-session-report --session-dir <session> --all-sessions-root video_inference/output` writes `session_metrics.csv`, `report.html`, and the study-wide `all_sessions_metrics.csv`.
 
 ---
 

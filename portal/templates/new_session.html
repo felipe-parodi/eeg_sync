@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% set cameras = [("camera_a", "a", "Video A"), ("camera_b", "b", "Video B")] %}
+{% block body %}<div class="page-head">
+  <h1>New session</h1>
+  <a class="button button--secondary" href="/">Back to sessions</a>
+</div>
+
+<datalist id="task-name-suggestions">{% for name in task_suggestions %}<option value="{{ name }}">{% endfor %}</datalist>
+
+<form id="upload-form" class="steps-form" novalidate>
+  <section class="card step" aria-labelledby="step-1">
+    <h2 id="step-1"><span class="step__num" aria-hidden="true">1</span>Session ID</h2>
+    <label for="session_id">Session ID</label>
+    <input id="session_id" name="session_id" type="text" autocomplete="off" spellcheck="false" placeholder="P001c" aria-describedby="session_id-help session_id-error">
+    <p id="session_id-help" class="muted">The participant or session name. It names the results folder and appears on every output.</p>
+    <p id="session_id-error" class="field-error" hidden></p>
+    <div id="session-exists" class="warning" hidden>
+      <p id="session-exists-text"></p>
+      <label class="check"><input id="replace_existing" name="replace_existing" type="checkbox" value="yes"> Replace the earlier results</label>
+      <p class="muted">The earlier results are moved to an archive folder, never deleted or mixed with the new run. Or type a new session ID instead.</p>
+    </div>
+  </section>
+
+  <section class="card step" aria-labelledby="step-2">
+    <h2 id="step-2"><span class="step__num" aria-hidden="true">2</span>Videos</h2>
+    <p class="muted">Choose at least one GoPro video. If only one camera recorded, leave the other empty.</p>
+    <div class="camera-grid">
+      {% for camera_id, letter, label in cameras %}<div>
+        <label for="video_{{ letter }}">GoPro {{ label }}</label>
+        <div class="file-drop-zone" data-file-input="video_{{ letter }}" tabindex="0" role="button" aria-describedby="video_{{ letter }}_selected">
+          <strong>Drop GoPro {{ label }} here</strong>
+          <span class="muted">or click to choose a file</span>
+          <span id="video_{{ letter }}_selected" class="muted file-name">No file selected</span>
+          <span id="video_{{ letter }}_duration" class="file-duration"></span>
+        </div>
+        <input id="video_{{ letter }}" class="file-input-native" name="video_{{ letter }}" type="file" accept=".mov,.mp4,.avi,.mkv,.m4v">
+      </div>{% endfor %}
+    </div>
+    <p id="videos-error" class="field-error" hidden></p>
+  </section>
+
+  <section class="card step" aria-labelledby="step-3">
+    <h2 id="step-3"><span class="step__num" aria-hidden="true">3</span>Tasks</h2>
+    <p class="muted">Each task is a part of the video to analyse, with its start and end as shown in that video. Type times as seconds (90), minutes:seconds (1:30) or hours:minutes:seconds (1:01:30).</p>
+    <div class="camera-grid">
+      {% for camera_id, letter, label in cameras %}<div class="camera-block" data-camera="{{ camera_id }}">
+        <h3>{{ label }} tasks</h3>
+        <p class="muted no-video-note" data-no-video="{{ camera_id }}">No {{ label }} chosen in step 2.</p>
+        <div id="tasks-{{ camera_id }}" class="row-list" data-kind="task" data-camera="{{ camera_id }}"></div>
+        <p class="row-actions">
+          <button type="button" class="button--secondary" data-add-row="tasks-{{ camera_id }}">Add task</button>
+          {% if camera_id == "camera_b" %}<button id="copy-tasks-a-to-b" type="button" class="button--secondary">Copy Video A tasks to Video B</button>{% endif %}
+        </p>
+        {% if camera_id == "camera_b" %}<p class="muted">The two cameras' clocks differ, so copying only pre-fills the rows. Check and change every Video B time to match Video B.</p>
+        <p id="copy-status" class="muted" role="status"></p>{% endif %}
+        <p id="tasks-{{ camera_id }}-error" class="field-error" hidden></p>
+        <textarea id="blocks_text_{{ letter }}" name="blocks_text_{{ letter }}" class="text-mirror" hidden aria-hidden="true" tabindex="-1"></textarea>
+      </div>{% endfor %}
+    </div>
+  </section>
+
+  <section class="card step" aria-labelledby="step-4">
+    <h2 id="step-4"><span class="step__num" aria-hidden="true">4</span>Extra-person windows</h2>
+    <p class="muted">Times when someone other than the parent and child is in view (for example the experimenter). These times are removed from the analysis. Enter them in each video's own time. Leave empty if nobody else appeared.</p>
+    <div class="camera-grid">
+      {% for camera_id, letter, label in cameras %}<div class="camera-block" data-camera="{{ camera_id }}">
+        <h3>{{ label }} windows</h3>
+        <div id="windows-{{ camera_id }}" class="row-list" data-kind="window" data-camera="{{ camera_id }}"></div>
+        <p class="row-actions"><button type="button" class="button--secondary" data-add-row="windows-{{ camera_id }}">Add window</button></p>
+        <textarea id="exclusions_text_{{ letter }}" name="exclusions_text_{{ letter }}" class="text-mirror" hidden aria-hidden="true" tabindex="-1"></textarea>
+        <h4>What will be analysed in {{ label }}</h4>
+        <div id="timeline-{{ camera_id }}" class="timeline"></div>
+      </div>{% endfor %}
+    </div>
+  </section>
+
+  <section class="card step" aria-labelledby="step-5">
+    <h2 id="step-5"><span class="step__num" aria-hidden="true">5</span>Options</h2>
+    <label class="check"><input name="include_gaze" type="checkbox" value="yes"> Also measure where people look (gaze)</label>
+    <p class="muted">Adds gaze heatmaps and gaze measures after pose tracking. The job takes longer.</p>
+  </section>
+
+  <section class="card step" aria-labelledby="step-6">
+    <h2 id="step-6"><span class="step__num" aria-hidden="true">6</span>Review and start</h2>
+    <dl id="review" class="review"></dl>
+    <div id="form-errors" class="error-summary" tabindex="-1" hidden>
+      <p><strong>Please fix these before starting</strong></p>
+      <ul id="form-errors-list"></ul>
+    </div>
+    <button id="submit-button" type="submit">Start processing</button>
+    <p id="upload-status" class="muted" role="status"></p>
+    <progress id="upload-progress" value="0" max="100" style="width: 100%; display: none;"></progress>
+  </section>
+</form>
+
+<script>
+const CHUNK_SIZE = {{ chunk_size }};
+const CSRF_TOKEN = "{{ csrf_token }}";
+const MIN_PART_S = {{ min_part_s }};
+const VIDEO_END_TOLERANCE_S = {{ video_end_tolerance_s }};
+</script>
+<script src="/static/index.js"></script>{% endblock %}

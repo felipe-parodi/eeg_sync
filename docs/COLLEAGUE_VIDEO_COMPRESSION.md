@@ -27,7 +27,7 @@ python scripts\compress_videos_for_portal.py --input-dir "C:\Videos"
 
 Outputs go to `portal_compressed/` by default. The defaults are portal-compatible:
 
-- 8 FPS
+- 10 FPS (the portal analyses every 2nd frame, 5 per second, evenly spaced)
 - maximum width 854 px
 - no audio
 - aggressive H.264 compression

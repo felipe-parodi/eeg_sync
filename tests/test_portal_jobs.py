@@ -3,11 +3,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZipFile
 
+import pandas as pd
 import pytest
 
 import portal.app as portal_app
 from portal.app import build_submission_metadata
-from portal.app import index as render_index
+from portal.app import new_session as render_upload_page
 from portal.jobs import (
     PORTAL_DEFAULT_FRAME_RATE,
     PORTAL_DEFAULT_MAX_PERSONS,
@@ -33,7 +34,7 @@ def test_upload_page_exposes_drag_and_drop_targets(monkeypatch) -> None:
     monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
     monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
     portal_app.SESSION_TOKENS.clear()
-    response = render_index(portal_app.create_session_token())
+    response = render_upload_page(portal_app.create_session_token())
     text = response.body.decode("utf-8")
 
     assert response.status_code == 200
@@ -50,13 +51,9 @@ def test_upload_page_exposes_drag_and_drop_targets(monkeypatch) -> None:
     )
     assert "Drop GoPro Video A here" in text
     assert "Drop GoPro Video B here" in text
-    assert "Upload at least one GoPro video" in text
-    assert "Video A Analysis Blocks" in text
-    assert "Video B Analysis Blocks" in text
-    assert 'class="info-icon"' in text
-    assert "Proximity" in text
-    assert "Movement synchrony" in text
-    assert "Gaze estimation" in text
+    assert "Choose at least one GoPro video" in text
+    assert "Video A tasks" in text
+    assert "Video B tasks" in text
 
 
 def test_portal_password_and_secret_must_be_configured(monkeypatch) -> None:
@@ -67,49 +64,6 @@ def test_portal_password_and_secret_must_be_configured(monkeypatch) -> None:
         portal_app.portal_password()
     with pytest.raises(RuntimeError, match="PORTAL_SECRET_KEY must be set"):
         portal_app.portal_secret_key()
-
-
-def test_purge_all_jobs_removes_every_job_regardless_of_state(
-    monkeypatch, tmp_path: Path
-) -> None:
-    job_root = tmp_path / "jobs"
-    upload_root = tmp_path / "uploads"
-    job_root.mkdir()
-    upload_root.mkdir()
-
-    states = {
-        "20260101_000000_PXXX_upload": "uploading",
-        "20260101_000001_PXXX_done": "completed",
-        "20260101_000002_PXXX_fail": "failed",
-    }
-    for job_id, state in states.items():
-        job_dir = job_root / job_id
-        job_dir.mkdir()
-        write_status(job_dir, {"state": state, "message": "x"})
-        upload_dir = upload_root / job_id
-        upload_dir.mkdir()
-        (upload_dir / "chunk_0001.part").write_bytes(b"partial")
-    # A loose log file in JOB_ROOT should not be touched.
-    loose_log = job_root / "server.out.log"
-    loose_log.write_text("server log", encoding="utf-8")
-
-    monkeypatch.setattr(portal_app, "JOB_ROOT", job_root)
-    monkeypatch.setattr(portal_app, "UPLOAD_ROOT", upload_root)
-
-    removed = portal_app.purge_all_jobs()
-
-    assert removed == len(states)
-    for job_id in states:
-        assert not (job_root / job_id).exists()
-        assert not (upload_root / job_id).exists()
-    assert loose_log.exists()
-
-
-def test_purge_all_jobs_handles_missing_job_root(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path / "does_not_exist")
-    monkeypatch.setattr(portal_app, "UPLOAD_ROOT", tmp_path / "uploads")
-
-    assert portal_app.purge_all_jobs() == 0
 
 
 def test_run_chunked_portal_job_records_failure_and_does_not_raise(
@@ -130,7 +84,10 @@ def test_run_chunked_portal_job_records_failure_and_does_not_raise(
 
     status = json.loads((job_dir / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "failed"
-    assert "simulated subprocess failure" in status["message"]
+    # The raw error goes to the technical details, not the headline.
+    assert "simulated subprocess failure" in status["error"]
+    assert "simulated subprocess failure" not in status["message"]
+    assert status["message"].startswith("The job stopped while")
     captured = capsys.readouterr()
     assert safe_job_id in captured.out
     assert "failed" in captured.out.lower()
@@ -161,7 +118,7 @@ def test_index_embeds_session_csrf_token(monkeypatch) -> None:
     session_token = portal_app.create_session_token()
     csrf_token = portal_app.csrf_token_for_session(session_token)
 
-    response = render_index(session_token)
+    response = render_upload_page(session_token)
     text = response.body.decode("utf-8")
 
     assert f'const CSRF_TOKEN = "{csrf_token}";' in text
@@ -784,7 +741,7 @@ def test_annotate_page_track_buttons_use_dark_readable_text(
     monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
     monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
     portal_app.SESSION_TOKENS.clear()
-    portal_app.create_session_token()
+    session_token = portal_app.create_session_token()
 
     camera_dir = tmp_path / "job-001" / "anchors" / "camera_a"
     camera_dir.mkdir(parents=True)
@@ -806,7 +763,7 @@ def test_annotate_page_track_buttons_use_dark_readable_text(
         encoding="utf-8",
     )
 
-    response = portal_app.annotate_job("job-001", None)
+    response = portal_app.annotate_job("job-001", session_token)
     text = response.body.decode("utf-8")
 
     # The track buttons sit on a light tinted background; the global button
@@ -980,3 +937,495 @@ def test_anchor_image_endpoint_serves_jpeg(monkeypatch, tmp_path: Path) -> None:
     response = portal_app.anchor_image("job-001", "camera_a", "anchor_01.jpg", None)
     assert response.media_type == "image/jpeg"
     assert Path(response.path).name == "anchor_01.jpg"
+
+
+def test_build_phase1_uses_offline_two_person_tracker(tmp_path: Path) -> None:
+    from portal.jobs import build_phase1_steps
+
+    argv = build_phase1_steps(_job_config_two_cameras(tmp_path))[0].argv
+    assert argv[argv.index("--tracker-backend") + 1] == "offline"
+    assert "botsort" not in argv
+
+
+def test_build_phase2_uses_offline_association_when_cache_exists(
+    tmp_path: Path,
+) -> None:
+    from portal.jobs import build_phase2_steps
+
+    cfg = _job_config_two_cameras(tmp_path)
+    for cam in ("camera_a", "camera_b"):
+        cache = cfg.session_output_dir / cam / "intermediate" / "detections.npz"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b"")
+    anchors_a = tmp_path / "anchors_a.json"
+    steps = build_phase2_steps(cfg, anchors_json_by_camera={"camera_a": anchors_a})
+    by_name = {s.name: s.argv for s in steps}
+    filter_a = by_name["filter tracks camera_a"]
+    assert "video_inference.offline_assoc" in filter_a
+    assert filter_a[filter_a.index("--anchors-json") + 1] == str(anchors_a)
+    filter_b = by_name["filter tracks camera_b"]
+    assert "video_inference.offline_assoc" in filter_b
+    assert "--anchors-json" not in filter_b
+
+
+def test_build_phase2_falls_back_to_track_filter_without_cache(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    steps = build_phase2_steps(_job_config_two_cameras(tmp_path))
+    by_name = {s.name: s.argv for s in steps}
+    assert "video_analysis.track_filter" in by_name["filter tracks camera_a"]
+
+
+def test_submission_metadata_records_offline_tracker() -> None:
+    metadata = build_submission_metadata(
+        job_id="job",
+        created_at="2026-10-09T00:00:00",
+        safe_session_id="P001",
+        blocks_text="free_play,0:10,0:40",
+        exclusions_text="",
+        video_a_name="a.mp4",
+        video_b_name="",
+        video_a_size=10,
+        video_b_size=0,
+        include_gaze=False,
+    )
+    assert metadata["processing"]["tracker_backend"] == "offline"
+    assert metadata["processing"]["tracker_name"] == "two_person_offline"
+
+
+def test_build_phase2_refines_keypoints_after_offline_association(
+    tmp_path: Path,
+) -> None:
+    from portal.jobs import build_phase2_steps
+
+    cfg = _job_config_two_cameras(tmp_path)
+    cfg.video_b = None
+    cache = cfg.session_output_dir / "camera_a" / "intermediate" / "detections.npz"
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(b"")
+    steps = build_phase2_steps(cfg)
+    names = [s.name for s in steps]
+    assert (
+        names.index("filter tracks camera_a")
+        < names.index("refine keypoints camera_a")
+        < names.index("interpolate tracks camera_a")
+    )
+    by_name = {s.name: s.argv for s in steps}
+    assert "video_inference.topdown_refine" in by_name["refine keypoints camera_a"]
+    assert "pose_3d_refined.csv" in by_name["interpolate tracks camera_a"]
+
+    cfg.refine_keypoints = False
+    names_off = [s.name for s in build_phase2_steps(cfg)]
+    assert "refine keypoints camera_a" not in names_off
+
+
+def test_phase2_steps_are_tagged_with_their_camera(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    steps = build_phase2_steps(_job_config_two_cameras(tmp_path))
+    for step in steps:
+        assert step.camera_id in {"camera_a", "camera_b"}
+        assert step.camera_id in step.name
+
+
+def test_phase1_requests_parallel_cameras(tmp_path: Path) -> None:
+    from portal.jobs import build_phase1_steps
+
+    cfg = _job_config_two_cameras(tmp_path)
+    assert "--parallel-cameras" in build_phase1_steps(cfg)[0].argv
+    cfg.parallel_cameras = False
+    assert "--parallel-cameras" not in build_phase1_steps(cfg)[0].argv
+
+
+def test_run_steps_runs_cameras_concurrently_and_merges_logs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import threading
+
+    from portal import jobs as portal_jobs
+    from portal.jobs import CommandStep, run_steps
+
+    barrier = threading.Barrier(2, timeout=5)
+
+    def fake_run(step, cwd, log_path):
+        if step.name.startswith("first"):
+            barrier.wait()  # both cameras must be inside their first step at once
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"== {step.name} ==\n")
+
+    monkeypatch.setattr(portal_jobs, "run_command_step", fake_run)
+    steps = [
+        CommandStep("first camera_a", [], "camera_a"),
+        CommandStep("second camera_a", [], "camera_a"),
+        CommandStep("first camera_b", [], "camera_b"),
+        CommandStep("second camera_b", [], "camera_b"),
+    ]
+    seen = []
+    log = tmp_path / "job.log"
+    run_steps(
+        steps,
+        tmp_path,
+        log,
+        on_start=lambda i, n, s: seen.append(i),
+        parallel_cameras=True,
+    )
+    assert sorted(seen) == [1, 2, 3, 4]
+    text = log.read_text(encoding="utf-8")
+    assert (
+        text.index("first camera_a")
+        < text.index("second camera_a")
+        < text.index("first camera_b")
+    )
+    assert not list(tmp_path.glob("job.camera_*.log"))
+
+
+def test_run_steps_reports_failure_after_other_camera_finishes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import subprocess
+
+    from portal import jobs as portal_jobs
+    from portal.jobs import CommandStep, run_steps
+
+    ran = []
+
+    def fake_run(step, cwd, log_path):
+        ran.append(step.name)
+        if step.name == "boom camera_a":
+            raise subprocess.CalledProcessError(1, ["x"])
+
+    monkeypatch.setattr(portal_jobs, "run_command_step", fake_run)
+    steps = [
+        CommandStep("boom camera_a", [], "camera_a"),
+        CommandStep("after camera_a", [], "camera_a"),
+        CommandStep("ok camera_b", [], "camera_b"),
+    ]
+    with pytest.raises(subprocess.CalledProcessError):
+        run_steps(steps, tmp_path, tmp_path / "job.log", parallel_cameras=True)
+    assert "ok camera_b" in ran
+    assert "after camera_a" not in ran
+
+
+def test_run_steps_never_overlaps_gpu_heavy_steps(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    import time
+
+    from portal import jobs as portal_jobs
+    from portal.jobs import CommandStep, run_steps
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def fake_run(step, cwd, log_path):
+        nonlocal active, peak
+        if step.gpu_heavy:
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(portal_jobs, "run_command_step", fake_run)
+    steps = [
+        CommandStep(f"refine {cam}", [], cam, gpu_heavy=True)
+        for cam in ("camera_a", "camera_b")
+    ]
+    run_steps(steps, tmp_path, tmp_path / "job.log", parallel_cameras=True)
+    assert peak == 1
+
+
+def test_build_submission_metadata_applies_exclusions_per_camera_clock() -> None:
+    # Each camera has its own clock, so each gets its own extra-person windows.
+    metadata = build_submission_metadata(
+        job_id="job-001",
+        created_at="2026-05-14T13:00:00",
+        safe_session_id="1015",
+        blocks_text="grocery,16:00,26:50",
+        blocks_text_b="grocery,14:48,25:54",
+        exclusions_text="18:06,18:21,experimenter entered",
+        exclusions_text_b="16:54,17:09,experimenter entered",
+        video_a_name="a.mp4",
+        video_b_name="b.mp4",
+        video_a_size=1024,
+        video_b_size=2048,
+        include_gaze=False,
+    )
+
+    blocks = metadata["analysis_blocks_by_camera"]
+    assert [(b["start_s"], b["end_s"]) for b in blocks["camera_a"]] == [
+        (960.0, 1086.0),
+        (1101.0, 1610.0),
+    ]
+    assert [(b["start_s"], b["end_s"]) for b in blocks["camera_b"]] == [
+        (888.0, 1014.0),
+        (1029.0, 1554.0),
+    ]
+    windows = metadata["extra_person_windows_by_camera"]
+    assert windows["camera_b"][0]["start_s"] == 1014.0
+    assert metadata["raw_inputs"]["extra_person_windows_text_b"] == (
+        "16:54,17:09,experimenter entered"
+    )
+
+
+def test_build_submission_metadata_camera_b_exclusions_can_be_empty() -> None:
+    metadata = build_submission_metadata(
+        job_id="job-001",
+        created_at="2026-05-14T13:00:00",
+        safe_session_id="1015",
+        blocks_text="grocery,16:00,26:50",
+        blocks_text_b="grocery,14:48,25:54",
+        exclusions_text="18:06,18:21,experimenter entered",
+        exclusions_text_b="",
+        video_a_name="a.mp4",
+        video_b_name="b.mp4",
+        video_a_size=1024,
+        video_b_size=2048,
+        include_gaze=False,
+    )
+
+    assert len(metadata["analysis_blocks_by_camera"]["camera_a"]) == 2
+    assert len(metadata["analysis_blocks_by_camera"]["camera_b"]) == 1
+
+
+def _write_session_metrics(output_root: Path, session_id: str, coverage: float) -> None:
+    session = output_root / session_id
+    session.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "session_id": session_id,
+                "camera_id": "camera_a",
+                "block": "storybook",
+                "block_start_s": 100.0,
+                "block_end_s": 200.0,
+                "block_frames": 601,
+                "coverage_both": coverage,
+                "low_coverage": coverage < 0.5,
+            }
+        ]
+    ).to_csv(session / "session_metrics.csv", index=False)
+
+
+def test_job_page_shows_block_coverage(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path / "portal_jobs")
+    monkeypatch.setattr(portal_app, "OUTPUT_ROOT", tmp_path)
+    job_dir = tmp_path / "portal_jobs" / "job-001"
+    write_status(job_dir, {"state": "complete", "message": "Done."})
+    (job_dir / "job_config.json").write_text(
+        json.dumps({"session_id": "1012"}), encoding="utf-8"
+    )
+    _write_session_metrics(tmp_path, "1012", 0.21)
+
+    text = portal_app.job_detail("job-001", None).body.decode("utf-8")
+
+    assert "storybook" in text
+    assert "21%" in text
+    assert "Low" in text
+
+
+def test_all_sessions_table_download(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(portal_app, "OUTPUT_ROOT", tmp_path)
+    _write_session_metrics(tmp_path, "1010", 0.9)
+    _write_session_metrics(tmp_path, "1012", 0.2)
+
+    response = portal_app.download_all_sessions_table(None)
+
+    table = pd.read_csv(response.path)
+    assert sorted(table["session_id"].astype(str)) == ["1010", "1012"]
+
+
+def _gaze_label_job(tmp_path: Path, monkeypatch) -> Path:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "gaze_label_helpers", Path(__file__).with_name("test_portal_gaze_labels.py")
+    )
+    helpers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helpers)
+    _camera = helpers._camera
+
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path / "portal_jobs")
+    monkeypatch.setattr(portal_app, "OUTPUT_ROOT", tmp_path)
+    session = tmp_path / "1012"
+    session.mkdir()
+    _camera(session)
+    job_dir = tmp_path / "portal_jobs" / "job-001"
+    write_status(job_dir, {"state": "complete", "message": "Done."})
+    (job_dir / "job_config.json").write_text(
+        json.dumps(
+            {
+                "session_id": "1012",
+                "frame_rate": 6.0,
+                "blocks_by_camera": {
+                    "camera_a": [{"name": "grocery", "start_s": 100.0, "end_s": 199.0}]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return job_dir
+
+
+def test_gaze_label_page_lists_frames(tmp_path: Path, monkeypatch) -> None:
+    _gaze_label_job(tmp_path, monkeypatch)
+    monkeypatch.setattr(portal_app, "csrf_token_for_session", lambda token: "csrf")
+
+    text = portal_app.gaze_label_page("job-001", None).body.decode("utf-8")
+
+    assert "The other person's face" in text
+    assert '"image_name": "frame_' in text
+    assert "/gaze-frames/" in text
+
+
+def test_gaze_label_submission_is_saved_with_outputs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from portal.gaze_labels import load_gaze_labels
+
+    _gaze_label_job(tmp_path, monkeypatch)
+    entry = {
+        "frame_idx": 600,
+        "timestamp_s": 100.0,
+        "person": "child",
+        "target": "object",
+        "point": None,
+    }
+    saved = portal_app._save_gaze_label_submission(
+        "job-001", {"labeler": "RA", "labels": {"camera_a": [entry]}}
+    )
+
+    assert saved == {"camera_a": 1}
+    assert load_gaze_labels(tmp_path / "1012" / "camera_a") == [entry]
+    with pytest.raises(Exception):
+        portal_app._save_gaze_label_submission(
+            "job-001", {"labels": {"camera_z": [entry]}}
+        )
+
+
+def test_gaze_step_uses_page_by_default_and_gazelle_on_request(tmp_path: Path) -> None:
+    from portal.jobs import build_phase2_steps
+
+    cfg = _job_config_two_cameras(tmp_path)
+    cfg.include_gaze = True
+    gaze = [s for s in build_phase2_steps(cfg) if s.name.startswith("gaze inference")]
+    assert len(gaze) == 2
+    assert all("gaze_analysis.page_runner" in s.argv for s in gaze)
+
+    cfg.gaze_model = "gazelle"
+    gaze = [s for s in build_phase2_steps(cfg) if s.name.startswith("gaze inference")]
+    assert all("gaze_analysis.gazelle_runner" in s.argv for s in gaze)
+
+
+# ---- Frame timing (metrics-validity plan, phase 0) ----
+
+
+def _write_extraction_info(config, camera_id: str, achieved: float) -> None:
+    frames = config.session_output_dir / camera_id / "frames"
+    frames.mkdir(parents=True, exist_ok=True)
+    (frames / "extraction_info.json").write_text(
+        json.dumps({"achieved_frame_rate": achieved}), encoding="utf-8"
+    )
+
+
+def test_portal_defaults_give_even_5_fps() -> None:
+    """Portal compression at 10 fps divides evenly into the 5 fps analysis rate."""
+    from portal.jobs import PORTAL_DEFAULT_FRAME_RATE, CompressionSettings
+
+    assert PORTAL_DEFAULT_FRAME_RATE == 5.0
+    assert CompressionSettings().target_fps == 10.0
+
+
+def test_session_frame_rate_uses_achieved_rate(tmp_path: Path) -> None:
+    from portal.jobs import achieved_session_frame_rate
+
+    config = _job_config_two_cameras(tmp_path)
+    _write_extraction_info(config, "camera_a", 5.0)
+    _write_extraction_info(config, "camera_b", 5.0)
+
+    assert achieved_session_frame_rate(config) == 5.0
+
+
+def test_session_frame_rate_falls_back_without_extraction_info(tmp_path: Path) -> None:
+    from portal.jobs import achieved_session_frame_rate
+
+    config = _job_config_two_cameras(tmp_path)
+
+    assert achieved_session_frame_rate(config) == config.frame_rate
+
+
+def test_session_frame_rate_mismatch_stops_with_plain_message(tmp_path: Path) -> None:
+    from portal.jobs import achieved_session_frame_rate
+
+    config = _job_config_two_cameras(tmp_path)
+    _write_extraction_info(config, "camera_a", 5.0)
+    _write_extraction_info(config, "camera_b", 4.0)
+
+    with pytest.raises(ValueError, match="frames per second"):
+        achieved_session_frame_rate(config)
+
+
+def test_phase2_resume_uses_achieved_frame_rate(tmp_path: Path, monkeypatch) -> None:
+    """Phase 2 rebuilds its config from the upload; it must re-read the rate."""
+    import portal.jobs as jobs
+
+    config = _job_config_two_cameras(tmp_path)
+    config.job_dir.mkdir(parents=True, exist_ok=True)
+    _write_extraction_info(config, "camera_a", 4.0)
+    _write_extraction_info(config, "camera_b", 4.0)
+    seen: list[float] = []
+
+    def fake_build(cfg, anchors_json_by_camera=None):
+        seen.append(cfg.frame_rate)
+        raise RuntimeError("stop after step building")
+
+    monkeypatch.setattr(jobs, "build_phase2_steps", fake_build)
+    monkeypatch.setattr(jobs, "resolve_anchors_json_paths", lambda cfg: {})
+
+    try:
+        jobs.resume_portal_job_phase2(config, tmp_path)
+    except RuntimeError:
+        pass
+
+    assert seen == [4.0]
+
+
+def test_annotate_page_uses_the_callers_own_csrf_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """With two people logged in, each sees their own CSRF token.
+
+    The page used to embed the most recently created session's token, so the
+    earlier user's submit was rejected with 403.
+    """
+    monkeypatch.setenv("PORTAL_PASSWORD", "test-password")
+    monkeypatch.setenv("PORTAL_SECRET_KEY", "test-secret")
+    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path)
+    portal_app.SESSION_TOKENS.clear()
+    first = portal_app.create_session_token()
+    second = portal_app.create_session_token()
+    # The second person logged in later, so their session expires later.
+    portal_app.SESSION_TOKENS[second].expires_at += 600
+
+    camera_dir = tmp_path / "job-001" / "anchors" / "camera_a"
+    camera_dir.mkdir(parents=True)
+    (camera_dir / "manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "anchor_idx": 0,
+                    "image_filename": "anchor_000.jpg",
+                    "frame_idx": 10,
+                    "timestamp_s": 1.25,
+                    "tracks": [{"track_id": 1, "color_bgr": [0, 255, 0]}],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    text = portal_app.annotate_job("job-001", first).body.decode("utf-8")
+
+    assert portal_app.csrf_token_for_session(first) in text
+    assert portal_app.csrf_token_for_session(second) not in text

@@ -6,7 +6,7 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -96,55 +96,73 @@ def _interpolate_group(
     target_timestamps: np.ndarray,
     numeric_columns: List[str],
     max_gap_seconds: float = 0.0,
+    window_by_time: Optional[Dict[float, str]] = None,
 ) -> pd.DataFrame:
+    """Fill one track (or one keypoint) at the target times.
+
+    A target time with no observation is filled by straight-line
+    interpolation only when there is an observation before and after it, the
+    missing stretch between those two observations is at most
+    ``max_gap_seconds``, and (when blocks are known) both observations and the
+    target are in the same block. Longer gaps stay empty: nothing is filled
+    partway into them. Observed rows are always kept.
+
+    Args:
+        group_df: Rows for one track or one track/keypoint.
+        target_timestamps: Times at which a row may exist (extracted frames).
+        numeric_columns: Columns to interpolate.
+        max_gap_seconds: Longest missing stretch to bridge, in seconds.
+        window_by_time: Optional map from rounded time to block name.
+
+    Returns:
+        One row per observed or filled time, with an ``interpolated`` flag.
+    """
     indexed = (
         group_df.sort_values("timestamp_s")
         .drop_duplicates(subset=["timestamp_s"], keep="last")
         .set_index("timestamp_s")
     )
-    # Round both the source index and the target grid to the microsecond before
-    # matching. Source timestamps are frame_idx / fps; the target grid is built
-    # by np.arange. For frame rates whose period is not exactly representable in
-    # float (e.g. 1/6 s), arange accumulates error that diverges from
-    # frame_idx / fps at large timestamps, so an exact-match reindex would drop
-    # nearly every observed frame. 1 us is far below any frame spacing and far
-    # above the float drift, so rounding aligns the grids without merging frames.
+    # Round to the microsecond so float noise in timestamps never prevents an
+    # observation from matching its frame time.
     indexed.index = np.round(indexed.index.to_numpy(dtype=float), 6)
     indexed = indexed[~indexed.index.duplicated(keep="last")]
+    obs_t = indexed.index.to_numpy(dtype=float)
+    obs_v = indexed[numeric_columns].to_numpy(dtype=float)
+
     target = np.round(np.asarray(target_timestamps, dtype=float), 6)
+    target = np.union1d(target, obs_t)  # observed rows are never dropped
+    diffs = np.diff(target)
+    diffs = diffs[diffs > 1e-9]
+    step = float(np.median(diffs)) if diffs.size else 0.0
 
-    # Compute max consecutive NaN fill limit from max_gap_seconds.
-    if max_gap_seconds > 0 and len(target) >= 2:
-        step = float(np.median(np.diff(target)))
-        max_fill = max(1, int(max_gap_seconds / step)) if step > 0 else None
-    else:
-        max_fill = None
+    observed = np.isin(target, obs_t)
+    values = np.full((len(target), len(numeric_columns)), np.nan)
+    pos = np.searchsorted(obs_t, target)
+    values[observed] = obs_v[pos[observed]]
 
-    expanded = indexed.reindex(target)
-    # A target timestamp that had an actual observation has a non-NaN value in
-    # the first numeric column (bbox_x1 / x_m); everything else is filled by
-    # interpolation below. Record this before interpolating so the output can
-    # flag which rows are observed vs filled.
-    observed = expanded[numeric_columns[0]].notna().to_numpy()
-    # On some pandas/numpy version combinations (notably Python 3.11 with
-    # pandas >=2.1), limit_area="inside" triggers an internal
-    # sliding_window_view call that raises ValueError when the array has
-    # fewer than 4 elements.  Fall back to plain linear interpolation for
-    # small arrays — the result is identical for interior NaN values.
-    if len(expanded) < 4:
-        expanded[numeric_columns] = expanded[numeric_columns].interpolate(
-            method="linear",
-            limit=max_fill,
-        )
-    else:
-        expanded[numeric_columns] = expanded[numeric_columns].interpolate(
-            method="linear",
-            limit_direction="both",
-            limit_area="inside",
-            limit=max_fill,
-        )
-    expanded["interpolated"] = ~observed
-    expanded["timestamp_s"] = expanded.index.astype(float)
+    fill = np.zeros(len(target), dtype=bool)
+    if max_gap_seconds > 0 and len(obs_t) >= 2:
+        has_both = (~observed) & (pos > 0) & (pos < len(obs_t))
+        prev_t = np.where(has_both, obs_t[np.clip(pos - 1, 0, None)], np.nan)
+        next_t = np.where(has_both, obs_t[np.clip(pos, None, len(obs_t) - 1)], np.nan)
+        missing_span = next_t - prev_t - step
+        fill = has_both & (missing_span <= max_gap_seconds + 1e-6)
+        if window_by_time:
+            for i in np.flatnonzero(fill):
+                here = window_by_time.get(float(target[i]))
+                before = window_by_time.get(float(prev_t[i]))
+                after = window_by_time.get(float(next_t[i]))
+                known = [w for w in (here, before, after) if w is not None]
+                if len(set(known)) > 1:
+                    fill[i] = False
+        for col in range(len(numeric_columns)):
+            values[fill, col] = np.interp(target[fill], obs_t, obs_v[:, col])
+
+    keep = observed | fill
+    expanded = indexed.reindex(target[keep])
+    expanded[numeric_columns] = values[keep]
+    expanded["interpolated"] = ~observed[keep]
+    expanded["timestamp_s"] = target[keep]
     return expanded.reset_index(drop=True)
 
 
@@ -153,6 +171,7 @@ def interpolate_tracks_2d(
     target_timestamps: np.ndarray,
     target_fps: float,
     max_gap_seconds: float = 1.0,
+    window_by_time: Optional[Dict[float, str]] = None,
 ) -> pd.DataFrame:
     _validate_required_columns(
         tracks_df,
@@ -172,7 +191,11 @@ def interpolate_tracks_2d(
     for track_id, group in tracks_df.groupby("track_id", dropna=False):
         group = group.copy()
         out = _interpolate_group(
-            group, target_timestamps, TRACK_NUMERIC_COLUMNS, max_gap_seconds
+            group,
+            target_timestamps,
+            TRACK_NUMERIC_COLUMNS,
+            max_gap_seconds,
+            window_by_time,
         )
         out["track_id"] = int(track_id)
         out["track_label"] = _mode_or_default(group["track_label"], "unknown")
@@ -202,6 +225,7 @@ def interpolate_pose_3d(
     target_timestamps: np.ndarray,
     target_fps: float,
     max_gap_seconds: float = 1.0,
+    window_by_time: Optional[Dict[float, str]] = None,
 ) -> pd.DataFrame:
     _validate_required_columns(
         pose_df,
@@ -223,7 +247,11 @@ def interpolate_pose_3d(
     for (track_id, keypoint_name), group in grouped:
         group = group.copy()
         out = _interpolate_group(
-            group, target_timestamps, POSE_NUMERIC_COLUMNS, max_gap_seconds
+            group,
+            target_timestamps,
+            POSE_NUMERIC_COLUMNS,
+            max_gap_seconds,
+            window_by_time,
         )
         out["track_id"] = int(track_id)
         out["track_label"] = _mode_or_default(group["track_label"], "unknown")
@@ -250,6 +278,33 @@ def interpolate_pose_3d(
     return merged
 
 
+def _frame_index_targets(
+    camera_dir: Path,
+) -> Tuple[Optional[np.ndarray], Optional[Dict[float, str]]]:
+    """Read the extracted frame times and their blocks from frames/frame_index.csv.
+
+    Args:
+        camera_dir: Camera output directory.
+
+    Returns:
+        ``(times, window_by_time)``, or ``(None, None)`` when no index exists
+        (older outputs), in which case a regular grid is used instead.
+    """
+    index_path = camera_dir / "frames" / "frame_index.csv"
+    if not index_path.exists():
+        return None, None
+    index = pd.read_csv(index_path)
+    if index.empty:
+        return None, None
+    times = np.round(index["timestamp_s"].to_numpy(dtype=float), 6)
+    windows = None
+    if "window_name" in index.columns:
+        windows = {
+            float(t): str(w) for t, w in zip(times, index["window_name"].astype(str))
+        }
+    return np.unique(times), windows
+
+
 def interpolate_camera_outputs(config: InterpolationConfig) -> Dict[str, object]:
     camera_dir = Path(config.camera_dir)
     if not camera_dir.exists():
@@ -265,23 +320,27 @@ def interpolate_camera_outputs(config: InterpolationConfig) -> Dict[str, object]
     tracks_df = pd.read_csv(tracks_path)
     pose_df = pd.read_csv(pose_path)
     source_fps = max(_infer_source_fps(tracks_df), _infer_source_fps(pose_df))
-    target_timestamps = _build_target_timestamps(
-        tracks_df=tracks_df,
-        pose_df=pose_df,
-        target_fps=config.target_fps,
-    )
+    target_timestamps, window_by_time = _frame_index_targets(camera_dir)
+    if target_timestamps is None:
+        target_timestamps = _build_target_timestamps(
+            tracks_df=tracks_df,
+            pose_df=pose_df,
+            target_fps=config.target_fps,
+        )
 
     tracks_interp = interpolate_tracks_2d(
         tracks_df=tracks_df,
         target_timestamps=target_timestamps,
         target_fps=config.target_fps,
         max_gap_seconds=config.max_gap_seconds,
+        window_by_time=window_by_time,
     )
     pose_interp = interpolate_pose_3d(
         pose_df=pose_df,
         target_timestamps=target_timestamps,
         target_fps=config.target_fps,
         max_gap_seconds=config.max_gap_seconds,
+        window_by_time=window_by_time,
     )
 
     tracks_out = camera_dir / config.tracks_output

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
-import html
 import json
 import math
+import mimetypes
 import os
 import re
 import secrets
@@ -31,22 +32,36 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup
+from starlette.responses import Response
+from starlette.types import Scope
 
 from .jobs import (
+    JOB_STAGES,
+    MIN_PART_S,
     PORTAL_DEFAULT_FRAME_RATE,
     PORTAL_DEFAULT_MAX_PERSONS,
     PORTAL_DEFAULT_MODEL_PATH,
+    PORTAL_TRACKER_BACKEND,
+    PORTAL_TRACKER_NAME,
     CompressionSettings,
     ExclusionWindow,
     PortalJobConfig,
     SessionBlock,
+    describe_step,
+    failed_status,
     final_upload_path_for,
+    format_clock,
     mark_chunk_received,
     parse_timecode,
+    probe_video_duration,
+    read_job_notes,
     read_status,
     resume_portal_job_phase2,
     run_portal_job,
-    split_blocks_for_exclusions,
+    split_blocks_with_min_part,
     validate_direct_chunked_upload,
     write_status,
 )
@@ -80,6 +95,9 @@ LOGIN_FAILURES: dict[str, list[float]] = {}
 # This is intentionally process-local. Run the portal as a single uvicorn
 # worker; multiple workers would each have their own GPU job lock.
 JOB_RUN_LOCK = threading.Lock()
+# Held while a labels submission checks the job is waiting and marks it
+# queued, so two quick submits can never both start phase 2.
+ANNOTATION_SUBMIT_LOCK = threading.Lock()
 
 
 def validate_startup_configuration() -> None:
@@ -88,42 +106,223 @@ def validate_startup_configuration() -> None:
     portal_secret_key()
 
 
-def purge_all_jobs() -> int:
-    """Delete every job directory and matching upload-chunk directory.
+# Jobs in these states are doing work; a restart interrupts them.
+ACTIVE_STATES = frozenset({"uploading", "queued", "running"})
+# An upload whose status has not changed for this long was abandoned (browser
+# closed) and must not block a restart forever.
+STALE_UPLOAD_S = 30 * 60
+# Exit code that tells start-portal.ps1 to start the server again (the
+# tunnel keeps running, so the public link stays the same).
+RESTART_EXIT_CODE = 3
+RESTART_FLAG_NAME = ".restart_requested"
+RESTART_POLL_S = 10.0
+
+
+def restart_flag_path() -> Path:
+    """File whose presence asks the portal to restart when idle."""
+    return JOB_ROOT / RESTART_FLAG_NAME
+
+
+def request_restart() -> Path:
+    """Ask the running portal to restart as soon as no job is running.
 
     Returns:
-        Number of job directories removed.
-
-    Note:
-        Restarting the portal is treated as a clean slate: no job state,
-        completed downloads, or failed-job logs survive. Only direct
-        subdirectories under JOB_ROOT/UPLOAD_ROOT are removed; loose log
-        files (tunnel, server) are left alone.
+        The request file written.
     """
+    JOB_ROOT.mkdir(parents=True, exist_ok=True)
+    flag = restart_flag_path()
+    flag.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+    return flag
+
+
+def _job_dirs() -> list[Path]:
     if not JOB_ROOT.exists():
-        return 0
-    removed = 0
-    for job_dir in JOB_ROOT.iterdir():
-        if not job_dir.is_dir():
+        return []
+    return [
+        d for d in JOB_ROOT.iterdir() if d.is_dir() and (d / "status.json").exists()
+    ]
+
+
+def portal_is_idle(now: float | None = None) -> bool:
+    """True when no job is uploading, queued or running.
+
+    Jobs waiting for parent labels do not count: a restart keeps them.
+    Uploads untouched for ``STALE_UPLOAD_S`` count as abandoned.
+    """
+    now = time.time() if now is None else now
+    for job_dir in _job_dirs():
+        state = str(read_status(job_dir).get("state", ""))
+        if state not in ACTIVE_STATES:
             continue
-        upload_dir = UPLOAD_ROOT / job_dir.name
-        shutil.rmtree(job_dir, ignore_errors=True)
-        shutil.rmtree(upload_dir, ignore_errors=True)
-        removed += 1
-    return removed
+        if state == "uploading":
+            age = now - (job_dir / "status.json").stat().st_mtime
+            if age > STALE_UPLOAD_S:
+                continue
+        return False
+    return True
+
+
+def restart_due() -> bool:
+    """Consume a pending restart request if the portal is idle.
+
+    Returns:
+        True when a restart was requested and nothing is running (the request
+        file is then removed); False otherwise.
+    """
+    flag = restart_flag_path()
+    if not flag.exists() or not portal_is_idle():
+        return False
+    flag.unlink(missing_ok=True)
+    return True
+
+
+def tidy_jobs_on_startup() -> dict[str, int]:
+    """Keep job folders across restarts and clean up what cannot continue.
+
+    - Every job folder is kept, so finished and failed jobs stay listed.
+    - Jobs that were uploading, queued or running are marked failed with a
+      plain "the portal was restarted" message (their work stopped).
+    - Uploaded videos are kept only for jobs waiting for parent labels (phase
+      2 needs them); others, and uploads without a job folder, are removed.
+
+    Returns:
+        Counts: ``kept`` job folders, ``interrupted`` jobs, ``uploads_removed``.
+    """
+    summary = {"kept": 0, "interrupted": 0, "uploads_removed": 0}
+    keep_uploads: set[str] = set()
+    for job_dir in _job_dirs():
+        summary["kept"] += 1
+        status = read_status(job_dir)
+        state = str(status.get("state", ""))
+        if state in ACTIVE_STATES:
+            write_status(
+                job_dir,
+                {
+                    **status,
+                    "state": "failed",
+                    "message": (
+                        "The portal was restarted while this job was in progress, "
+                        "so it stopped. Please submit the session again."
+                    ),
+                    "error": f"Interrupted by a portal restart (state was {state}).",
+                },
+            )
+            summary["interrupted"] += 1
+        elif state == "awaiting_annotation":
+            keep_uploads.add(job_dir.name)
+    if UPLOAD_ROOT.exists():
+        for upload_dir in UPLOAD_ROOT.iterdir():
+            if upload_dir.is_dir() and upload_dir.name not in keep_uploads:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+                summary["uploads_removed"] += 1
+    return summary
+
+
+async def _restart_when_idle_loop() -> None:
+    """Exit with ``RESTART_EXIT_CODE`` once a restart is requested and idle."""
+    while True:
+        await asyncio.sleep(RESTART_POLL_S)
+        try:
+            due = restart_due()
+        except OSError:
+            due = False
+        if due:
+            print(
+                "Restart requested and no job is running: restarting now.", flush=True
+            )
+            os._exit(RESTART_EXIT_CODE)
 
 
 @asynccontextmanager
 async def portal_lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Validate portal configuration and wipe all jobs on startup."""
+    """Validate configuration, tidy jobs, and watch for restart requests."""
     validate_startup_configuration()
-    removed = purge_all_jobs()
-    if removed:
-        print(f"Purged {removed} job(s) from a previous run.")
-    yield
+    summary = tidy_jobs_on_startup()
+    if summary["interrupted"]:
+        print(
+            f"Marked {summary['interrupted']} job(s) interrupted by the restart.",
+            flush=True,
+        )
+    watcher = asyncio.create_task(_restart_when_idle_loop())
+    try:
+        yield
+    finally:
+        watcher.cancel()
+
+
+PORTAL_PACKAGE_DIR = Path(__file__).resolve().parent
+TEMPLATE_DIR = PORTAL_PACKAGE_DIR / "templates"
+STATIC_DIR = PORTAL_PACKAGE_DIR / "static"
+STATIC_SUFFIXES = frozenset({".css", ".js"})
+
+
+def script_json(value: Any) -> Markup:
+    r"""Serialize ``value`` as JSON that is safe inside a ``<script>`` element.
+
+    ``<``, ``>`` and ``&`` become ``\uXXXX`` escapes, so no string in the data
+    can close the script block or open a comment. Key order is kept (unlike
+    Jinja's ``tojson``, which sorts keys and also escapes apostrophes).
+
+    Args:
+        value: JSON-serializable data.
+
+    Returns:
+        Markup holding the escaped JSON text.
+    """
+    text = (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+    return Markup(text)
+
+
+# Autoescaping is on for every template; values are passed raw and escaped at
+# render time.
+TEMPLATES = Environment(
+    loader=FileSystemLoader(TEMPLATE_DIR),
+    autoescape=select_autoescape(enabled_extensions=("html",), default=True),
+)
+TEMPLATES.filters["script_json"] = script_json
+
+# Windows can map .js to text/plain through the registry; pin the types the
+# static mount serves so browsers always run/apply them.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+# Same for the session files route (report figures, overlay clips, tables).
+mimetypes.add_type("video/mp4", ".mp4")
+mimetypes.add_type("image/svg+xml", ".svg")
+mimetypes.add_type("text/csv", ".csv")
+
+
+class PortalStaticFiles(StaticFiles):
+    """Static file mount that serves only stylesheets and scripts.
+
+    The mount is public (the login page needs its stylesheet), so anything
+    other than ``.css``/``.js`` returns 404, even if it is placed in the folder.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """Serve ``path`` only when its suffix is an allowed static type.
+
+        Args:
+            path: Requested path relative to the static directory.
+            scope: ASGI request scope.
+
+        Returns:
+            The static file response.
+
+        Raises:
+            HTTPException: 404 for any other file type or a directory.
+        """
+        if Path(path).suffix.lower() not in STATIC_SUFFIXES:
+            raise HTTPException(status_code=404, detail="Not Found")
+        return await super().get_response(path, scope)
 
 
 app = FastAPI(title=PORTAL_DISPLAY_NAME, lifespan=portal_lifespan)
+app.mount("/static", PortalStaticFiles(directory=STATIC_DIR), name="static")
 
 
 def portal_password() -> str:
@@ -249,161 +448,35 @@ def require_csrf(request: Request) -> str:
     return session_token
 
 
-def _html_page(title: str, body: str) -> HTMLResponse:
-    return HTMLResponse(f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title}</title>
-  <style>
-    :root {{
-      color-scheme: light;
-      font-family: Arial, sans-serif;
-      background: #f6f7f9;
-      color: #17202a;
-    }}
-    body {{ margin: 0; }}
-    header {{
-      background: #143642;
-      color: white;
-      padding: 16px 24px;
-      font-size: 18px;
-      font-weight: 700;
-    }}
-    main {{
-      max-width: 980px;
-      margin: 0 auto;
-      padding: 24px;
-    }}
-    form, .panel {{
-      background: white;
-      border: 1px solid #d9dee5;
-      border-radius: 6px;
-      padding: 20px;
-      margin-bottom: 18px;
-    }}
-    label {{
-      display: block;
-      font-weight: 700;
-      margin-top: 14px;
-      margin-bottom: 6px;
-    }}
-    .info-icon {{
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 18px;
-      height: 18px;
-      margin-left: 6px;
-      border-radius: 50%;
-      border: 1px solid #8da0b3;
-      color: #176b87;
-      font-size: 12px;
-      font-weight: 700;
-      cursor: help;
-    }}
-    input, textarea, button {{
-      font: inherit;
-      box-sizing: border-box;
-    }}
-    input[type="text"], input[type="email"], input[type="password"], input[type="file"], textarea {{
-      width: 100%;
-      border: 1px solid #b9c1cc;
-      border-radius: 4px;
-      padding: 10px;
-      background: white;
-    }}
-    input.file-input-native {{
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      opacity: 0;
-      pointer-events: none;
-    }}
-    textarea {{ min-height: 120px; resize: vertical; }}
-    .file-drop-zone {{
-      border: 2px dashed #8da0b3;
-      border-radius: 6px;
-      padding: 18px;
-      background: #f9fbfc;
-      cursor: pointer;
-    }}
-    .file-drop-zone strong, .file-drop-zone span {{
-      display: block;
-    }}
-    .file-drop-zone.dragover {{
-      border-color: #176b87;
-      background: #eef8fb;
-    }}
-    .file-name {{
-      margin-top: 8px;
-    }}
-    button {{
-      border: 0;
-      border-radius: 4px;
-      background: #176b87;
-      color: white;
-      padding: 11px 16px;
-      margin-top: 16px;
-      font-weight: 700;
-      cursor: pointer;
-    }}
-    .button-link {{
-      display: inline-block;
-      border-radius: 4px;
-      background: #176b87;
-      color: white;
-      padding: 11px 16px;
-      font-weight: 700;
-      text-decoration: none;
-    }}
-    .top-actions {{
-      display: flex;
-      justify-content: flex-end;
-      margin-bottom: 12px;
-    }}
-    .top-actions button {{ margin-top: 0; }}
-    table {{ width: 100%; border-collapse: collapse; background: white; }}
-    th, td {{ border-bottom: 1px solid #d9dee5; padding: 10px; text-align: left; }}
-    .muted {{ color: #5d6d7e; font-size: 14px; }}
-    .warning {{
-      border-left: 4px solid #c77700;
-      background: #fff8ec;
-      padding: 10px 12px;
-      margin-bottom: 16px;
-    }}
-    .error {{ color: #9b1c1c; font-weight: 700; }}
-    .output-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 12px;
-    }}
-    .output-card {{
-      border: 1px solid #d9dee5;
-      border-radius: 6px;
-      padding: 12px;
-      background: #fbfcfd;
-    }}
-    .output-card h3 {{
-      margin: 0 0 8px 0;
-      font-size: 16px;
-    }}
-    .output-card ul {{
-      margin: 8px 0 0 18px;
-      padding: 0;
-    }}
-  </style>
-</head>
-<body>
-  <header>{PORTAL_DISPLAY_NAME}</header>
-  <main>{body}</main>
-</body>
-</html>""")
+def _render_page(
+    template_name: str,
+    title: str,
+    session_token: str | None = None,
+    **context: Any,
+) -> HTMLResponse:
+    """Render one portal page from ``portal/templates``.
 
+    Args:
+        template_name: Template file name, e.g. ``"index.html"``.
+        title: Text for the page ``<title>`` (autoescaped).
+        session_token: Logged-in session token. When given, the header shows
+            the navigation and a Log out button carrying this session's CSRF
+            token.
+        **context: Extra template variables for the page.
 
-def _info_icon(text: str) -> str:
-    return f'<span class="info-icon" title="{html.escape(text)}">?</span>'
+    Returns:
+        The rendered page as an HTML response.
+    """
+    template = TEMPLATES.get_template(template_name)
+    header_csrf = csrf_token_for_session(session_token) if session_token else None
+    return HTMLResponse(
+        template.render(
+            title=title,
+            portal_name=PORTAL_DISPLAY_NAME,
+            header_csrf=header_csrf,
+            **context,
+        )
+    )
 
 
 def _slug(value: str) -> str:
@@ -414,36 +487,115 @@ def _slug(value: str) -> str:
     return cleaned
 
 
-def _parse_blocks_text(text: str) -> list[SessionBlock]:
+VIDEO_LABELS = {"camera_a": "Video A", "camera_b": "Video B"}
+# Offered in the task-name box; any other name is allowed.
+TASK_NAME_SUGGESTIONS = ("grocery", "storybook", "synchrony")
+
+
+def _parse_time_field(raw: str, what: str, field_name: str) -> float:
+    """Parse one form time, naming the task or window in any error.
+
+    Args:
+        raw: Time text as typed.
+        what: Plain description of the row, e.g. ``'Video A task "grocery"'``.
+        field_name: ``"start"`` or ``"end"``.
+
+    Returns:
+        Time in seconds.
+
+    Raises:
+        ValueError: With the row, the field and the parsing problem.
+    """
+    try:
+        return parse_timecode(raw)
+    except ValueError as error:
+        raise ValueError(f"{what} has a bad {field_name} time. {error}") from error
+
+
+def _parse_blocks_text(text: str, video: str = "Video A") -> list[SessionBlock]:
+    """Parse one camera's task lines (``name,start,end[,color]``).
+
+    Args:
+        text: Task text as posted by the form, one task per line.
+        video: Plain camera name used in messages (``"Video A"``).
+
+    Returns:
+        Parsed tasks with slugged names.
+
+    Raises:
+        ValueError: With a plain message for a malformed line, a bad time,
+            an empty name, end not after start, a task under ``MIN_PART_S``,
+            or two tasks with the same (slugged) name.
+    """
     blocks: list[SessionBlock] = []
+    raw_names: dict[str, str] = {}
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
         if not line:
             continue
         parts = [part.strip() for part in line.split(",")]
         if len(parts) not in {3, 4}:
-            raise ValueError(
-                f"Block line {line_number} must be: name,start,end[,color]"
-            )
+            raise ValueError(f"{video} task line {line_number} must be: name,start,end")
         name, start_raw, end_raw = parts[:3]
-        start_s = parse_timecode(start_raw)
-        end_s = parse_timecode(end_raw)
+        try:
+            safe_name = _slug(name)
+        except ValueError as error:
+            raise ValueError(
+                f'{video} task {line_number} name "{name}" has no letters or numbers.'
+                if name
+                else f"{video} task {line_number} has no name."
+            ) from error
+        what = f'{video} task "{name}"'
+        start_s = _parse_time_field(start_raw, what, "start")
+        end_s = _parse_time_field(end_raw, what, "end")
         if end_s <= start_s:
-            raise ValueError(f"Block line {line_number} end must be after start")
+            raise ValueError(
+                f"{what} must end after it starts (start {start_raw}, end {end_raw})."
+            )
+        if end_s - start_s < MIN_PART_S:
+            raise ValueError(
+                f"{what} is only {end_s - start_s:g} s long. "
+                f"Tasks must be at least {MIN_PART_S:g} s."
+            )
+        if safe_name in raw_names:
+            other = raw_names[safe_name]
+            if other == name:
+                raise ValueError(
+                    f'{video} has two tasks named "{name}". '
+                    "Give each task a different name."
+                )
+            raise ValueError(
+                f'{video} task names "{other}" and "{name}" both become '
+                f'"{safe_name}" in file names. Give each task a different name.'
+            )
+        raw_names[safe_name] = name
         blocks.append(
             SessionBlock(
-                name=_slug(name),
+                name=safe_name,
                 start_s=start_s,
                 end_s=end_s,
                 color=parts[3] if len(parts) == 4 and parts[3] else "gray",
             )
         )
     if not blocks:
-        raise ValueError("At least one analysis block is required")
+        raise ValueError(f"{video} needs at least one task.")
     return blocks
 
 
-def _parse_exclusions_text(text: str) -> list[ExclusionWindow]:
+def _parse_exclusions_text(text: str, video: str = "Video A") -> list[ExclusionWindow]:
+    """Parse one camera's extra-person windows (``start,end[,reason]``).
+
+    Args:
+        text: Window text as posted by the form, one window per line.
+        video: Plain camera name used in messages (``"Video A"``).
+
+    Returns:
+        Parsed windows.
+
+    Raises:
+        ValueError: With a plain message for a malformed line, a bad time,
+            or end not after start.
+    """
     exclusions: list[ExclusionWindow] = []
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
@@ -452,15 +604,85 @@ def _parse_exclusions_text(text: str) -> list[ExclusionWindow]:
         parts = [part.strip() for part in line.split(",", maxsplit=2)]
         if len(parts) < 2:
             raise ValueError(
-                f"Exclusion line {line_number} must be: start,end[,reason]"
+                f"{video} extra-person window line {line_number} must be: "
+                "start,end,reason"
             )
-        start_s = parse_timecode(parts[0])
-        end_s = parse_timecode(parts[1])
+        what = f"{video} extra-person window {line_number}"
+        start_s = _parse_time_field(parts[0], what, "start")
+        end_s = _parse_time_field(parts[1], what, "end")
         if end_s <= start_s:
-            raise ValueError(f"Exclusion line {line_number} end must be after start")
+            raise ValueError(
+                f"{what} must end after it starts (start {parts[0]}, end {parts[1]})."
+            )
         reason = parts[2] if len(parts) == 3 else ""
         exclusions.append(ExclusionWindow(start_s=start_s, end_s=end_s, reason=reason))
     return exclusions
+
+
+def _part_number(name: str) -> int:
+    """Return N for ``<task>_partN`` names, else 0 (for sorting)."""
+    tail = name.rsplit("_part", 1)[-1]
+    return int(tail) if "_part" in name and tail.isdigit() else 0
+
+
+def plan_camera_blocks(
+    blocks: list[SessionBlock],
+    exclusions: list[ExclusionWindow],
+    video: str = "Video A",
+) -> tuple[list[SessionBlock], list[SessionBlock]]:
+    """Split one camera's tasks around its extra-person windows and check them.
+
+    Args:
+        blocks: The camera's parsed tasks.
+        exclusions: The camera's extra-person windows.
+        video: Plain camera name used in messages (``"Video A"``).
+
+    Returns:
+        ``(kept, dropped)``: analysis parts to process, and parts shorter
+        than ``MIN_PART_S`` that are skipped.
+
+    Raises:
+        ValueError: If a task lies entirely inside a window, if every piece
+            of a task is too short, or if a task's name equals a part name
+            generated for another task (``story_part1`` when ``story`` is
+            split).
+    """
+    kept: list[SessionBlock] = []
+    dropped: list[SessionBlock] = []
+    generated_by: dict[str, tuple[str, list[str]]] = {}
+    for block in blocks:
+        block_kept, block_dropped = split_blocks_with_min_part([block], exclusions)
+        if not block_kept and not block_dropped:
+            raise ValueError(
+                f'{video} task "{block.name}" ({format_clock(block.start_s)} to '
+                f"{format_clock(block.end_s)}) is entirely inside an extra-person "
+                "window, so none of it can be analysed. Remove the task or "
+                "correct the window."
+            )
+        if not block_kept:
+            raise ValueError(
+                "After removing extra-person windows, every piece of "
+                f'{video} task "{block.name}" is shorter than {MIN_PART_S:g} s. '
+                "Remove the task or correct the windows."
+            )
+        part_names = sorted(
+            (part.name for part in block_kept + block_dropped), key=_part_number
+        )
+        if part_names != [block.name]:
+            for part_name in part_names:
+                generated_by[part_name] = (block.name, part_names)
+        kept.extend(block_kept)
+        dropped.extend(block_dropped)
+    for block in blocks:
+        if block.name in generated_by:
+            owner, part_names = generated_by[block.name]
+            listed = ", ".join(part_names[:-1]) + f" and {part_names[-1]}"
+            raise ValueError(
+                f'{video} task name "{block.name}" clashes with a piece of task '
+                f'"{owner}", which an extra-person window splits into {listed}. '
+                f'Rename "{block.name}".'
+            )
+    return kept, dropped
 
 
 def build_submission_metadata(
@@ -475,6 +697,8 @@ def build_submission_metadata(
     video_b_size: int,
     include_gaze: bool,
     blocks_text_b: str | None = None,
+    exclusions_text_b: str | None = None,
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     """Build the durable metadata record for one submitted portal run.
 
@@ -483,7 +707,8 @@ def build_submission_metadata(
         created_at: Timestamp for job creation.
         safe_session_id: Sanitized session identifier.
         blocks_text: Raw analysis block text for camera A from the form.
-        exclusions_text: Raw extra-person window text from the form.
+        exclusions_text: Raw extra-person window text for camera A, in Video
+            A's own time.
         video_a_name: Browser-provided filename for camera A.
         video_b_name: Browser-provided filename for camera B.
         video_a_size: Browser-reported byte size for camera A.
@@ -491,9 +716,15 @@ def build_submission_metadata(
         include_gaze: Whether optional gaze analysis was requested.
         blocks_text_b: Raw analysis block text for camera B. Defaults to
             ``blocks_text`` for backward compatibility.
+        exclusions_text_b: Raw extra-person window text for camera B, in Video
+            B's own time. Defaults to ``exclusions_text`` for backward
+            compatibility.
+        replace_existing: Whether the user agreed to move an existing
+            ``OUTPUT_ROOT/<session_id>`` folder to the archive.
 
     Returns:
-        JSON-serializable submission metadata.
+        JSON-serializable submission metadata. ``dropped_parts_by_camera``
+        lists the parts skipped for being shorter than ``MIN_PART_S``.
 
     Raises:
         ValueError: If the supplied block or exclusion text is invalid.
@@ -506,28 +737,46 @@ def build_submission_metadata(
 
     blocks_text_a = blocks_text
     blocks_text_b = blocks_text if blocks_text_b is None else blocks_text_b
-    exclusions = _parse_exclusions_text(exclusions_text)
+    exclusions_text_a = exclusions_text
+    exclusions_text_b = (
+        exclusions_text if exclusions_text_b is None else exclusions_text_b
+    )
+    # The two GoPros have different clocks, so each camera's extra-person
+    # windows are entered (and removed) in that camera's own time.
+    exclusions_by_camera = {
+        "camera_a": _parse_exclusions_text(exclusions_text_a, "Video A"),
+        "camera_b": _parse_exclusions_text(exclusions_text_b, "Video B"),
+    }
 
     input_blocks_by_camera: dict[str, list[SessionBlock]] = {}
     analysis_blocks_by_camera: dict[str, list[SessionBlock]] = {}
-    if has_video_a:
-        camera_a_blocks = _parse_blocks_text(blocks_text_a)
-        camera_a_analysis_blocks = split_blocks_for_exclusions(
-            camera_a_blocks, exclusions
+    dropped_parts_by_camera: dict[str, list[dict[str, Any]]] = {}
+    for camera_id, has_video, camera_blocks_text in (
+        ("camera_a", has_video_a, blocks_text_a),
+        ("camera_b", has_video_b, blocks_text_b),
+    ):
+        if not has_video:
+            continue
+        video = VIDEO_LABELS[camera_id]
+        camera_blocks = _parse_blocks_text(camera_blocks_text, video)
+        kept, dropped = plan_camera_blocks(
+            camera_blocks, exclusions_by_camera[camera_id], video
         )
-        if not camera_a_analysis_blocks:
-            raise ValueError("Exclusions removed all Video A analysis time")
-        input_blocks_by_camera["camera_a"] = camera_a_blocks
-        analysis_blocks_by_camera["camera_a"] = camera_a_analysis_blocks
-    if has_video_b:
-        camera_b_blocks = _parse_blocks_text(blocks_text_b)
-        camera_b_analysis_blocks = split_blocks_for_exclusions(
-            camera_b_blocks, exclusions
-        )
-        if not camera_b_analysis_blocks:
-            raise ValueError("Exclusions removed all Video B analysis time")
-        input_blocks_by_camera["camera_b"] = camera_b_blocks
-        analysis_blocks_by_camera["camera_b"] = camera_b_analysis_blocks
+        input_blocks_by_camera[camera_id] = camera_blocks
+        analysis_blocks_by_camera[camera_id] = kept
+        dropped_parts_by_camera[camera_id] = [
+            {
+                "name": part.name,
+                "start_s": part.start_s,
+                "end_s": part.end_s,
+                "duration_s": round(part.end_s - part.start_s, 3),
+                "reason": (
+                    f"shorter than {MIN_PART_S:g} s after removing "
+                    "extra-person windows"
+                ),
+            }
+            for part in dropped
+        ]
 
     legacy_blocks = next(iter(analysis_blocks_by_camera.values()))
     videos: dict[str, dict[str, Any]] = {}
@@ -558,6 +807,8 @@ def build_submission_metadata(
             "analysis_blocks_text_a": blocks_text_a,
             "analysis_blocks_text_b": blocks_text_b,
             "extra_person_windows_text": exclusions_text,
+            "extra_person_windows_text_a": exclusions_text_a,
+            "extra_person_windows_text_b": exclusions_text_b,
         },
         "input_analysis_blocks": [
             asdict(block)
@@ -567,13 +818,25 @@ def build_submission_metadata(
             camera_id: [asdict(block) for block in blocks]
             for camera_id, blocks in input_blocks_by_camera.items()
         },
-        "extra_person_windows": [asdict(exclusion) for exclusion in exclusions],
+        "extra_person_windows": [
+            asdict(exclusion)
+            for exclusion in exclusions_by_camera[next(iter(input_blocks_by_camera))]
+        ],
+        "extra_person_windows_by_camera": {
+            camera_id: [
+                asdict(exclusion) for exclusion in exclusions_by_camera[camera_id]
+            ]
+            for camera_id in input_blocks_by_camera
+        },
         "analysis_blocks": [asdict(block) for block in legacy_blocks],
         "analysis_blocks_by_camera": {
             camera_id: [asdict(block) for block in blocks]
             for camera_id, blocks in analysis_blocks_by_camera.items()
         },
         "blocks": [asdict(block) for block in legacy_blocks],
+        "min_part_s": MIN_PART_S,
+        "dropped_parts_by_camera": dropped_parts_by_camera,
+        "replace_existing": replace_existing,
         "videos": videos,
         "video_a_name": video_a_name,
         "video_b_name": video_b_name,
@@ -590,8 +853,8 @@ def build_submission_metadata(
             "analysis_window_only": True,
             "inference_backend": "ultralytics",
             "pose_model": PORTAL_DEFAULT_MODEL_PATH,
-            "tracker_backend": "roboflow",
-            "tracker_name": "bytetrack",
+            "tracker_backend": PORTAL_TRACKER_BACKEND,
+            "tracker_name": PORTAL_TRACKER_NAME,
             "frame_rate": PORTAL_DEFAULT_FRAME_RATE,
             "max_persons": PORTAL_DEFAULT_MAX_PERSONS,
             "compression_size_threshold_mb": compression_settings.size_threshold_mb,
@@ -689,11 +952,13 @@ def _run_with_job_lock(job_dir: Path, action: Callable[[], None]) -> None:
     """Run one processing action after acquiring the in-process GPU job lock."""
     acquired = JOB_RUN_LOCK.acquire(blocking=False)
     if not acquired:
+        stage = read_status(job_dir).get("stage") or "upload"
         write_status(
             job_dir,
             {
                 "state": "queued",
-                "message": "Waiting for the currently running GPU job to finish.",
+                "message": "Waiting for another job to finish first.",
+                "stage": stage,
                 "current_step": "queued",
             },
         )
@@ -702,6 +967,26 @@ def _run_with_job_lock(job_dir: Path, action: Callable[[], None]) -> None:
         action()
     finally:
         JOB_RUN_LOCK.release()
+
+
+def _record_background_failure(job_dir: Path, error: BaseException, phase: int) -> None:
+    """Mark a job failed with a plain message, keeping a richer one.
+
+    The pipeline functions already write a failed status naming the step that
+    stopped; that one is kept. Otherwise the step comes from the last status.
+
+    Args:
+        job_dir: Job working directory.
+        error: The exception that stopped the job.
+        phase: Pipeline phase (1 before labeling, 2 after).
+    """
+    status = read_status(job_dir)
+    if status.get("state") == "failed" and status.get("error"):
+        return
+    write_status(
+        job_dir,
+        failed_status(status.get("current_step"), error, phase=phase),
+    )
 
 
 def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) -> None:
@@ -733,14 +1018,7 @@ def run_chunked_portal_job(safe_job_id: str, upload_dir: Path, job_dir: Path) ->
 
         _run_with_job_lock(job_dir, action)
     except Exception as error:
-        write_status(
-            job_dir,
-            {
-                "state": "failed",
-                "message": str(error),
-                "current_step": None,
-            },
-        )
+        _record_background_failure(job_dir, error, phase=1)
         log_path = job_dir / "job.log"
         print(
             f"Job {safe_job_id} failed. See {log_path} for the full subprocess log.",
@@ -770,15 +1048,7 @@ def resume_portal_job_phase2_background(safe_job_id: str, job_dir: Path) -> None
 
         _run_with_job_lock(job_dir, action)
     except Exception as error:
-        write_status(
-            job_dir,
-            {
-                "state": "failed",
-                "message": str(error),
-                "current_step": None,
-                "phase": 2,
-            },
-        )
+        _record_background_failure(job_dir, error, phase=2)
         log_path = job_dir / "job.log"
         print(
             f"Job {safe_job_id} phase 2 failed. See {log_path}.",
@@ -786,21 +1056,452 @@ def resume_portal_job_phase2_background(safe_job_id: str, job_dir: Path) -> None
         )
 
 
-def _job_rows() -> str:
+# Job state -> (chip kind, plain-language label). Chip kinds map to the
+# ``chip--<kind>`` classes in portal.css (running / waiting / done / failed).
+JOB_STATE_CHIPS: dict[str, tuple[str, str]] = {
+    "uploading": ("running", "Uploading"),
+    "queued": ("running", "Waiting its turn"),
+    "running": ("running", "Running"),
+    "awaiting_annotation": ("waiting", "Waiting for you"),
+    "complete": ("done", "Done"),
+    "failed": ("failed", "Failed"),
+}
+ACTIVE_JOB_STATES = frozenset({"uploading", "queued", "running", "awaiting_annotation"})
+
+
+def job_state_chip(state: str) -> tuple[str, str]:
+    """Return the status chip (kind, label) for a raw job state.
+
+    Args:
+        state: Raw ``state`` value from a job's ``status.json``.
+
+    Returns:
+        ``(kind, label)``; an unrecognized state keeps its raw text as the
+        label (escaped by the template) under the ``"unknown"`` kind.
+    """
+    return JOB_STATE_CHIPS.get(state, ("unknown", state or "Unknown"))
+
+
+def _job_rows() -> list[dict[str, str]]:
+    """Return one display row per job folder, active jobs first.
+
+    Jobs that are running or waiting for the user come first; within each
+    group, folders keep their newest-name-first order.
+
+    Returns:
+        Dicts with ``job_id``, ``state``, ``message``, ``chip_kind`` and
+        ``chip_label`` (raw strings; the template escapes them).
+    """
     rows = []
     for status_path in sorted(JOB_ROOT.glob("*/status.json"), reverse=True):
-        job_id = status_path.parent.name
         status = read_status(status_path.parent)
-        safe_job_id = html.escape(job_id, quote=True)
-        state = html.escape(str(status.get("state", "unknown")), quote=True)
-        message = html.escape(str(status.get("message", "")), quote=True)
+        state = str(status.get("state", "unknown"))
+        kind, label = job_state_chip(state)
         rows.append(
-            f'<tr><td><a href="/jobs/{safe_job_id}">{safe_job_id}</a></td>'
-            f"<td>{state}</td><td>{message}</td></tr>"
+            {
+                "job_id": status_path.parent.name,
+                "state": state,
+                "message": str(status.get("message", "")),
+                "chip_kind": kind,
+                "chip_label": label,
+            }
         )
-    if not rows:
-        return '<tr><td colspan="3" class="muted">No jobs yet.</td></tr>'
-    return "\n".join(rows)
+    # Stable sort keeps the newest-first order inside each group.
+    rows.sort(key=lambda row: row["state"] not in ACTIVE_JOB_STATES)
+    return rows
+
+
+SESSION_METRICS_CSV = "session_metrics.csv"
+SESSION_REPORT_HTML = "report.html"
+LOW_COVERAGE_THRESHOLD = 0.5
+# File types the session route may serve: report, figures, clips, tables.
+SESSION_FILE_SUFFIXES = frozenset(
+    {".png", ".svg", ".jpg", ".mp4", ".csv", ".json", ".html"}
+)
+
+
+def overall_session_verdict(table: Any) -> tuple[str, str]:
+    """Summarize a session's blocks as one verdict chip.
+
+    When the ``quality_verdict`` column from
+    ``docs/plans/metrics-validity_261116.md`` is present it decides: any
+    ``insufficient`` block gives "Not enough data", any ``check`` block gives
+    "Check", otherwise "Looks OK". Until that column exists, the fallback uses
+    ``coverage_both`` (share of the block with both people tracked): every
+    block at or above 0.5 gives "Looks OK", otherwise "Check N blocks"
+    (missing coverage counts as low).
+
+    Args:
+        table: The session's ``session_metrics.csv`` as a pandas DataFrame.
+
+    Returns:
+        ``(kind, label)`` where kind is ``"ok"``, ``"check"`` or
+        ``"insufficient"`` (the ``chip--<kind>`` class in portal.css).
+    """
+    import pandas as pd
+
+    if len(table) == 0:
+        return ("insufficient", "Not enough data")
+    if "quality_verdict" in table.columns:
+        verdicts = {
+            str(value).strip().lower() for value in table["quality_verdict"].dropna()
+        }
+        if "insufficient" in verdicts:
+            return ("insufficient", "Not enough data")
+        if "check" in verdicts:
+            return ("check", "Check")
+        return ("ok", "Looks OK")
+    if "coverage_both" not in table.columns:
+        return ("insufficient", "Not enough data")
+    coverage = pd.to_numeric(table["coverage_both"], errors="coerce")
+    n_low = int((coverage.isna() | (coverage < LOW_COVERAGE_THRESHOLD)).sum())
+    if n_low == 0:
+        return ("ok", "Looks OK")
+    return ("check", f"Check {n_low} block{'' if n_low == 1 else 's'}")
+
+
+def _session_dir_is_addressable(name: str) -> bool:
+    """Return whether a folder name survives ``_slug`` unchanged.
+
+    Only such folders can be opened through ``/sessions/{session_id}``.
+
+    Args:
+        name: Folder name under ``OUTPUT_ROOT``.
+
+    Returns:
+        True when the session route can address the folder.
+    """
+    try:
+        return _slug(name) == name
+    except ValueError:
+        return False
+
+
+def session_rows() -> list[dict[str, Any]]:
+    """List every processed session under ``OUTPUT_ROOT``, newest first.
+
+    A processed session is a folder holding ``session_metrics.csv``; other
+    folders (job scratch, unfinished runs) and loose files are skipped. The
+    list is rebuilt from disk on every call, so it survives restarts.
+
+    Returns:
+        Dicts with ``session_id``, ``cameras`` (letters, e.g. ``["A", "B"]``),
+        ``processed`` (date text), ``verdict_kind``, ``verdict_label`` and
+        ``link`` (None when the folder name cannot be routed).
+    """
+    import pandas as pd
+
+    if not OUTPUT_ROOT.is_dir():
+        return []
+    found: list[tuple[float, dict[str, Any]]] = []
+    for session_dir in OUTPUT_ROOT.iterdir():
+        if session_dir.name.startswith("_"):
+            # ``_archive`` (replaced runs) and other portal-internal folders.
+            continue
+        metrics_path = session_dir / SESSION_METRICS_CSV
+        if not session_dir.is_dir() or not metrics_path.is_file():
+            continue
+        mtime = metrics_path.stat().st_mtime
+        # The task table (pieces of a split task joined) is what the lab
+        # analyses; pieces can each be short while their task has enough data.
+        tasks_path = session_dir / "task_metrics.csv"
+        verdict_path = tasks_path if tasks_path.is_file() else metrics_path
+        try:
+            kind, label = overall_session_verdict(pd.read_csv(verdict_path))
+        except (OSError, ValueError):
+            kind, label = ("unknown", "Could not read results")
+        cameras = sorted(
+            child.name.removeprefix("camera_").upper()
+            for child in session_dir.glob("camera_*")
+            if child.is_dir()
+        )
+        name = session_dir.name
+        row = {
+            "session_id": name,
+            "cameras": cameras,
+            "processed": datetime.fromtimestamp(mtime).strftime("%d %b %Y, %H:%M"),
+            "verdict_kind": kind,
+            "verdict_label": label,
+            "link": f"/sessions/{name}" if _session_dir_is_addressable(name) else None,
+        }
+        found.append((mtime, row))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [row for _, row in found]
+
+
+def _session_dir(session_id: str) -> Path:
+    """Return a processed session folder or raise 404.
+
+    Args:
+        session_id: Session id from the URL (sanitized with ``_slug``).
+
+    Returns:
+        The session folder under ``OUTPUT_ROOT``.
+
+    Raises:
+        HTTPException: 404 when the id is invalid or the folder holds no
+            ``session_metrics.csv``.
+    """
+    try:
+        safe_id = _slug(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    session_dir = OUTPUT_ROOT / safe_id
+    if not (session_dir / SESSION_METRICS_CSV).is_file():
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session_dir
+
+
+ARCHIVE_DIR_NAME = "_archive"
+# A task may end this much after the measured video end (container rounding,
+# browser vs ffprobe disagreement) before it counts as past the end.
+VIDEO_END_TOLERANCE_S = 1.0
+
+
+class SessionIdInUseError(ValueError):
+    """The session ID already has results or a running job (HTTP 409)."""
+
+
+def _reserved_session_ids() -> set[str]:
+    """Return folder names under ``OUTPUT_ROOT`` that are not sessions.
+
+    Returns:
+        Lower-cased names (compared case-insensitively, as on Windows).
+    """
+    return {JOB_ROOT.name.lower(), ARCHIVE_DIR_NAME}
+
+
+def _active_job_for_session(safe_id: str, ignore_job_id: str = "") -> str | None:
+    """Return a job that is still uploading or processing this session.
+
+    Args:
+        safe_id: Slugged session ID.
+        ignore_job_id: Job to leave out (the caller's own job).
+
+    Returns:
+        The job ID, or None.
+    """
+    if not JOB_ROOT.is_dir():
+        return None
+    for meta_path in JOB_ROOT.glob("*/upload_meta.json"):
+        job_dir = meta_path.parent
+        if job_dir.name == ignore_job_id:
+            continue
+        if read_status(job_dir).get("state") not in ACTIVE_JOB_STATES:
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if str(meta.get("session_id", "")).lower() == safe_id.lower():
+            return job_dir.name
+    return None
+
+
+def session_id_status(session_id: str) -> dict[str, Any]:
+    """Describe whether a session ID can be used for a new run.
+
+    Args:
+        session_id: Session ID as typed.
+
+    Returns:
+        ``session_id`` (slugged, as used for folders), ``valid`` (false for
+        empty or reserved IDs), ``exists`` (``OUTPUT_ROOT/<id>`` exists),
+        ``active_job`` (another job is uploading or processing it) and a
+        plain ``message`` for invalid IDs.
+    """
+    try:
+        safe_id = _slug(session_id)
+    except ValueError:
+        return {
+            "session_id": "",
+            "valid": False,
+            "exists": False,
+            "active_job": False,
+            "message": "The session ID needs at least one letter or number.",
+        }
+    if safe_id.lower() in _reserved_session_ids():
+        return {
+            "session_id": safe_id,
+            "valid": False,
+            "exists": False,
+            "active_job": False,
+            "message": (
+                f'"{safe_id}" is used by the portal itself. '
+                "Choose another session ID."
+            ),
+        }
+    return {
+        "session_id": safe_id,
+        "valid": True,
+        "exists": (OUTPUT_ROOT / safe_id).exists(),
+        "active_job": _active_job_for_session(safe_id) is not None,
+        "message": "",
+    }
+
+
+def check_session_id_free(
+    safe_id: str, replace_existing: bool, ignore_job_id: str = ""
+) -> bool:
+    """Refuse a session ID that would mix a new run with earlier results.
+
+    Args:
+        safe_id: Slugged session ID.
+        replace_existing: Whether the user ticked "Replace the earlier
+            results".
+        ignore_job_id: The caller's own job, left out of the running-job
+            check.
+
+    Returns:
+        True when ``OUTPUT_ROOT/<safe_id>`` exists (and replacing was
+        allowed), so the caller should archive it.
+
+    Raises:
+        ValueError: For a reserved ID.
+        SessionIdInUseError: When results exist and replacing was not allowed, or
+            another job is still working on the same session.
+    """
+    if safe_id.lower() in _reserved_session_ids():
+        raise ValueError(
+            f'"{safe_id}" is used by the portal itself. Choose another session ID.'
+        )
+    if _active_job_for_session(safe_id, ignore_job_id) is not None:
+        raise SessionIdInUseError(
+            f'Session "{safe_id}" is already being processed. Wait for that job '
+            "to finish, or choose a new session ID."
+        )
+    exists = (OUTPUT_ROOT / safe_id).exists()
+    if exists and not replace_existing:
+        raise SessionIdInUseError(
+            f'Session "{safe_id}" already has results. Choose a new session ID, '
+            'or tick "Replace the earlier results" to move the old results to '
+            "the archive folder."
+        )
+    return exists
+
+
+def archive_session_dir(safe_id: str, stamp: str | None = None) -> Path | None:
+    """Move a session's earlier results to ``OUTPUT_ROOT/_archive``.
+
+    Nothing is deleted and nothing is overwritten: the folder becomes
+    ``_archive/<id>_<YYYYmmdd_HHMMSS>`` (with ``_2``, ``_3``... if that name
+    is taken). The home page and the study-wide table ignore ``_archive``.
+
+    Args:
+        safe_id: Slugged session ID.
+        stamp: Timestamp text; defaults to now.
+
+    Returns:
+        The archived folder, or None when there was nothing to move.
+    """
+    source = OUTPUT_ROOT / safe_id
+    if not source.exists():
+        return None
+    stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_root = OUTPUT_ROOT / ARCHIVE_DIR_NAME
+    archive_root.mkdir(parents=True, exist_ok=True)
+    target = archive_root / f"{safe_id}_{stamp}"
+    suffix = 2
+    while target.exists():
+        target = archive_root / f"{safe_id}_{stamp}_{suffix}"
+        suffix += 1
+    shutil.move(str(source), str(target))
+    return target
+
+
+def _plural(count: int, unit: str) -> str:
+    """Return ``"1 minute"`` / ``"6 minutes"``."""
+    return f"{count} {unit}{'' if count == 1 else 's'}"
+
+
+def check_uploaded_video_lengths(upload_dir: Path, meta: dict) -> dict[str, float]:
+    """Check every uploaded video and that no task ends after its video does.
+
+    Runs ffprobe on each assembled upload (``PORTAL_FFPROBE_BIN``). This is
+    the server's re-check of the browser's length check, and also catches
+    hours typed where minutes were meant (``13:06:00`` for ``13:06``).
+
+    Args:
+        upload_dir: The job's upload folder.
+        meta: The job's ``upload_meta.json`` contents.
+
+    Returns:
+        Video length in seconds per camera ID.
+
+    Raises:
+        ValueError: Naming the task and the video length when a task ends
+            after the video does.
+        FileNotFoundError, RuntimeError: When an upload is incomplete or
+            ffprobe cannot read it.
+    """
+    ffprobe_bin = os.environ.get("PORTAL_FFPROBE_BIN", "ffprobe")
+    tasks_by_camera = meta.get("input_analysis_blocks_by_camera", {})
+    durations: dict[str, float] = {}
+    for camera_id, video_meta in meta["videos"].items():
+        path = validate_direct_chunked_upload(
+            upload_dir=upload_dir,
+            camera_id=camera_id,
+            original_filename=video_meta["original_filename"],
+            total_chunks=int(video_meta["chunk_count"]),
+            expected_size_bytes=int(video_meta["size_bytes"]),
+            probe=True,
+            ffprobe_bin=ffprobe_bin,
+        )
+        duration_s = probe_video_duration(path, ffprobe_bin)
+        durations[camera_id] = duration_s
+        video = VIDEO_LABELS.get(camera_id, camera_id)
+        for task in tasks_by_camera.get(camera_id, []):
+            end_s = float(task["end_s"])
+            if end_s <= duration_s + VIDEO_END_TOLERANCE_S:
+                continue
+            message = (
+                f'{video} task "{task["name"]}" ends at {format_clock(end_s)}, '
+                f"but {video} is only {format_clock(duration_s)} long. "
+                "Check the task times."
+            )
+            hours, rest = divmod(int(end_s), 3600)
+            minutes, seconds = divmod(rest, 60)
+            if hours and seconds == 0 and end_s == int(end_s):
+                message += (
+                    f" For {_plural(hours, 'minute')} {_plural(minutes, 'second')}, "
+                    f"type {hours}:{minutes:02d}."
+                )
+            raise ValueError(message)
+    return durations
+
+
+def resolve_session_file(session_dir: Path, relative_path: str) -> Path:
+    """Resolve a report-linked file strictly inside one session folder.
+
+    Args:
+        session_dir: The session folder.
+        relative_path: Path from the URL, relative to the session folder.
+
+    Returns:
+        The resolved file path.
+
+    Raises:
+        HTTPException: 404 for ``..`` parts, absolute or drive paths,
+            disallowed file types, missing files, and anything (including a
+            symlink target) that resolves outside the session folder.
+    """
+    not_found = HTTPException(status_code=404, detail="File not found")
+    normalized = relative_path.replace("\\", "/")
+    parts = normalized.split("/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or ":" in normalized
+        or any(part in ("", ".", "..") for part in parts)
+    ):
+        raise not_found
+    if Path(normalized).suffix.lower() not in SESSION_FILE_SUFFIXES:
+        raise not_found
+    root = session_dir.resolve()
+    candidate = (root / normalized).resolve()
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        raise not_found
+    return candidate
 
 
 def _client_host(request: Request) -> str:
@@ -837,14 +1538,7 @@ def _login_is_rate_limited(client_host: str) -> bool:
 @app.get("/login", response_class=HTMLResponse)
 def login_page() -> HTMLResponse:
     """Render the login page."""
-    return _html_page(
-        "Login",
-        """<form method="post" action="/login">
-  <label for="password">Password</label>
-  <input id="password" name="password" type="password" autocomplete="current-password">
-  <button type="submit">Log in</button>
-</form>""",
-    )
+    return _render_page("login.html", "Login")
 
 
 @app.post("/login")
@@ -881,312 +1575,75 @@ def logout(session_token: Annotated[str, Depends(require_csrf)]) -> RedirectResp
 
 @app.get("/", response_class=HTMLResponse)
 def index(session_token: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
-    """Render the upload form and recent jobs."""
-    csrf_token = csrf_token_for_session(session_token)
-    return _html_page(
-        "Submit Job",
-        f"""<div class="top-actions"><button id="logout-button" type="button">Log out</button></div>
-
-<form id="upload-form">
-  <label for="session_id">Session ID {_info_icon("Use the participant/session name that should appear on outputs.")}</label>
-  <input id="session_id" name="session_id" type="text" required placeholder="P001c">
-
-  <div class="warning"><strong>Upload at least one GoPro video.</strong> Video A and Video B are both supported, but one camera can be omitted when only one recording is available.</div>
-
-  <label for="video_a">GoPro Video A {_info_icon("Optional. Upload the first GoPro angle if available.")}</label>
-  <div class="file-drop-zone" data-file-input="video_a" tabindex="0">
-    <strong>Drop GoPro Video A here</strong>
-    <span class="muted">or click to choose a file</span>
-    <span id="video_a_selected" class="muted file-name">No file selected</span>
-  </div>
-  <input id="video_a" class="file-input-native" name="video_a" type="file" accept=".mov,.mp4,.avi,.mkv,.m4v">
-
-  <label for="video_b">GoPro Video B {_info_icon("Optional. Upload the second GoPro angle if available.")}</label>
-  <div class="file-drop-zone" data-file-input="video_b" tabindex="0">
-    <strong>Drop GoPro Video B here</strong>
-    <span class="muted">or click to choose a file</span>
-    <span id="video_b_selected" class="muted file-name">No file selected</span>
-  </div>
-  <input id="video_b" class="file-input-native" name="video_b" type="file" accept=".mov,.mp4,.avi,.mkv,.m4v">
-
-  <label for="blocks_text_a">Video A Analysis Blocks {_info_icon("Required when Video A is uploaded. These windows are the only Video A times processed.")}</label>
-  <textarea id="blocks_text_a" name="blocks_text_a" placeholder="free_play,13:26,23:40,green&#10;storybook,29:22,37:06,blue"></textarea>
-  <div class="muted">One block per line: name,start,end[,color]. Times may be seconds, MM:SS, or HH:MM:SS.</div>
-
-  <label for="blocks_text_b">Video B Analysis Blocks {_info_icon("Required when Video B is uploaded. Use the same format as Video A.")}</label>
-  <textarea id="blocks_text_b" name="blocks_text_b" placeholder="free_play,13:26,23:40,green&#10;storybook,29:22,37:06,blue"></textarea>
-  <div class="muted">Leave blank only if Video B is not uploaded.</div>
-
-  <label for="exclusions_text">Extra-Person Windows {_info_icon("These windows are removed from both cameras before inference.")}</label>
-  <textarea id="exclusions_text" name="exclusions_text" placeholder="8:14,8:42,experimenter entered"></textarea>
-  <div class="muted">One exclusion per line: start,end,reason. These windows are removed from analysis blocks.</div>
-
-  <label><input name="include_gaze" type="checkbox" value="yes"> Run gaze analysis {_info_icon("Optional. Adds gaze heatmaps and gaze metrics after pose tracking.")}</label>
-  <button type="submit">Submit Processing Job</button>
-  <p id="upload-status" class="muted"></p>
-  <progress id="upload-progress" value="0" max="100" style="width: 100%; display: none;"></progress>
-</form>
-
-<section class="panel">
-  <h2>Result Figures And Tables</h2>
-  <div class="output-grid">
-    <div class="output-card">
-      <h3>Proximity</h3>
-      <p class="muted">Parent-child torso distance inside each valid analysis block.</p>
-      <ul>
-        <li>Figure: proximity over time and block comparison</li>
-        <li>Table: per-frame torso distance and per-block summary</li>
-      </ul>
-    </div>
-    <div class="output-card">
-      <h3>Movement synchrony</h3>
-      <p class="muted">Windowed movement cross-correlation between parent and child tracks.</p>
-      <ul>
-        <li>Figure: synchrony strength and lead-lag summary</li>
-        <li>Table: peak correlation and lag per window</li>
-      </ul>
-    </div>
-    <div class="output-card">
-      <h3>Gaze estimation</h3>
-      <p class="muted">Optional gaze categories and heatmap-based convergence metrics.</p>
-      <ul>
-        <li>Figure: gaze dashboard and snapshots when enabled</li>
-        <li>Table: gaze category proportions and convergence values</li>
-      </ul>
-    </div>
-  </div>
-</section>
-
-<section class="panel">
-  <h2>Jobs</h2>
-  <table>
-    <thead><tr><th>Job</th><th>Status</th><th>Message</th></tr></thead>
-    <tbody>{_job_rows()}</tbody>
-  </table>
-</section>
-
-<script>
-const CHUNK_SIZE = {CHUNK_SIZE_BYTES};
-const CSRF_TOKEN = "{html.escape(csrf_token, quote=True)}";
-const form = document.getElementById("upload-form");
-const logoutButton = document.getElementById("logout-button");
-const statusEl = document.getElementById("upload-status");
-const progressEl = document.getElementById("upload-progress");
-const dropZones = document.querySelectorAll(".file-drop-zone");
-let uploadInProgress = false;
-
-function setStatus(message) {{
-  statusEl.textContent = message;
-}}
-
-function formatBytes(bytes) {{
-  const gib = bytes / (1024 * 1024 * 1024);
-  if (gib >= 1) {{
-    return `${{gib.toFixed(2)}} GB`;
-  }}
-  return `${{(bytes / (1024 * 1024)).toFixed(1)}} MB`;
-}}
-
-function updateSelectedFile(input) {{
-  const label = document.getElementById(`${{input.id}}_selected`);
-  if (!label) {{
-    return;
-  }}
-  label.textContent = input.files.length ? input.files[0].name : "No file selected";
-}}
-
-logoutButton.addEventListener("click", async () => {{
-  await fetch("/logout", {{
-    method: "POST",
-    headers: {{"X-CSRF-Token": CSRF_TOKEN}},
-    credentials: "same-origin"
-  }});
-  window.location.href = "/login";
-}});
-
-dropZones.forEach((zone) => {{
-  const input = document.getElementById(zone.dataset.fileInput);
-  input.addEventListener("change", () => updateSelectedFile(input));
-
-  zone.addEventListener("click", () => input.click());
-  zone.addEventListener("keydown", (event) => {{
-    if (event.key === "Enter" || event.key === " ") {{
-      event.preventDefault();
-      input.click();
-    }}
-  }});
-  zone.addEventListener("dragover", (event) => {{
-    event.preventDefault();
-    zone.classList.add("dragover");
-  }});
-  zone.addEventListener("dragleave", () => {{
-    zone.classList.remove("dragover");
-  }});
-  zone.addEventListener("drop", (event) => {{
-    event.preventDefault();
-    zone.classList.remove("dragover");
-    if (!event.dataTransfer.files.length) {{
-      return;
-    }}
-    const transfer = new DataTransfer();
-    transfer.items.add(event.dataTransfer.files[0]);
-    input.files = transfer.files;
-    updateSelectedFile(input);
-  }});
-}});
-
-async function postFormData(url, formData) {{
-  const response = await fetch(url, {{
-    method: "POST",
-    body: formData,
-    headers: {{"X-CSRF-Token": CSRF_TOKEN}},
-    credentials: "same-origin"
-  }});
-  if (!response.ok) {{
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${{response.status}}`);
-  }}
-  return await response.json();
-}}
-
-function postChunkFormData(url, formData, onProgress) {{
-  return new Promise((resolve, reject) => {{
-    const request = new XMLHttpRequest();
-    request.open("POST", url);
-    request.withCredentials = true;
-    request.setRequestHeader("X-CSRF-Token", CSRF_TOKEN);
-    request.upload.onprogress = (event) => {{
-      if (event.lengthComputable) {{
-        onProgress(event.loaded, event.total);
-      }}
-    }};
-    request.onload = () => {{
-      if (request.status >= 200 && request.status < 300) {{
-        resolve(JSON.parse(request.responseText));
-        return;
-      }}
-      reject(new Error(request.responseText || `Request failed: ${{request.status}}`));
-    }};
-    request.onerror = () => reject(new Error("Network error during chunk upload."));
-    request.send(formData);
-  }});
-}}
-
-function updateUploadProgress(cameraId, cameraLabel, chunkNumber, totalChunks, visibleCameraBytes, uploadState) {{
-  uploadState[cameraId] = visibleCameraBytes;
-  const visibleBytes = uploadState.camera_a + uploadState.camera_b;
-  progressEl.value = Math.round((visibleBytes / uploadState.totalBytes) * 100);
-  setStatus(
-    `${{cameraLabel}}: uploading chunk ${{chunkNumber}} of ${{totalChunks}} ` +
-    `(${{formatBytes(visibleBytes)}} of ${{formatBytes(uploadState.totalBytes)}} total). Keep this tab open.`
-  );
-}}
-
-async function uploadCamera(jobId, cameraId, file, uploadState) {{
-  const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-  const cameraLabel = cameraId === "camera_a" ? "Video A" : "Video B";
-  let uploadedCameraBytes = 0;
-  for (let index = 0; index < totalChunks; index += 1) {{
-    const start = index * CHUNK_SIZE;
-    const end = Math.min(file.size, start + CHUNK_SIZE);
-    const chunk = file.slice(start, end);
-    const formData = new FormData();
-    formData.append("camera_id", cameraId);
-    formData.append("chunk_index", String(index));
-    formData.append("total_chunks", String(totalChunks));
-    formData.append("chunk", chunk, file.name);
-    setStatus(`${{cameraLabel}}: uploading chunk ${{index + 1}} of ${{totalChunks}}. Keep this tab open.`);
-    await postChunkFormData(`/uploads/${{jobId}}/chunk`, formData, (loaded) => {{
-      updateUploadProgress(
-        cameraId,
-        cameraLabel,
-        index + 1,
-        totalChunks,
-        uploadedCameraBytes + loaded,
-        uploadState
-      );
-    }});
-    uploadedCameraBytes += chunk.size;
-    updateUploadProgress(
-      cameraId,
-      cameraLabel,
-      index + 1,
-      totalChunks,
-      uploadedCameraBytes,
-      uploadState
-    );
-  }}
-}}
-
-window.addEventListener("beforeunload", (event) => {{
-  if (!uploadInProgress) {{
-    return;
-  }}
-  event.preventDefault();
-  event.returnValue = "";
-}});
-
-form.addEventListener("submit", async (event) => {{
-  event.preventDefault();
-  const submitButton = form.querySelector("button");
-  submitButton.disabled = true;
-  submitButton.textContent = "Uploading...";
-  uploadInProgress = true;
-  document.title = "Uploading videos";
-  progressEl.style.display = "block";
-  progressEl.value = 0;
-
-  try {{
-    const videoA = document.getElementById("video_a").files[0];
-    const videoB = document.getElementById("video_b").files[0];
-    const blocksA = document.getElementById("blocks_text_a").value.trim();
-    const blocksB = document.getElementById("blocks_text_b").value.trim();
-    if (!videoA && !videoB) {{
-      throw new Error("Upload at least one GoPro video.");
-    }}
-    if (videoA && !blocksA) {{
-      throw new Error("Video A analysis blocks are required when Video A is uploaded.");
-    }}
-    if (videoB && !blocksB) {{
-      throw new Error("Video B analysis blocks are required when Video B is uploaded.");
-    }}
-
-    const initData = new FormData(form);
-    initData.append("video_a_name", videoA ? videoA.name : "");
-    initData.append("video_b_name", videoB ? videoB.name : "");
-    initData.append("video_a_size", videoA ? String(videoA.size) : "0");
-    initData.append("video_b_size", videoB ? String(videoB.size) : "0");
-    initData.delete("video_a");
-    initData.delete("video_b");
-
-    setStatus("Creating upload job");
-    const init = await postFormData("/uploads/init", initData);
-    const totalBytes = (videoA ? videoA.size : 0) + (videoB ? videoB.size : 0);
-    const uploadState = {{ camera_a: 0, camera_b: 0, totalBytes }};
-    const uploadTasks = [];
-    if (videoA) {{
-      uploadTasks.push(uploadCamera(init.job_id, "camera_a", videoA, uploadState));
-    }}
-    if (videoB) {{
-      uploadTasks.push(uploadCamera(init.job_id, "camera_b", videoB, uploadState));
-    }}
-    await Promise.all(uploadTasks);
-
-    setStatus("Upload complete. Asking server to finalize chunks and start processing.");
-    document.title = "Processing queued";
-    const finish = await postFormData(`/uploads/${{init.job_id}}/finish`, new FormData());
-    uploadInProgress = false;
-    window.location.href = finish.status_url;
-  }} catch (error) {{
-    setStatus(`Upload failed: ${{error.message}}`);
-    submitButton.disabled = false;
-    submitButton.textContent = "Submit Processing Job";
-    uploadInProgress = false;
-    document.title = "Submit Job";
-  }}
-}});
-</script>""",
+    """Render the Sessions home page: current jobs, then processed sessions."""
+    return _render_page(
+        "index.html",
+        "Sessions",
+        session_token=session_token,
+        jobs=_job_rows(),
+        sessions=session_rows(),
     )
+
+
+@app.get("/new", response_class=HTMLResponse)
+def new_session(session_token: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
+    """Render the new-session upload form."""
+    return _render_page(
+        "new_session.html",
+        "New session",
+        session_token=session_token,
+        chunk_size=CHUNK_SIZE_BYTES,
+        csrf_token=csrf_token_for_session(session_token),
+        min_part_s=MIN_PART_S,
+        video_end_tolerance_s=VIDEO_END_TOLERANCE_S,
+        task_suggestions=TASK_NAME_SUGGESTIONS,
+    )
+
+
+@app.get("/sessions/{session_id}")
+def session_report(
+    session_id: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> RedirectResponse:
+    """Open a session's report.
+
+    The report links its figures and clips relative to the session folder
+    (``camera_a/overlay_x.mp4``), so it is served from the files route, where
+    those links resolve.
+    """
+    session_dir = _session_dir(session_id)
+    if not (session_dir / SESSION_REPORT_HTML).is_file():
+        raise HTTPException(status_code=404, detail="This session has no report yet")
+    return RedirectResponse(
+        f"/sessions/{session_dir.name}/files/{SESSION_REPORT_HTML}", status_code=303
+    )
+
+
+@app.get("/sessions/{session_id}/exists")
+def session_exists(
+    session_id: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> JSONResponse:
+    """Tell the new-session form whether this ID already has results.
+
+    The form shows a warning and asks for "Replace the earlier results";
+    ``/uploads/init`` enforces the same rule.
+    """
+    return JSONResponse(session_id_status(session_id))
+
+
+@app.get("/sessions/{session_id}/files/{file_path:path}")
+def session_file(
+    session_id: str,
+    file_path: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> FileResponse:
+    """Serve one file from a session folder (report, figure, clip or table).
+
+    Video clips support HTTP range requests through ``FileResponse``.
+    """
+    path = resolve_session_file(_session_dir(session_id), file_path)
+    return FileResponse(path, content_disposition_type="inline")
 
 
 @app.post("/uploads/init")
@@ -1201,11 +1658,27 @@ async def init_chunked_upload(
     blocks_text_a: Annotated[str | None, Form()] = None,
     blocks_text_b: Annotated[str | None, Form()] = None,
     exclusions_text: Annotated[str, Form()] = "",
+    exclusions_text_a: Annotated[str | None, Form()] = None,
+    exclusions_text_b: Annotated[str | None, Form()] = None,
     include_gaze: Annotated[str | None, Form()] = None,
+    replace_existing: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
-    """Create upload metadata for a chunked browser upload."""
+    """Create upload metadata for a chunked browser upload.
+
+    Refuses (409) a session ID that already has results unless
+    ``replace_existing`` is ``"yes"``, and any ID another job is still
+    working on. The earlier results are archived only when the upload
+    finishes.
+    """
     try:
-        safe_session_id = _slug(session_id)
+        try:
+            safe_session_id = _slug(session_id)
+        except ValueError as error:
+            raise ValueError(
+                "The session ID needs at least one letter or number."
+            ) from error
+        replace = replace_existing == "yes"
+        check_session_id_free(safe_session_id, replace)
         active_video_names = [
             name
             for name, size in (
@@ -1229,8 +1702,6 @@ async def init_chunked_upload(
         job_id = f"{stamp}_{safe_session_id}_{uuid.uuid4().hex[:8]}"
         upload_dir = UPLOAD_ROOT / job_id
         job_dir = JOB_ROOT / job_id
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        job_dir.mkdir(parents=True, exist_ok=True)
 
         metadata = build_submission_metadata(
             job_id=job_id,
@@ -1238,20 +1709,29 @@ async def init_chunked_upload(
             safe_session_id=safe_session_id,
             blocks_text=resolved_blocks_text_a,
             blocks_text_b=resolved_blocks_text_b,
-            exclusions_text=exclusions_text,
+            exclusions_text=(
+                exclusions_text if exclusions_text_a is None else exclusions_text_a
+            ),
+            exclusions_text_b=(
+                exclusions_text if exclusions_text_b is None else exclusions_text_b
+            ),
             video_a_name=video_a_name,
             video_b_name=video_b_name,
             video_a_size=video_a_size,
             video_b_size=video_b_size,
             include_gaze=include_gaze == "yes",
+            replace_existing=replace,
         )
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        job_dir.mkdir(parents=True, exist_ok=True)
         _write_submission_metadata(job_dir, metadata)
         write_status(
             job_dir,
             {
                 "state": "uploading",
-                "message": "Waiting for video chunks.",
-                "current_step": "upload",
+                "message": "Receiving the videos.",
+                "stage": "upload",
+                "current_step": "uploading",
             },
         )
         return JSONResponse(
@@ -1261,6 +1741,8 @@ async def init_chunked_upload(
                 "status_url": f"/jobs/{job_id}",
             }
         )
+    except SessionIdInUseError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -1349,17 +1831,49 @@ async def finish_chunked_upload(
     background_tasks: BackgroundTasks,
     _: Annotated[str, Depends(require_csrf)],
 ) -> JSONResponse:
-    """Assemble chunks and start processing."""
+    """Check the uploaded videos and start processing.
+
+    Before queueing: ffprobe re-checks every task against its video's real
+    length, the session ID is re-checked, and when the user chose to replace
+    earlier results they are moved to ``OUTPUT_ROOT/_archive``. A failed
+    check marks the job failed with the same plain message.
+    """
     try:
         safe_job_id = _slug(job_id)
         upload_dir = UPLOAD_ROOT / safe_job_id
         job_dir = JOB_ROOT / safe_job_id
-        _read_upload_meta(job_dir)
+        meta = _read_upload_meta(job_dir)
+        try:
+            durations = check_uploaded_video_lengths(upload_dir, meta)
+            must_archive = check_session_id_free(
+                str(meta["session_id"]),
+                bool(meta.get("replace_existing", False)),
+                ignore_job_id=safe_job_id,
+            )
+        except Exception as error:
+            write_status(
+                job_dir,
+                {
+                    "state": "failed",
+                    "message": str(error),
+                    "stage": "upload",
+                    "current_step": None,
+                },
+            )
+            raise
+        for camera_id, duration_s in durations.items():
+            meta["videos"][camera_id]["duration_s"] = duration_s
+        meta["upload_finished_at"] = datetime.now().isoformat(timespec="seconds")
+        if must_archive:
+            archived = archive_session_dir(str(meta["session_id"]))
+            meta["archived_previous_results"] = str(archived) if archived else None
+        _write_submission_metadata(job_dir, meta)
         write_status(
             job_dir,
             {
                 "state": "queued",
-                "message": "Upload complete. Finalizing videos will start now.",
+                "message": "Upload complete. Processing starts shortly.",
+                "stage": "upload",
                 "current_step": "queued",
             },
         )
@@ -1369,58 +1883,393 @@ async def finish_chunked_upload(
         return JSONResponse(
             {"job_id": safe_job_id, "status_url": f"/jobs/{safe_job_id}"}
         )
+    except SessionIdInUseError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+# Job states the page keeps polling for; any other state is final for now.
+POLLING_JOB_STATES = frozenset({"uploading", "queued", "running"})
+# Lines of job.log shown under "Show technical details" on a failed job.
+FAILURE_LOG_LINES = 30
+
+
+def job_stage_rows(status: dict[str, Any]) -> list[dict[str, str]]:
+    """Return the job page's stage list with each stage's progress.
+
+    Args:
+        status: The job's ``status.json`` payload.
+
+    Returns:
+        One dict per ``JOB_STAGES`` entry with ``key``, ``label`` and
+        ``status`` (``done``, ``current``, ``failed`` or ``todo``).
+    """
+    state = str(status.get("state", ""))
+    stage = str(
+        status.get("stage") or describe_step(status.get("current_step"))["stage"]
+    )
+    if state == "awaiting_annotation":
+        stage = "label_parent"
+    keys = [key for key, _ in JOB_STAGES]
+    current = keys.index(stage) if stage in keys else -1
+    rows = []
+    for index, (key, label) in enumerate(JOB_STAGES):
+        if state == "complete" or index < current:
+            progress = "done"
+        elif index == current:
+            progress = "failed" if state == "failed" else "current"
+        else:
+            progress = "todo"
+        rows.append({"key": key, "label": label, "status": progress})
+    return rows
+
+
+def _log_tail(job_dir: Path, lines: int = FAILURE_LOG_LINES) -> str:
+    """Return the last lines of a job's log (empty when there is no log).
+
+    Args:
+        job_dir: Job working directory.
+        lines: How many lines to keep.
+
+    Returns:
+        The log tail as one string.
+    """
+    log_path = job_dir / "job.log"
+    if not log_path.exists():
+        return ""
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    return "\n".join(text.rstrip().splitlines()[-lines:])
+
+
+def job_status_view(job_id: str, job_dir: Path) -> dict[str, Any]:
+    """Build the job status shown on the job page and in ``status.json``.
+
+    Args:
+        job_id: Sanitized job id.
+        job_dir: Job working directory.
+
+    Returns:
+        JSON-safe dict with ``job_id``, ``state``, ``chip_kind``,
+        ``chip_label``, plain ``message``, ``stage``, ``stages``, per-video
+        ``cameras`` messages, ``notes``, ``polling``, ``annotate_url`` (only
+        while waiting for labels) and, for a failed job, ``error`` and
+        ``log_tail``.
+    """
+    status = read_status(job_dir)
+    state = str(status.get("state", "unknown"))
+    kind, label = job_state_chip(state)
+    cameras = status.get("cameras") if state == "running" else None
+    message = str(status.get("message", ""))
+    if cameras and len(cameras) > 1:
+        # Each video's step is listed under the headline.
+        message = "Working on both videos at the same time."
+    view: dict[str, Any] = {
+        "job_id": job_id,
+        "state": state,
+        "chip_kind": kind,
+        "chip_label": label,
+        "message": message,
+        "stage": str(status.get("stage") or ""),
+        "stages": job_stage_rows(status),
+        "cameras": [
+            {"video": VIDEO_LABELS.get(str(cid), str(cid)), "message": str(msg)}
+            for cid, msg in (cameras or {}).items()
+        ],
+        "notes": read_job_notes(job_dir),
+        "polling": state in POLLING_JOB_STATES,
+        "annotate_url": (
+            f"/jobs/{job_id}/annotate" if state == "awaiting_annotation" else None
+        ),
+    }
+    if state == "failed":
+        view["error"] = str(status.get("error", ""))
+        view["log_tail"] = _log_tail(job_dir)
+    return view
+
+
+@app.get("/jobs/{job_id}/status.json")
+def job_status_json(
+    job_id: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> JSONResponse:
+    """Return the job's current status for the job page to poll."""
+    safe_job_id = _slug(job_id)
+    job_dir = JOB_ROOT / safe_job_id
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JSONResponse(job_status_view(safe_job_id, job_dir))
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
 def job_detail(
     job_id: str,
-    _: Annotated[None, Depends(require_auth)],
+    session_token: Annotated[str, Depends(require_auth)],
 ) -> HTMLResponse:
     """Render one job status page."""
     safe_job_id = _slug(job_id)
-    display_job_id = html.escape(safe_job_id, quote=True)
     job_dir = JOB_ROOT / safe_job_id
     status = read_status(job_dir)
-    state = html.escape(str(status.get("state", "unknown")), quote=True)
-    message = html.escape(str(status.get("message", "")), quote=True)
+    view = job_status_view(safe_job_id, job_dir)
     result_zip = status.get("result_zip")
-    download = ""
-    if result_zip and Path(result_zip).exists():
-        download = (
-            f'<p class="cta"><a href="/jobs/{safe_job_id}/download">'
-            "Download results zip</a></p>"
-        )
-    annotate = ""
-    if status.get("state") == "awaiting_annotation":
-        annotate = (
-            '<p class="cta"><a class="button-link" '
-            f'href="/jobs/{safe_job_id}/annotate">'
-            "Label parent vs child to continue</a></p>"
-        )
-    refresh_script = ""
-    if status.get("state") in {"uploading", "queued", "running"}:
-        refresh_script = (
-            '<p class="muted">This page refreshes automatically while the job runs.</p>'
-            "<script>setTimeout(() => window.location.reload(), 10000);</script>"
-        )
-    log_link = ""
-    if (job_dir / "job.log").exists():
-        log_link = f'<p><a href="/jobs/{safe_job_id}/log">View job log</a></p>'
-    return _html_page(
-        f"Job {display_job_id}",
-        f"""<section class="panel">
-  <h2>{display_job_id}</h2>
-  <p><strong>Status:</strong> {state}</p>
-  <p><strong>Message:</strong> {message}</p>
-  {annotate}
-  {download}
-  {log_link}
-  {refresh_script}
-  <p><a href="/">Back to jobs</a></p>
-</section>""",
+    is_complete = view["state"] == "complete"
+    return _render_page(
+        "job_detail.html",
+        f"Job {safe_job_id}",
+        session_token=session_token,
+        job=view,
+        job_id=safe_job_id,
+        show_annotate=view["annotate_url"] is not None,
+        show_download=bool(result_zip and Path(result_zip).exists()),
+        results_url=_results_url(job_dir) if is_complete else None,
+        # A new or failed run must not show an earlier run's table.
+        coverage_rows=_coverage_rows(job_dir) if is_complete else None,
+        dropped_parts=_dropped_part_rows(job_dir),
+        min_part_s=f"{MIN_PART_S:g}",
+        show_log_link=(job_dir / "job.log").exists(),
     )
+
+
+def _results_url(job_dir: Path) -> str | None:
+    """Return the session report link for a finished job.
+
+    Args:
+        job_dir: Portal job directory.
+
+    Returns:
+        ``/sessions/<session_id>`` when the job's session has a
+        ``report.html``, else None.
+    """
+    config_path = job_dir / "job_config.json"
+    if not config_path.exists():
+        return None
+    try:
+        session_id = json.loads(config_path.read_text(encoding="utf-8")).get(
+            "session_id"
+        )
+    except ValueError:
+        return None
+    if not session_id or not _session_dir_is_addressable(str(session_id)):
+        return None
+    if not (OUTPUT_ROOT / str(session_id) / SESSION_REPORT_HTML).is_file():
+        return None
+    return f"/sessions/{session_id}"
+
+
+def _dropped_part_rows(job_dir: Path) -> list[dict[str, str]]:
+    """List the analysis parts skipped for being shorter than ``MIN_PART_S``.
+
+    Args:
+        job_dir: Portal job directory.
+
+    Returns:
+        Dicts with ``video``, ``name``, ``start``, ``end`` and ``duration``
+        (display text); empty when nothing was skipped or the job has no
+        metadata.
+    """
+    try:
+        meta = _read_upload_meta(job_dir)
+    except (FileNotFoundError, ValueError):
+        return []
+    rows: list[dict[str, str]] = []
+    for camera_id, parts in (meta.get("dropped_parts_by_camera") or {}).items():
+        for part in parts:
+            rows.append(
+                {
+                    "video": VIDEO_LABELS.get(camera_id, camera_id),
+                    "name": str(part.get("name", "")),
+                    "start": format_clock(float(part["start_s"])),
+                    "end": format_clock(float(part["end_s"])),
+                    "duration": f"{float(part['duration_s']):g} s",
+                }
+            )
+    return rows
+
+
+def _coverage_rows(job_dir: Path) -> list[dict[str, Any]] | None:
+    """Summarize per-block tracking coverage for a finished job.
+
+    Args:
+        job_dir: Portal job directory.
+
+    Returns:
+        One dict per camera x block row (``camera_id``, ``block``,
+        ``coverage`` as a percent string, ``low``), or None when the job has
+        no session table yet.
+    """
+    import pandas as pd
+
+    config_path = job_dir / "job_config.json"
+    if not config_path.exists():
+        return None
+    session_id = json.loads(config_path.read_text(encoding="utf-8")).get("session_id")
+    metrics_path = OUTPUT_ROOT / str(session_id) / "session_metrics.csv"
+    if not session_id or not metrics_path.exists():
+        return None
+    table = pd.read_csv(metrics_path, dtype={"camera_id": str, "block": str})
+    rows: list[dict[str, Any]] = []
+    for row in table.itertuples():
+        share = float(getattr(row, "coverage_both", 0) or 0)
+        rows.append(
+            {
+                "camera_id": str(row.camera_id),
+                "block": str(row.block),
+                "coverage": f"{share:.0%}",
+                "low": bool(getattr(row, "low_coverage", share < 0.5)),
+            }
+        )
+    return rows
+
+
+@app.get("/metrics/all_sessions.csv")
+def download_all_sessions_table(
+    _: Annotated[None, Depends(require_auth)],
+) -> FileResponse:
+    """Download the combined metrics table across every processed session."""
+    from video_analysis.session_report import ALL_SESSIONS_CSV, build_all_sessions_table
+
+    out = OUTPUT_ROOT / ALL_SESSIONS_CSV
+    build_all_sessions_table(OUTPUT_ROOT).to_csv(out, index=False)
+    return FileResponse(out, filename=ALL_SESSIONS_CSV, media_type="text/csv")
+
+
+@app.get("/metrics/all_sessions_task_metrics.csv")
+def download_study_task_table(
+    _: Annotated[None, Depends(require_auth)],
+) -> FileResponse:
+    """Download the study task table (one row per session, camera and task).
+
+    The session-report step rewrites it after every finished job.
+    """
+    from video_analysis.session_report import ALL_SESSIONS_TASK_CSV
+
+    path = OUTPUT_ROOT / ALL_SESSIONS_TASK_CSV
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404, detail="No study task table yet: finish a session first"
+        )
+    return FileResponse(path, filename=ALL_SESSIONS_TASK_CSV, media_type="text/csv")
+
+
+def _gaze_label_context(job_id: str) -> tuple[str, Path, dict[str, list], float]:
+    """Return (safe job id, session dir, blocks per camera, frame rate)."""
+    safe_job_id = _slug(job_id)
+    config_path = JOB_ROOT / safe_job_id / "job_config.json"
+    if not config_path.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    session_dir = OUTPUT_ROOT / _slug(str(config.get("session_id", "")))
+    blocks = {
+        camera_id: [SessionBlock(**block) for block in items]
+        for camera_id, items in (config.get("blocks_by_camera") or {}).items()
+        if (session_dir / camera_id / "tracks_2d_smooth.csv").exists()
+    }
+    if not blocks:
+        raise HTTPException(
+            status_code=404, detail="This job has no results to label yet"
+        )
+    return safe_job_id, session_dir, blocks, float(config.get("frame_rate", 6.0))
+
+
+def _gaze_label_items(job_id: str) -> tuple[str, Path, dict[str, list[dict]]]:
+    """Frames to label per camera, cached in the job folder."""
+    from portal.gaze_labels import sample_gaze_label_frames
+
+    safe_job_id, session_dir, blocks, frame_rate = _gaze_label_context(job_id)
+    cache = JOB_ROOT / safe_job_id / "gaze_label_frames.json"
+    if cache.exists():
+        return safe_job_id, session_dir, json.loads(cache.read_text(encoding="utf-8"))
+    items = {
+        camera_id: sample_gaze_label_frames(
+            session_dir / camera_id, camera_blocks, frame_rate=frame_rate
+        )
+        for camera_id, camera_blocks in blocks.items()
+    }
+    cache.write_text(json.dumps(items), encoding="utf-8")
+    return safe_job_id, session_dir, items
+
+
+@app.get("/jobs/{job_id}/gaze-label", response_class=HTMLResponse)
+def gaze_label_page(
+    job_id: str,
+    session_token: Annotated[str, Depends(require_auth)],
+) -> HTMLResponse:
+    """Render the optional gaze labeling page for a finished job."""
+    from portal.gaze_labels import GAZE_TARGETS, load_gaze_labels
+
+    safe_job_id, session_dir, items = _gaze_label_items(job_id)
+    existing = {
+        camera_id: load_gaze_labels(session_dir / camera_id) for camera_id in items
+    }
+    csrf = csrf_token_for_session(session_token)
+    payload = {
+        "job": safe_job_id,
+        "csrf": csrf,
+        "frames_url": f"/jobs/{safe_job_id}/gaze-frames/",
+        "save_url": f"/jobs/{safe_job_id}/gaze-labels",
+        "items": items,
+        "existing": existing,
+        "targets": GAZE_TARGETS,
+    }
+    # The template embeds ``payload`` with ``|script_json``, which escapes
+    # < > & so nothing in the data can close the <script> block.
+    return _render_page(
+        "gaze_label.html",
+        f"Gaze labels {safe_job_id}",
+        session_token=session_token,
+        job_id=safe_job_id,
+        payload=payload,
+    )
+
+
+@app.get("/jobs/{job_id}/gaze-frames/{camera_id}/{image_name}")
+def gaze_label_frame(
+    job_id: str,
+    camera_id: str,
+    image_name: str,
+    _: Annotated[None, Depends(require_auth)],
+) -> FileResponse:
+    """Serve one frame image offered on the gaze labeling page."""
+    _, session_dir, items = _gaze_label_items(job_id)
+    names = {item["image_name"] for item in items.get(camera_id, [])}
+    if image_name not in names:
+        raise HTTPException(status_code=404, detail="Frame not found")
+    return FileResponse(session_dir / camera_id / "frames" / image_name)
+
+
+def _save_gaze_label_submission(job_id: str, payload: dict) -> dict[str, int]:
+    """Validate and store submitted gaze labels; return counts per camera."""
+    from portal.gaze_labels import save_gaze_labels
+
+    _, session_dir, items = _gaze_label_items(job_id)
+    labels = payload.get("labels") or {}
+    if not isinstance(labels, dict):
+        raise HTTPException(status_code=400, detail="labels must be a JSON object")
+    saved: dict[str, int] = {}
+    for camera_id, entries in labels.items():
+        if camera_id not in items:
+            raise HTTPException(status_code=400, detail=f"Unknown camera: {camera_id}")
+        try:
+            save_gaze_labels(
+                session_dir / camera_id,
+                entries,
+                labeler=str(payload.get("labeler", ""))[:40],
+            )
+        except (ValueError, KeyError, TypeError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        saved[camera_id] = len(entries)
+    return saved
+
+
+@app.post("/jobs/{job_id}/gaze-labels")
+async def submit_gaze_labels(
+    job_id: str,
+    request: Request,
+    _csrf: Annotated[str, Depends(require_csrf)],
+) -> JSONResponse:
+    """Save the colleague's gaze labels next to the session outputs."""
+    saved = _save_gaze_label_submission(job_id, await request.json())
+    return JSONResponse({"saved": saved})
 
 
 @app.get("/jobs/{job_id}/download")
@@ -1440,7 +2289,7 @@ def download_job(
 @app.get("/jobs/{job_id}/log", response_class=HTMLResponse)
 def job_log(
     job_id: str,
-    _: Annotated[None, Depends(require_auth)],
+    session_token: Annotated[str, Depends(require_auth)],
 ) -> HTMLResponse:
     """Render the plain-text job log."""
     safe_job_id = _slug(job_id)
@@ -1448,8 +2297,9 @@ def job_log(
     if not log_path.exists():
         raise HTTPException(status_code=404, detail="Log not available")
     text = log_path.read_text(encoding="utf-8", errors="replace")
-    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return _html_page("Job Log", f"<pre>{escaped}</pre>")
+    return _render_page(
+        "job_log.html", "Job Log", session_token=session_token, log_text=text
+    )
 
 
 def _read_anchor_manifests(job_dir: Path) -> dict[str, list[dict[str, Any]]]:
@@ -1544,7 +2394,7 @@ def anchor_image(
 @app.get("/jobs/{job_id}/annotate", response_class=HTMLResponse)
 def annotate_job(
     job_id: str,
-    _: Annotated[None, Depends(require_auth)],
+    session_token: Annotated[str, Depends(require_auth)],
 ) -> HTMLResponse:
     """Render the parent/child annotation page for a job."""
     safe_job_id = _slug(job_id)
@@ -1554,123 +2404,52 @@ def annotate_job(
         raise HTTPException(
             status_code=404, detail="No anchor frames available for this job"
         )
-    # The annotate page is GET-only HTML; the form's POST uses the existing
-    # require_csrf machinery via the CSRF_TOKEN constant injected into the
-    # inline script (computed below from the active session).
-    sections: list[str] = []
+    cameras: list[dict[str, Any]] = []
     for camera_id, manifest in manifests.items():
-        cards: list[str] = []
+        cards: list[dict[str, Any]] = []
         for entry in manifest:
-            anchor_idx = int(entry["anchor_idx"])
-            img_filename = html.escape(str(entry["image_filename"]), quote=True)
-            ts = float(entry.get("timestamp_s", 0.0))
-            buttons: list[str] = []
+            tracks = []
             for track in entry.get("tracks", []):
-                tid = int(track["track_id"])
                 bgr = track.get("color_bgr", [0, 0, 0])
-                # convert BGR list to CSS rgb()
-                r, g, b = int(bgr[2]), int(bgr[1]), int(bgr[0])
-                buttons.append(
-                    f'<button type="button" class="track-btn" '
-                    f'data-anchor="{anchor_idx}" data-camera="{camera_id}" '
-                    f'data-parent="{tid}" '
-                    f'style="border: 3px solid rgb({r},{g},{b}); '
-                    f'background: rgba({r},{g},{b},0.12); color: #17202a;">'
-                    f"Track {tid} is parent"
-                    f"</button>"
+                # Manifest colors are OpenCV BGR; CSS wants r,g,b.
+                rgb = f"{int(bgr[2])},{int(bgr[1])},{int(bgr[0])}"
+                box = track.get("bbox_xyxy")
+                bbox = (
+                    ",".join(f"{float(v):g}" for v in box)
+                    if isinstance(box, list) and len(box) == 4
+                    else ""
                 )
-            buttons.append(
-                f'<button type="button" class="skip-btn" '
-                f'data-anchor="{anchor_idx}" data-camera="{camera_id}">'
-                "Skip (neither is the parent here)"
-                "</button>"
-            )
+                tracks.append(
+                    {"track_id": int(track["track_id"]), "rgb": rgb, "bbox": bbox}
+                )
             cards.append(
-                f'<figure class="anchor-card" '
-                f'data-anchor="{anchor_idx}" data-camera="{camera_id}">'
-                f'<img src="/jobs/{safe_job_id}/anchors/{camera_id}/{img_filename}" '
-                f'alt="anchor {anchor_idx}" loading="lazy">'
-                f'<figcaption>frame {entry["frame_idx"]} '
-                f"(t={ts:.2f}s)</figcaption>"
-                f'<div class="anchor-buttons">{"".join(buttons)}</div>'
-                f'<div class="anchor-state muted">unlabeled</div>'
-                f"</figure>"
+                {
+                    "anchor_idx": int(entry["anchor_idx"]),
+                    "image_filename": str(entry["image_filename"]),
+                    "frame_idx": entry["frame_idx"],
+                    "timestamp": f"{float(entry.get('timestamp_s', 0.0)):.2f}",
+                    "tracks": tracks,
+                }
             )
-        sections.append(
-            f'<section class="camera-anchors">'
-            f"<h3>{html.escape(camera_id)}</h3>"
-            f'<div class="anchor-grid">{"".join(cards)}</div>'
-            f"</section>"
+        cameras.append(
+            {
+                "camera_id": camera_id,
+                "label": VIDEO_LABELS.get(camera_id, camera_id),
+                "cards": cards,
+            }
         )
-    page_body = (
-        f"<h2>Label parent vs child — {html.escape(safe_job_id)}</h2>"
-        "<p class='muted'>For each frame, click the box around the parent. "
-        "If neither tracked person is the parent (e.g., an experimenter is "
-        "visible), click Skip. You don't have to label every frame, but more "
-        "anchors give better coverage.</p>"
-        f"<form id='annotate-form' method='POST' "
-        f"action='/jobs/{safe_job_id}/annotations' "
-        "data-empty-allowed='no'>"
-        f"{''.join(sections)}"
-        "<p><button type='submit' class='cta'>"
-        "Submit annotations and continue processing</button></p>"
-        "</form>"
-        "<script>"
-        "(function(){"
-        "const state={};"
-        "function setBtnState(card, choice){"
-        "  card.querySelectorAll('button').forEach(b=>b.classList.remove('chosen'));"
-        "  if(choice) choice.classList.add('chosen');"
-        "  card.querySelector('.anchor-state').textContent="
-        "    choice ? (choice.classList.contains('skip-btn') ? 'skipped' :"
-        "             'parent='+choice.dataset.parent) : 'unlabeled';"
-        "}"
-        "document.querySelectorAll('.anchor-card').forEach(card=>{"
-        "  card.querySelectorAll('.track-btn').forEach(btn=>{"
-        "    btn.addEventListener('click',()=>{"
-        "      const cam=btn.dataset.camera, idx=btn.dataset.anchor, "
-        "            parent=parseInt(btn.dataset.parent,10);"
-        "      const others=Array.from(card.querySelectorAll('.track-btn'))"
-        "        .map(b=>parseInt(b.dataset.parent,10)).filter(t=>t!==parent);"
-        "      state[cam]=state[cam]||{};"
-        "      state[cam][idx]={anchor_idx:parseInt(idx,10),"
-        "                       parent_track_id:parent,"
-        "                       child_track_id:others[0]};"
-        "      setBtnState(card,btn);"
-        "    });"
-        "  });"
-        "  const skip=card.querySelector('.skip-btn');"
-        "  if(skip){"
-        "    skip.addEventListener('click',()=>{"
-        "      const cam=skip.dataset.camera, idx=skip.dataset.anchor;"
-        "      state[cam]=state[cam]||{};"
-        "      state[cam][idx]={anchor_idx:parseInt(idx,10),skipped:true};"
-        "      setBtnState(card,skip);"
-        "    });"
-        "  }"
-        "});"
-        "document.getElementById('annotate-form').addEventListener('submit',async ev=>{"
-        "  ev.preventDefault();"
-        "  const payload={};"
-        "  Object.keys(state).forEach(cam=>{"
-        "    payload[cam]=Object.values(state[cam]);"
-        "  });"
-        "  const res=await fetch(ev.target.action,{"
-        "    method:'POST',"
-        "    headers:{'Content-Type':'application/json','x-csrf-token':CSRF_TOKEN},"
-        "    body:JSON.stringify({annotations:payload})"
-        "  });"
-        "  if(res.ok){window.location='/jobs/'+"
-        f"'{safe_job_id}'"
-        ";}"
-        "  else{const t=await res.text(); alert('Submit failed: '+t);}"
-        "});"
-        "})();"
-        "</script>"
+    # The page is GET-only; the form's POST goes through require_csrf, so the
+    # token is handed to annotate.js through a data attribute on the form.
+    csrf = csrf_token_for_session(session_token)
+    return _render_page(
+        "annotate.html",
+        f"Annotate {safe_job_id}",
+        session_token=session_token,
+        job_id=safe_job_id,
+        cameras=cameras,
+        total_cards=sum(len(camera["cards"]) for camera in cameras),
+        csrf_token=csrf,
     )
-    csrf = csrf_token_for_session(_require_session_or_redirect_passthrough())
-    page_body = page_body.replace("CSRF_TOKEN", f'"{csrf}"', 1)
-    return _html_page(f"Annotate {safe_job_id}", page_body)
 
 
 @app.post("/jobs/{job_id}/annotations")
@@ -1680,7 +2459,12 @@ async def submit_annotations(
     request: Request,
     _csrf: Annotated[str, Depends(require_csrf)],
 ) -> JSONResponse:
-    """Accept the colleague's anchor labels, then trigger phase 2."""
+    """Accept the colleague's anchor labels, then trigger phase 2.
+
+    Labels are taken only while the job is waiting for them; any other state
+    (queued, running, complete, failed), an empty submission, or a second
+    submit returns 409 with a plain message, so phase 2 starts once.
+    """
     safe_job_id = _slug(job_id)
     job_dir = JOB_ROOT / safe_job_id
     if not job_dir.exists():
@@ -1691,61 +2475,77 @@ async def submit_annotations(
             status_code=400, detail="No anchor frames to label for this job"
         )
     body = await request.json()
-    annotations = body.get("annotations") or {}
+    annotations = body.get("annotations") if isinstance(body, dict) else None
+    annotations = annotations or {}
     if not isinstance(annotations, dict):
         raise HTTPException(status_code=400, detail="annotations must be a JSON object")
-
-    for camera_id, entries in annotations.items():
-        if camera_id not in manifests:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown camera: {camera_id}",
-            )
-        if not isinstance(entries, list):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{camera_id} annotations must be a list",
-            )
-        converted = _convert_anchor_submission_to_filter_format(
-            entries, manifests[camera_id]
+    if not any(isinstance(v, list) and v for v in annotations.values()):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No frames were labeled. Mark the parent (or skip) on at "
+                "least one frame, then submit again."
+            ),
         )
-        out_path = job_dir / "anchors" / _slug(camera_id) / "anchors.json"
-        out_path.write_text(json.dumps(converted, indent=2), encoding="utf-8")
 
-    write_status(
-        job_dir,
-        {
-            "state": "queued",
-            "message": "Annotations received; phase 2 queued.",
-            "current_step": "phase 2 queued",
-            "phase": 2,
-        },
-    )
+    with ANNOTATION_SUBMIT_LOCK:
+        state = str(read_status(job_dir).get("state", ""))
+        if state != "awaiting_annotation":
+            raise HTTPException(
+                status_code=409, detail=_not_waiting_for_labels_message(state)
+            )
+        converted_by_camera: dict[str, list[dict[str, Any]]] = {}
+        for camera_id, entries in annotations.items():
+            if camera_id not in manifests:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown camera: {camera_id}",
+                )
+            if not isinstance(entries, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{camera_id} annotations must be a list",
+                )
+            converted_by_camera[camera_id] = (
+                _convert_anchor_submission_to_filter_format(
+                    entries, manifests[camera_id]
+                )
+            )
+        for camera_id, converted in converted_by_camera.items():
+            out_path = job_dir / "anchors" / _slug(camera_id) / "anchors.json"
+            out_path.write_text(json.dumps(converted, indent=2), encoding="utf-8")
+        write_status(
+            job_dir,
+            {
+                "state": "queued",
+                "message": describe_step("phase 2 queued")["message"],
+                "stage": "track_refine",
+                "current_step": "phase 2 queued",
+                "phase": 2,
+            },
+        )
     background_tasks.add_task(resume_portal_job_phase2_background, safe_job_id, job_dir)
     return JSONResponse({"job_id": safe_job_id, "status_url": f"/jobs/{safe_job_id}"})
 
 
-def _require_session_or_redirect_passthrough() -> str:
-    """Return the current session token without re-validating.
+def _not_waiting_for_labels_message(state: str) -> str:
+    """Plain reason a labels submission was refused.
 
-    Used only by the annotate page where we need the CSRF token inline in
-    the HTML. The page itself is already auth-gated by ``annotate_job``'s
-    Depends(require_auth).
+    Args:
+        state: The job's current state.
+
+    Returns:
+        One or two short sentences for the person labeling.
     """
-    # Find any active session token. The annotate endpoint already
-    # passed Depends(require_auth) so at least one valid session exists in
-    # SESSION_TOKENS for this caller; pick the most recently created.
-    now = time.time()
-    candidates = [
-        (token, state)
-        for token, state in SESSION_TOKENS.items()
-        if state.expires_at > now
-    ]
-    if not candidates:
-        # Defensive: should not happen because require_auth ran upstream.
-        raise HTTPException(status_code=401, detail="No active session")
-    candidates.sort(key=lambda item: item[1].expires_at, reverse=True)
-    return candidates[0][0]
+    reasons = {
+        "queued": "Labels for this job were already received.",
+        "running": "This job is already running with the labels it received.",
+        "complete": "This job is already finished.",
+        "failed": "This job stopped with an error.",
+        "uploading": "This job is still uploading.",
+    }
+    reason = reasons.get(state, "This job is not waiting for labels.")
+    return f"{reason} Nothing was changed. Go back to the job page to see where it is."
 
 
 def main() -> None:

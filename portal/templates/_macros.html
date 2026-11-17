@@ -1,0 +1,6 @@
+{# Shared template macros. Import with: {% from "_macros.html" import chip %} #}
+{# Glyph per chip kind, so a chip never relies on color alone. #}
+{% set CHIP_GLYPHS = {"ok": "✓", "done": "✓", "check": "!", "waiting": "!", "failed": "✕", "running": "•", "insufficient": "–"} %}
+{% macro chip(kind, label) -%}
+<span class="chip chip--{{ kind }}"><span class="chip__icon" aria-hidden="true">{{ CHIP_GLYPHS.get(kind, "?") }}</span>{{ label }}</span>
+{%- endmacro %}

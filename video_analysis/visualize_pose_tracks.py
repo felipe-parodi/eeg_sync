@@ -168,17 +168,32 @@ def _load_frames_from_csv(
     pose_path: Path,
     tracks_path: Path,
     frames_dir: Path,
+    start_s: Optional[float] = None,
+    end_s: Optional[float] = None,
 ) -> List[Dict[str, object]]:
     """Build frame entries from pose + tracks CSVs (same format as JSON loader).
 
     Uses frame_index.csv (written by the frame extractor) to correctly map
     CSV timestamps to physical frame images. This is necessary because
     interpolation renumbers frame_idx, breaking the original file numbering.
+
+    ``start_s``/``end_s`` limit the work to one clip: a portal overlay renders
+    30 s, and building entries for a whole session made each clip take ~9 s.
     """
     import numpy as np
 
     pose_df = pd.read_csv(pose_path)
     tracks_df = pd.read_csv(tracks_path)
+    # Nearest-timestamp matching looks at most 0.5 s away, so CSV rows further
+    # than that outside the window can never be used.
+    lo = -np.inf if start_s is None else start_s - 0.5
+    hi = np.inf if end_s is None else end_s + 0.5
+    pose_df = pose_df[(pose_df["timestamp_s"] >= lo) & (pose_df["timestamp_s"] <= hi)]
+    tracks_df = tracks_df[
+        (tracks_df["timestamp_s"] >= lo) & (tracks_df["timestamp_s"] <= hi)
+    ]
+    pose_by_ts = {ts: rows for ts, rows in pose_df.groupby("timestamp_s")}
+    tracks_by_ts = {ts: rows for ts, rows in tracks_df.groupby("timestamp_s")}
 
     # Build timestamp → image_name map from frame_index.csv.
     frame_index_path = frames_dir / "frame_index.csv"
@@ -201,23 +216,31 @@ def _load_frames_from_csv(
         frame_real_indices = frame_index["frame_idx"].values.astype(int)
     else:
         frame_real_indices = np.arange(len(frame_timestamps), dtype=int)
+    in_window = np.ones(len(frame_timestamps), dtype=bool)
+    if start_s is not None:
+        in_window &= frame_timestamps >= start_s
+    if end_s is not None:
+        in_window &= frame_timestamps <= end_s
+    frame_timestamps = frame_timestamps[in_window]
+    frame_image_names = frame_image_names[in_window]
+    frame_real_indices = frame_real_indices[in_window]
 
     frames: List[Dict[str, object]] = []
     for img_ts, img_name, real_fidx in zip(
         frame_timestamps, frame_image_names, frame_real_indices
     ):
-        if len(csv_ts_array) == 0:
-            break
-        nearest_idx = int(np.argmin(np.abs(csv_ts_array - img_ts)))
-        nearest_ts = csv_ts_array[nearest_idx]
-        # Skip if nearest CSV timestamp is too far (> 0.5s).
-        if abs(nearest_ts - img_ts) > 0.5:
-            continue
-
-        t_rows = tracks_df[tracks_df["timestamp_s"] == nearest_ts]
-        p_rows = pose_df[pose_df["timestamp_s"] == nearest_ts]
-
+        # A frame with nobody tracked within 0.5 s is still rendered, raw,
+        # so the check clip shows the gap (and a window where nobody was
+        # tracked at all still yields a clip instead of an error).
         persons: List[Dict[str, object]] = []
+        if len(csv_ts_array):
+            nearest_idx = int(np.argmin(np.abs(csv_ts_array - img_ts)))
+            nearest_ts = csv_ts_array[nearest_idx]
+            near = abs(nearest_ts - img_ts) <= 0.5
+        else:
+            near = False
+        t_rows = tracks_by_ts[nearest_ts] if near else tracks_df.iloc[0:0]
+        p_rows = pose_by_ts.get(nearest_ts, pose_df.iloc[0:0]) if near else None
         for _, t_row in t_rows.iterrows():
             tid = int(t_row["track_id"])
             person_pose = p_rows[p_rows["track_id"] == tid].sort_values("keypoint_name")
@@ -277,7 +300,13 @@ def render_pose_track_video(config: VisualizationConfig) -> Dict[str, object]:
             raise FileNotFoundError(f"pose CSV not found: {pose_path}")
         if not tracks_path.exists():
             raise FileNotFoundError(f"tracks CSV not found: {tracks_path}")
-        frames = _load_frames_from_csv(pose_path, tracks_path, frames_dir)
+        frames = _load_frames_from_csv(
+            pose_path,
+            tracks_path,
+            frames_dir,
+            start_s=_parse_time(config.start_time) if config.start_time else None,
+            end_s=_parse_time(config.end_time) if config.end_time else None,
+        )
         source_label = f"{config.pose_csv} + {config.tracks_csv}"
     else:
         if not inference_path.exists():

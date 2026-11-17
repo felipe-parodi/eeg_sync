@@ -2,6 +2,12 @@
 
 Pose, gaze, and synchrony analysis for parent–child interaction videos, plus an interactive EEG ↔ video synchronization tool. Originally built for the Cayo Santiago studies; now a general video → analyzable outputs pipeline.
 
+![Pose skeleton and gaze estimate on one video frame](docs/images/example_pose_gaze.jpg)
+
+*One frame of pipeline output: the adult's 17-keypoint pose (green) and the PaGE
+gaze estimate (orange arrow from the head box to the predicted gaze target; the
+glow is the gaze heatmap).*
+
 > **New here?** Go to [`docs/COLLEAGUE_QUICKSTART.md`](docs/COLLEAGUE_QUICKSTART.md). It's the one doc to read.
 >
 > **Driving this with an LLM?** Point it at [`docs/PIPELINE.md`](docs/PIPELINE.md), [`docs/INPUTS.md`](docs/INPUTS.md), and [`docs/OUTPUTS.md`](docs/OUTPUTS.md). All three are written for both humans and machines.
@@ -12,47 +18,98 @@ Pose, gaze, and synchrony analysis for parent–child interaction videos, plus a
 
 Given one or two videos of a parent–child session, the pipeline produces:
 
-- **Per-frame pose tracks** (2D bounding boxes + 17 COCO keypoints per person) — CSV
-- **Per-frame gaze estimates** (heatmaps + peak coordinates per person) — CSV + NPZ
-- **Per-block synchrony metrics** — torso proximity, movement cross-correlation, gaze categories (mutual / joint / one-watching / independent), gaze convergence — CSV + PNG dashboards
-- **Sanity-check overlay videos** so you can watch the tracker working
+- **Per-frame pose for exactly the parent and the child** — boxes + 17 COCO
+  keypoints per person (CSV). Every detection is cached, and an offline
+  two-person association uses about 10 anchor frames labeled per camera
+  ("which one is the parent?"). ViTPose-Large then refines the keypoints.
+- **Per-frame gaze estimates** — PaGE ViT-B gaze heatmaps and gaze points
+  per person (CSV + NPZ).
+- **Per-block metrics** — torso proximity and movement synchrony. Gaze
+  categories (mutual gaze, joint attention, parent/child watching, …) are
+  reported next to their **chance level**. Every block also reports
+  **tracking coverage** (share of frames with both people found), so
+  low-coverage blocks are flagged rather than silently averaged.
+- **A one-page `report.html` and `session_metrics.csv` per session**, plus an
+  all-sessions table for the whole study.
+- **Overlay videos** of the start and end of every block to check tracking by eye.
 
 Optionally, it also synchronizes those videos with OpenBCI EEG recordings.
 
 ---
 
-## Quick start
+## Video Processing Portal (recommended)
+
+Non-technical users run everything through a password-protected web portal on
+the lab workstation:
+
+```powershell
+.\start-portal.ps1          # prompts for a password, prints a public link
+.\start-portal.ps1 -NoTunnel  # local only: http://localhost:8080
+```
+
+In the browser the user:
+
+1. Uploads Video A and/or B. Each video's task blocks (e.g.
+   `grocery,16:00,26:50`) and extra-person windows are entered **in that
+   video's own clock**; the two GoPros' clocks differ.
+2. Waits for pose inference (about 2 minutes per camera on a GPU).
+3. Clicks the parent in about 10 frames per camera.
+4. Downloads the results zip. Open `report.html` first.
+
+The job page shows per-block tracking coverage. It also links to an optional
+gaze labeling page, which builds a small human-coded set for checking gaze
+accuracy on the lab's own videos.
+
+To load new code without interrupting anyone, run
+`uv run python -m portal.restart`: the portal restarts by itself as soon as no
+job is uploading, queued or running (jobs waiting for parent labels are kept),
+and the public link stays the same. A restart keeps the job list; jobs that
+were mid-run when the portal stopped are marked interrupted. Every job also
+writes a run record to `video_inference/output/portal_runs.jsonl`.
+
+---
+
+## Quick start (command line)
 
 ```bash
 git clone https://github.com/felipe-parodi/eeg_sync.git
 cd eeg_sync
-pip install -e ".[dev,video,gaze]"
+uv sync --extra dev --extra video --extra gaze
 
-# One session, two cameras, end-to-end
-video-compress-rapid \
-    --video raw/cam_a.mov --video raw/cam_b.mov \
-    --output-dir video_inference/compressed
+S=video_inference/output/P001c
 
-video-infer run \
-    --video-a video_inference/compressed/cam_a_rapid.mp4 \
-    --video-b video_inference/compressed/cam_b_rapid.mp4 \
-    --inference-backend ultralytics \
-    --ultralytics-model-path yolo11m-pose.pt \
-    --tracker-backend roboflow --tracker-name bytetrack \
-    --max-persons 4 --frame-rate 5 \
-    --device auto --skip-compress --session-id P001c
+# 1. Pose for every frame of the analysis windows; caches all detections.
+uv run video-infer run \
+    --video-a compressed/cam_a.mp4 --video-b compressed/cam_b.mp4 \
+    --inference-backend ultralytics --ultralytics-model-path yolo11l-pose-dense.pt \
+    --tracker-backend offline --max-persons 2 --frame-rate 6 --imgsz 960 \
+    --analysis-windows-camera-a "grocery,16:00,26:50;storybook,31:20,56:03" \
+    --analysis-windows-camera-b "grocery,14:48,25:54;storybook,30:16,55:02" \
+    --device auto --skip-compress --session-id P001c --parallel-cameras
 
-video-filter-tracks --session-dir video_inference/output/P001c --camera camera_a \
-    --blocks "free_play,13:26,23:40;storybook,29:22,37:06" --source-fps 5.0
+# 2. Per camera: parent/child identities (anchors.json from the portal or
+#    video-anchor-frames), keypoint refinement, gap filling, smoothing.
+uv run video-assoc --camera-dir $S/camera_a --anchors-json anchors_camera_a.json
+uv run video-refine-keypoints --camera-dir $S/camera_a
+uv run video-interpolate --camera-dir $S/camera_a --target-fps 6 \
+    --tracks-input tracks_2d_filtered.csv --pose-input pose_3d_refined.csv \
+    --tracks-output tracks_2d_interpolated.csv --pose-output pose_3d_interpolated.csv
+uv run video-smooth --camera-dir $S/camera_a \
+    --pose-input pose_3d_interpolated.csv --tracks-input tracks_2d_interpolated.csv \
+    --pose-output pose_3d_smooth.csv --tracks-output tracks_2d_smooth.csv
 
-video-smooth --camera-dir video_inference/output/P001c/camera_a \
-    --pose-input pose_3d_filtered.csv --tracks-input tracks_2d_filtered.csv
-
-video-pose-metrics  --camera-dir video_inference/output/P001c/camera_a --session-config session_config.json
-video-gaze-metrics  --camera-dir video_inference/output/P001c/camera_a --session-config session_config.json
+# 3. Metrics (session_config.json lists each camera's blocks), gaze, report.
+uv run video-pose-metrics --camera-dir $S/camera_a --session-config session_config.json \
+    --camera-id camera_a --pose-input pose_3d_smooth.csv
+uv run gaze-infer --camera-dir $S/camera_a --session-config session_config.json \
+    --camera-id camera_a --pose-input pose_3d_smooth.csv --tracks-input tracks_2d_smooth.csv
+uv run video-gaze-metrics --camera-dir $S/camera_a --session-config session_config.json \
+    --camera-id camera_a --pose-input pose_3d_smooth.csv --tracks-input tracks_2d_smooth.csv
+uv run video-session-report --session-dir $S --all-sessions-root video_inference/output
 ```
 
-Outputs land in `video_inference/output/P001c/camera_a/`. Full walkthrough — including the "what if someone else walks in?" cases — lives in [`docs/COLLEAGUE_QUICKSTART.md`](docs/COLLEAGUE_QUICKSTART.md).
+The portal runs exactly this chain (see `portal/jobs.py`). Full walkthrough:
+[`docs/COLLEAGUE_QUICKSTART.md`](docs/COLLEAGUE_QUICKSTART.md).
 
 ---
 
@@ -60,22 +117,26 @@ Outputs land in `video_inference/output/P001c/camera_a/`. Full walkthrough — i
 
 | Command | Purpose | Stage |
 |---|---|---|
+| `video-processing-portal` | Web portal that runs the whole chain (via `start-portal.ps1`) | all |
 | `video-compress-rapid` | Shrink raw GoPro to ≤50 MB | 1 |
-| `video-infer run` | Pose inference + tracking (`ultralytics` / `sam3d` / `rtmlib`) | 2 |
-| `video-filter-tracks` | Keep top-N tracks per named block, auto-assign parent=0/child=1 | 3 |
-| `video-annotate-tracks` | Interactive viewer to fix track IDs (click + press 0–3) | 3b (optional) |
-| `video-correct-tracks` | Apply the annotator's JSON to tracks/pose CSVs | 3c (optional) |
-| `video-interpolate` | Upsample low-FPS outputs | 4 (optional) |
+| `video-infer run` | Pose inference; `--tracker-backend offline` caches all detections | 2 |
+| `video-anchor-frames` | Render frames for the parent/child anchor labels | 3 |
+| `video-assoc` | Offline two-person association with anchor labels → parent=0 / child=1 | 3 |
+| `video-refine-keypoints` | ViTPose-Large keypoint refinement of the two people | 3b |
+| `video-filter-tracks` | Older per-block track filter (jobs without a detection cache) | 3 (legacy) |
+| `video-annotate-tracks` / `video-correct-tracks` | Manual track-ID fixes | 3c (optional) |
+| `video-interpolate` | Fill short detection gaps on the frame grid | 4 |
 | `video-smooth` | Confidence-gated EMA smoothing | 4b |
-| `video-pose-metrics` | Per-block torso proximity + movement xcorr | 5 |
-| `gaze-infer` | Gaze heatmaps via Gazelle | 5 |
-| `gaze-synchrony` | All four synchrony metrics → CSV | 5 |
-| `gaze-plot` | 4-panel synchrony dashboard | 5 |
-| `video-gaze-metrics` | Per-block gaze categories + convergence | 5 |
+| `video-pose-metrics` | Per-block proximity, movement synchrony, tracking coverage | 5 |
+| `gaze-infer` | Gaze heatmaps with PaGE ViT-B (`gaze-infer-gazelle` for Gaze-LLE) | 5 |
+| `gaze-synchrony` / `gaze-plot` | Frame-level synchrony metrics and dashboard | 5 |
+| `video-gaze-metrics` | Per-block gaze categories with chance levels, convergence | 5 |
 | `video-gaze-snapshots` | Spot-check gaze heatmaps over frames | 5 |
-| `video-visualize` | 2D pose overlay video | 6 |
-| `video-visualize-3d` | 3D skeleton PNGs / MP4 | 6 |
+| `gaze-label-eval` | Score gaze output against portal gaze labels | 5 (optional) |
+| `video-session-report` | `session_metrics.csv`, `report.html`, all-sessions table | 6 |
+| `video-visualize` / `video-visualize-3d` | Pose overlay video / 3D skeleton renders | 6 |
 | `eeg-sync` | Interactive EEG ↔ video offset finder | (separate) |
+| `eeg-red-light` | Find the red-light board presentation in a video | (separate) |
 
 Detail and inputs/outputs per command: [`docs/PIPELINE.md`](docs/PIPELINE.md).
 
@@ -85,13 +146,16 @@ Detail and inputs/outputs per command: [`docs/PIPELINE.md`](docs/PIPELINE.md).
 
 ```
 sync_eeg_vid/       # EEG ↔ video sync (interactive CLI: eeg-sync)
-video_inference/    # Pose inference: ultralytics / sam3d / rtmlib backends + ByteTrack
+portal/             # Video Processing Portal (FastAPI) + job runner
+video_inference/    # Pose inference, detection cache, offline two-person association,
+                    #   ViTPose keypoint refinement
 video_analysis/     # Post-processing: smooth, interpolate, filter-tracks, annotate-tracks,
                     #                  correct-tracks, visualize (2D + 3D), metrics
-gaze_analysis/      # Gazelle gaze inference + 4-metric synchrony + dashboard
+gaze_analysis/      # PaGE / Gaze-LLE gaze inference, gaze categories, synchrony, dashboard
+pose_training/      # Pose-model distillation and the tracking benchmark (bench.py)
 docs/               # All user-facing documentation (read these in order: QUICKSTART → PIPELINE → OUTPUTS)
 templates/          # Starter session_config.json + segment / exclusion CSV examples
-tests/              # pytest suite; 168 tests, all green on master
+tests/              # pytest suite (`uv run pytest -q`)
 third_party/        # Git submodules: sam-3d-body, gazelle
 ```
 
@@ -102,11 +166,10 @@ Per-module READMEs: [`video_inference/README.md`](video_inference/README.md).
 ## Install options
 
 ```bash
-pip install -e .                          # core only (sync + base utilities)
-pip install -e ".[video]"                 # + Ultralytics 2D pose
-pip install -e ".[video,gaze]"            # + Gazelle gaze stack
-pip install -e ".[video,gaze,dev]"        # + pytest, ruff, black, mypy
-conda env create -f environment.yml       # full env including ffmpeg, CUDA-ready
+uv sync                                         # core only (sync + base utilities)
+uv sync --extra video                           # + Ultralytics pose, ViTPose refinement
+uv sync --extra video --extra gaze              # + gaze models
+uv sync --extra video --extra gaze --extra dev  # + pytest, ruff, black, mypy
 ```
 
 CPU is the default and fine for the pipeline. CUDA / Apple Silicon are auto-detected by `--device auto`. `ffmpeg` must be on `PATH`.
@@ -122,6 +185,12 @@ Run it interactively:
 ```bash
 eeg-sync
 ```
+
+`eeg-red-light --video cam_a.mp4` finds when the red-light board is held up
+to camera A (most sessions). On the compressed 8–10 fps copies the LED flash
+itself is not visible, so the exact sync frame is still marked by hand in
+`eeg-sync`. The board is shown only to camera A, so camera B needs its own
+reference.
 
 You'll be walked through:
 1. Optional dual-EEG sync (IR pulse in both EEG files)
@@ -170,10 +239,10 @@ eeg_a_time = eeg_b_time + eeg_a_to_eeg_b_offset
 
 Tutorials for downstream EEG analysis:
 
-- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — first multi-modal analysis (≈10 min read)
-- [docs/HOW_TO_USE_SYNC.md](docs/HOW_TO_USE_SYNC.md) — using `sync_results.json` in code
-- [docs/TUTORIAL_POSE_EEG.md](docs/TUTORIAL_POSE_EEG.md) — joining pose data to EEG
-- [docs/CLOCK_DRIFT.md](docs/CLOCK_DRIFT.md) — when single-point sync isn't enough
+- [docs/eeg_sync/GETTING_STARTED.md](docs/eeg_sync/GETTING_STARTED.md) — first multi-modal analysis (≈10 min read)
+- [docs/eeg_sync/HOW_TO_USE_SYNC.md](docs/eeg_sync/HOW_TO_USE_SYNC.md) — using `sync_results.json` in code
+- [docs/eeg_sync/TUTORIAL_POSE_EEG.md](docs/eeg_sync/TUTORIAL_POSE_EEG.md) — joining pose data to EEG
+- [docs/eeg_sync/CLOCK_DRIFT.md](docs/eeg_sync/CLOCK_DRIFT.md) — when single-point sync isn't enough
 
 ### Interactive video viewer controls
 
@@ -196,9 +265,9 @@ Performance details (frame caching, auto-downscale, instant seeking) in [`sync_e
 ## Development
 
 ```bash
-pytest -q                       # full suite (168 tests)
-ruff check . && black --check . # lint + format check
-black . && ruff check --fix .   # auto-fix
+uv run pytest -q                # full suite
+uv run ruff check . && uv run black --check .  # lint + format check
+uv run black . && uv run ruff check --fix .    # auto-fix
 ```
 
 Style: Python 3.10+, Google docstrings, type hints on all signatures, fail-loudly error handling. No `_v2` / `_new` file suffixes — edit in place. See [`AGENTS.md`](AGENTS.md) for the LLM-collaboration guide.
@@ -211,6 +280,7 @@ CI runs lint + format check + tests on Python 3.10 and 3.11 (see `.github/workfl
 - `video_inference/data/`, `video_inference/compressed/`, `video_inference/output/` are gitignored.
 - Tests use synthetic fixtures in `tests/fixtures/`.
 - The one tracked JSON is `session_config.json` (per-session analysis windows — no PII).
+- The README example image is a pilot-session frame showing only an adult.
 
 ---
 

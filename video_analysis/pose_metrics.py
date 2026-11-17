@@ -17,7 +17,9 @@ import pandas as pd
 
 from gaze_analysis.config import SessionBlock, load_session_config
 from gaze_analysis.synchrony import (
+    compute_movement_sync,
     compute_movement_xcorr,
+    compute_movement_xcorr_chance,
     compute_torso_proximity,
 )
 
@@ -49,9 +51,112 @@ BLOCK_COLORS = {
 }
 
 
+# Blocks where both people are tracked in fewer than this share of frames are
+# flagged: their metrics describe only part of the block.
+LOW_COVERAGE_THRESHOLD = 0.5
+
+# Thresholds behind ``quality_verdict``; "usable" is the recommended inclusion
+# rule for a task (pieces joined). Basis (2026-11-16, 1011v3-1020v3): across
+# dyads, distance from a 2 min sample correlates r = 0.85 with the full-task
+# value, and synchrony from 10 windows r ~ 0.87 (3 windows only r = 0.66).
+# Need at least this much time with both people tracked.
+MIN_VALID_SECONDS = 120.0
+# Movement synchrony needs at least this many 20 s windows (about 2 minutes of
+# unbroken tracking); with fewer it is not reported.
+MIN_SYNC_WINDOWS = 10
+
+
 # ---------------------------------------------------------------------------
 # Metric computation
 # ---------------------------------------------------------------------------
+
+
+def block_coverage(
+    block_pose: pd.DataFrame,
+    block: SessionBlock,
+    frame_rate: float,
+    parent_id: int = 0,
+    child_id: int = 1,
+) -> Dict[str, Any]:
+    """Count how many frames of a block have the parent, the child, and both.
+
+    Args:
+        block_pose: Pose rows inside the block.
+        block: The block.
+        frame_rate: Analysis frame rate (frames per second).
+        parent_id: Parent track ID.
+        child_id: Child track ID.
+
+    Returns:
+        Coverage counts, the share of block frames with both people, and a
+        ``low_coverage`` flag.
+    """
+    block_frames = int(round((block.end_s - block.start_s) * frame_rate)) + 1
+    times = block_pose.groupby("track_id")["timestamp_s"].apply(
+        lambda t: set(np.round(t.to_numpy(float) * frame_rate).astype(int))
+    )
+    parent = times.get(parent_id, set())
+    child = times.get(child_id, set())
+    both_frames = np.array(sorted(parent & child))
+    both = len(both_frames)
+    coverage = min(1.0, both / block_frames) if block_frames > 0 else 0.0
+    if both:
+        run_lengths = np.diff(
+            np.flatnonzero(np.diff(np.r_[-10, both_frames, both_frames[-1] + 10]) > 1)
+        )
+        n_segments = int(len(run_lengths))
+        longest = float(run_lengths.max()) / frame_rate
+    else:
+        n_segments, longest = 0, 0.0
+    return {
+        "block_start_s": block.start_s,
+        "block_end_s": block.end_s,
+        "block_frames": block_frames,
+        "frames_with_parent": len(parent),
+        "frames_with_child": len(child),
+        "frames_with_both": both,
+        "coverage_both": round(coverage, 4),
+        "low_coverage": bool(coverage < LOW_COVERAGE_THRESHOLD),
+        "valid_seconds_both": round(both / frame_rate, 2),
+        "n_segments": n_segments,
+        "longest_segment_s": round(longest, 2),
+    }
+
+
+def quality_verdict(stats: Dict[str, Any]) -> tuple[str, str]:
+    """Data check for one block or task: is there enough data behind the numbers?
+
+    ``insufficient`` when both people are tracked for less than
+    ``MIN_VALID_SECONDS``; ``check`` when coverage is below
+    ``LOW_COVERAGE_THRESHOLD`` or there are fewer than ``MIN_SYNC_WINDOWS``
+    synchrony windows; otherwise ``usable``. ``usable`` is the recommended
+    inclusion rule, together with a check of the overlay clips.
+
+    Args:
+        stats: Row with ``valid_seconds_both``, ``coverage_both`` and
+            (optionally) ``sync_n_windows``.
+
+    Returns:
+        ``(verdict, reasons)``; reasons are plain sentences joined by "; ".
+    """
+    seconds = float(stats.get("valid_seconds_both", 0.0) or 0.0)
+    coverage = float(stats.get("coverage_both", 0.0) or 0.0)
+    windows = stats.get("sync_n_windows")
+    windows = 0 if windows is None or pd.isna(windows) else int(windows)
+    reasons = []
+    if seconds < MIN_VALID_SECONDS:
+        reasons.append(
+            f"both people tracked for only {seconds:.0f} s "
+            f"(less than {MIN_VALID_SECONDS:.0f} s)"
+        )
+        return "insufficient", "; ".join(reasons)
+    if coverage < LOW_COVERAGE_THRESHOLD:
+        reasons.append(f"both people tracked in only {coverage:.0%} of the time")
+    if windows < MIN_SYNC_WINDOWS:
+        reasons.append(
+            "too few unbroken 20-second stretches to measure movement synchrony"
+        )
+    return ("check" if reasons else "usable"), "; ".join(reasons)
 
 
 def compute_per_block_metrics(
@@ -61,6 +166,7 @@ def compute_per_block_metrics(
     child_id: int = 1,
     xcorr_window_s: float = 5.0,
     xcorr_max_lag_s: float = 2.0,
+    frame_rate: float = 6.0,
 ) -> Dict[str, Any]:
     """Compute torso proximity and movement xcorr per block.
 
@@ -71,12 +177,14 @@ def compute_per_block_metrics(
         child_id: Child track ID.
         xcorr_window_s: Cross-correlation window size in seconds.
         xcorr_max_lag_s: Maximum lag to search in seconds.
+        frame_rate: Analysis frame rate, used for tracking coverage.
 
     Returns:
         Dict with keys: proximity_frames, xcorr_windows, block_stats.
     """
     all_proximity: List[pd.DataFrame] = []
     all_xcorr: List[pd.DataFrame] = []
+    all_sync: List[pd.DataFrame] = []
     block_stats: List[Dict[str, Any]] = []
 
     for block in blocks:
@@ -85,7 +193,13 @@ def compute_per_block_metrics(
             & (pose_df["timestamp_s"] <= block.end_s)
         ].copy()
 
+        coverage = block_coverage(block_pose, block, frame_rate, parent_id, child_id)
         if block_pose.empty:
+            empty_stats: Dict[str, Any] = {"block": block.name, **coverage}
+            empty_stats["quality_verdict"], empty_stats["quality_reasons"] = (
+                quality_verdict(empty_stats)
+            )
+            block_stats.append(empty_stats)
             continue
 
         # Torso proximity
@@ -103,7 +217,7 @@ def compute_per_block_metrics(
             all_xcorr.append(xcorr)
 
         # Per-block summary
-        stats: Dict[str, Any] = {"block": block.name}
+        stats: Dict[str, Any] = {"block": block.name, **coverage}
         if not prox.empty:
             dist = prox["torso_distance_px"]
             stats["proximity_mean"] = float(dist.mean())
@@ -116,6 +230,28 @@ def compute_per_block_metrics(
             stats["lag_mean_s"] = float(xcorr["peak_lag_s"].mean())
             stats["lag_std_s"] = float(xcorr["peak_lag_s"].std())
             stats["xcorr_n_windows"] = len(xcorr)
+            chance = compute_movement_xcorr_chance(
+                block_pose, parent_id, child_id, xcorr_window_s, xcorr_max_lag_s
+            )
+            if not chance.empty:
+                stats["xcorr_chance_mean"] = float(chance["peak_xcorr"].mean())
+                stats["xcorr_minus_chance"] = (
+                    stats["xcorr_mean"] - stats["xcorr_chance_mean"]
+                )
+        # Whole-body movement synchrony (the reported measure).
+        sync, sync_chance = compute_movement_sync(block_pose, parent_id, child_id)
+        if not sync.empty:
+            sync["block"] = block.name
+            all_sync.append(sync)
+            stats["sync_mean"] = float(sync["sync_r"].mean())
+            stats["sync_std"] = float(sync["sync_r"].std())
+            stats["sync_n_windows"] = len(sync)
+            if not sync_chance.empty:
+                stats["sync_chance_mean"] = float(sync_chance["sync_r"].mean())
+                stats["sync_minus_chance"] = (
+                    stats["sync_mean"] - stats["sync_chance_mean"]
+                )
+        stats["quality_verdict"], stats["quality_reasons"] = quality_verdict(stats)
         block_stats.append(stats)
 
     proximity_df = (
@@ -123,9 +259,12 @@ def compute_per_block_metrics(
     )
     xcorr_df = pd.concat(all_xcorr, ignore_index=True) if all_xcorr else pd.DataFrame()
 
+    sync_df = pd.concat(all_sync, ignore_index=True) if all_sync else pd.DataFrame()
+
     return {
         "proximity_df": proximity_df,
         "xcorr_df": xcorr_df,
+        "sync_df": sync_df,
         "block_stats": block_stats,
     }
 
@@ -328,7 +467,7 @@ def main() -> None:
     camera_dir = Path(args.camera_dir)
     config = load_session_config(args.session_config)
     mapping = config.get_camera_mapping(args.camera_id)
-    blocks = config.session_blocks
+    blocks = config.blocks_for_camera(args.camera_id)
 
     pose_df = pd.read_csv(camera_dir / args.pose_input)
     print(f"[pose-metrics] loaded {len(pose_df)} pose rows from {args.pose_input}")
@@ -340,6 +479,7 @@ def main() -> None:
         child_id=mapping.child_track_id,
         xcorr_window_s=args.xcorr_window,
         xcorr_max_lag_s=args.xcorr_max_lag,
+        frame_rate=config.frame_rate,
     )
 
     # Save CSVs
@@ -348,6 +488,10 @@ def main() -> None:
         results["proximity_df"].to_csv(prox_path, index=False)
         print(f"[pose-metrics] wrote {prox_path} ({len(results['proximity_df'])} rows)")
 
+    if not results["sync_df"].empty:
+        sync_path = camera_dir / "pose_metrics_sync.csv"
+        results["sync_df"].to_csv(sync_path, index=False)
+        print(f"[pose-metrics] wrote {sync_path} ({len(results['sync_df'])} rows)")
     if not results["xcorr_df"].empty:
         xcorr_path = camera_dir / "pose_metrics_xcorr.csv"
         results["xcorr_df"].to_csv(xcorr_path, index=False)
@@ -365,11 +509,13 @@ def main() -> None:
         block = stats["block"]
         prox_mean = stats.get("proximity_mean", 0)
         prox_std = stats.get("proximity_std", 0)
-        xcorr_mean = stats.get("xcorr_mean", 0)
-        lag_mean = stats.get("lag_mean_s", 0)
+        sync_mean = stats.get("sync_mean", float("nan"))
+        sync_chance = stats.get("sync_chance_mean", float("nan"))
         print(
             f"  {block:12s}: proximity={prox_mean:.1f} +/- {prox_std:.1f} px, "
-            f"xcorr={xcorr_mean:.3f}, lag={lag_mean:.3f}s"
+            f"movement synchrony={sync_mean:.2f} (chance {sync_chance:.2f}), "
+            f"both people tracked in {stats['coverage_both']:.0%} of the block"
+            + (" (LOW: interpret with care)" if stats["low_coverage"] else "")
         )
 
     # Generate plots

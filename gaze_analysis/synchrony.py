@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
@@ -22,9 +23,17 @@ from gaze_analysis.config import (
     add_time_range_args,
     filter_by_time_range,
     filter_heatmaps_by_time_range,
+    frame_image_size,
     load_session_config,
     resolve_time_range,
 )
+from gaze_analysis.gaze_categories import (
+    MIN_CHANCE_SHIFT_S,
+    build_frame_table,
+    gaze_categories,
+    heatmap_overlap,
+)
+from gaze_analysis.head_bbox import extract_head_bboxes
 
 # COCO torso keypoints: left/right shoulder (5,6) + left/right hip (11,12)
 _TORSO_KEYPOINTS = ["kp_005", "kp_006", "kp_011", "kp_012"]
@@ -147,6 +156,205 @@ def _compute_velocity(
     return df
 
 
+XCORR_COLUMNS = [
+    "segment_id",
+    "window_start_s",
+    "window_end_s",
+    "peak_xcorr",
+    "peak_lag_s",
+]
+
+# A jump in time larger than this many frame intervals ends a contiguous run.
+RUN_GAP_FACTOR = 1.5
+
+
+def _frame_interval(pose_df: pd.DataFrame) -> float:
+    """Estimate the nominal frame interval from all timestamps in the table.
+
+    Uses every frame either person appears in, so the estimate is the frame
+    grid spacing even when both-people frames are sparse.
+
+    Args:
+        pose_df: Pose DataFrame with a ``timestamp_s`` column.
+
+    Returns:
+        Median positive spacing between unique timestamps, in seconds
+        (0.2 s when it cannot be estimated).
+    """
+    ts = np.unique(pose_df["timestamp_s"].to_numpy(float))
+    diffs = np.diff(ts)
+    diffs = diffs[diffs > 0]
+    return float(np.median(diffs)) if len(diffs) else 0.2
+
+
+def contiguous_runs(timestamps: np.ndarray, dt: float) -> np.ndarray:
+    """Label contiguous runs of frames, splitting wherever a gap occurs.
+
+    Args:
+        timestamps: Sorted frame timestamps in seconds.
+        dt: Nominal frame interval in seconds.
+
+    Returns:
+        Integer run id per timestamp, starting at 0.
+    """
+    if len(timestamps) == 0:
+        return np.zeros(0, dtype=int)
+    breaks = np.diff(timestamps) > RUN_GAP_FACTOR * dt
+    return np.concatenate([[0], np.cumsum(breaks)]).astype(int)
+
+
+def _window_xcorr(
+    p_win: np.ndarray, c_win: np.ndarray, max_lag_frames: int
+) -> tuple[float, int]:
+    """Peak normalized cross-correlation of two equal-length speed windows.
+
+    Args:
+        p_win: Parent speed in the window.
+        c_win: Child speed in the window.
+        max_lag_frames: Largest lag searched, in frames.
+
+    Returns:
+        ``(peak_r, lag_frames)``; ``(0.0, 0)`` when either signal is flat.
+        Positive lag means the child follows the parent.
+    """
+    p_norm = p_win - p_win.mean()
+    c_norm = c_win - c_win.mean()
+    if np.std(p_norm) < 1e-8 or np.std(c_norm) < 1e-8:
+        return 0.0, 0
+
+    best_r = -1.0
+    best_lag = 0
+    for lag in range(-max_lag_frames, max_lag_frames + 1):
+        if lag >= 0:
+            p_seg = p_norm[: len(p_norm) - lag]
+            c_seg = c_norm[lag:]
+        else:
+            p_seg = p_norm[-lag:]
+            c_seg = c_norm[: len(c_norm) + lag]
+        if len(p_seg) < 2:
+            continue
+        r = float(np.dot(p_seg, c_seg)) / (
+            np.sqrt(np.dot(p_seg, p_seg)) * np.sqrt(np.dot(c_seg, c_seg)) + 1e-12
+        )
+        if r > best_r:
+            best_r = r
+            best_lag = lag
+    return max(0.0, best_r), best_lag
+
+
+# Chance baseline: shift the child's movement by this much (or half the
+# both-tracked data when shorter), matching the gaze chance convention.
+XCORR_CHANCE_SHIFT_S = 60.0
+
+
+@dataclass
+class _SpeedRuns:
+    """Parent and child speed inside each contiguous both-tracked run."""
+
+    run_ids: list[int]
+    timestamps: list[np.ndarray]
+    parent_speed: list[np.ndarray]
+    child_speed: list[np.ndarray]
+    dt: float
+    window_frames: int
+    max_lag_frames: int
+
+
+def _speed_runs(
+    pose_df: pd.DataFrame,
+    parent_track_id: int,
+    child_track_id: int,
+    window_s: float,
+    max_lag_s: float,
+) -> _SpeedRuns | None:
+    """Split both-tracked frames into gap-free runs and compute speed in each.
+
+    Args:
+        pose_df: Pose DataFrame (pose_3d schema).
+        parent_track_id: Track ID for the parent.
+        child_track_id: Track ID for the child.
+        window_s: Window duration in seconds.
+        max_lag_s: Maximum lag in seconds.
+
+    Returns:
+        Speed series for runs at least one window long, or None when there
+        are no both-tracked frames.
+    """
+    if pose_df.empty:
+        return None
+    parent_c = _torso_centroid(pose_df, parent_track_id)
+    child_c = _torso_centroid(pose_df, child_track_id)
+    both = (
+        parent_c.merge(child_c, on="frame_idx", suffixes=("_p", "_c"))
+        .sort_values("timestamp_s_p")
+        .reset_index(drop=True)
+    )
+    if both.empty:
+        return None
+
+    dt = _frame_interval(pose_df)
+    # Floor (with float tolerance) so the search never exceeds max_lag_s.
+    max_lag_frames = max(1, int(np.floor(max_lag_s / dt + 1e-9)))
+    window_frames = max(2 * max_lag_frames + 1, int(round(window_s / dt)))
+    runs = _SpeedRuns([], [], [], [], dt, window_frames, max_lag_frames)
+
+    run_ids = contiguous_runs(both["timestamp_s_p"].to_numpy(float), dt)
+    columns = ["frame_idx", "timestamp_s", "cx", "cy"]
+    for run_id in np.unique(run_ids):
+        run = both[run_ids == run_id]
+        if len(run) < window_frames:
+            continue
+        parent_v = _compute_velocity(
+            run[["frame_idx", "timestamp_s_p", "cx_p", "cy_p"]].set_axis(
+                columns, axis=1
+            )
+        )
+        child_v = _compute_velocity(
+            run[["frame_idx", "timestamp_s_p", "cx_c", "cy_c"]].set_axis(
+                columns, axis=1
+            )
+        )
+        runs.run_ids.append(int(run_id))
+        runs.timestamps.append(parent_v["timestamp_s"].to_numpy(float))
+        runs.parent_speed.append(parent_v["speed"].to_numpy(float))
+        runs.child_speed.append(child_v["speed"].to_numpy(float))
+    return runs
+
+
+def _windowed_xcorr(runs: _SpeedRuns, child_speed: list[np.ndarray]) -> pd.DataFrame:
+    """Slide half-overlapping windows inside each run and score each one.
+
+    Args:
+        runs: Speed runs from :func:`_speed_runs`.
+        child_speed: Child speed per run (the real series, or a shifted one).
+
+    Returns:
+        One row per window with the :data:`XCORR_COLUMNS` columns.
+    """
+    step = max(1, runs.window_frames // 2)
+    results = []
+    for run_id, ts, speed_p, speed_c in zip(
+        runs.run_ids, runs.timestamps, runs.parent_speed, child_speed
+    ):
+        for start_idx in range(0, len(ts) - runs.window_frames + 1, step):
+            end_idx = start_idx + runs.window_frames
+            peak_r, lag = _window_xcorr(
+                speed_p[start_idx:end_idx],
+                speed_c[start_idx:end_idx],
+                runs.max_lag_frames,
+            )
+            results.append(
+                {
+                    "segment_id": run_id,
+                    "window_start_s": ts[start_idx],
+                    "window_end_s": ts[end_idx - 1],
+                    "peak_xcorr": peak_r,
+                    "peak_lag_s": lag * runs.dt,
+                }
+            )
+    return pd.DataFrame(results, columns=XCORR_COLUMNS)
+
+
 def compute_movement_xcorr(
     pose_df: pd.DataFrame,
     parent_track_id: int = 0,
@@ -156,6 +364,11 @@ def compute_movement_xcorr(
 ) -> pd.DataFrame:
     """Compute windowed normalized cross-correlation of movement speed.
 
+    Only frames where both people are tracked are used. Those frames are split
+    into contiguous runs wherever a gap appears; speed is computed inside each
+    run and windows are placed inside each run, so no window or speed estimate
+    spans a gap. Runs shorter than one window are skipped.
+
     Args:
         pose_df: Pose DataFrame (pose_3d schema).
         parent_track_id: Track ID for the parent.
@@ -164,102 +377,256 @@ def compute_movement_xcorr(
         max_lag_s: Maximum lag in seconds for cross-correlation.
 
     Returns:
-        DataFrame with window_start_s, window_end_s, peak_xcorr, peak_lag_s.
+        DataFrame with segment_id, window_start_s, window_end_s, peak_xcorr,
+        peak_lag_s (positive lag = child follows parent).
     """
-    parent_c = _torso_centroid(pose_df, parent_track_id)
-    child_c = _torso_centroid(pose_df, child_track_id)
+    runs = _speed_runs(pose_df, parent_track_id, child_track_id, window_s, max_lag_s)
+    if runs is None:
+        return pd.DataFrame(columns=XCORR_COLUMNS)
+    return _windowed_xcorr(runs, runs.child_speed)
 
-    parent_v = _compute_velocity(parent_c)
-    child_v = _compute_velocity(child_c)
 
-    # Merge on frame_idx to align
-    merged = (
-        parent_v[["frame_idx", "timestamp_s", "speed"]]
-        .merge(
-            child_v[["frame_idx", "speed"]],
-            on="frame_idx",
-            suffixes=("_p", "_c"),
+def compute_movement_xcorr_chance(
+    pose_df: pd.DataFrame,
+    parent_track_id: int = 0,
+    child_track_id: int = 1,
+    window_s: float = 5.0,
+    max_lag_s: float = 2.0,
+    shift_s: float = XCORR_CHANCE_SHIFT_S,
+) -> pd.DataFrame:
+    """Movement cross-correlation expected by chance.
+
+    Same windows as :func:`compute_movement_xcorr`, but the child's speed is
+    shifted circularly by ``shift_s`` (or half the usable data when that is
+    shorter) across the concatenated runs, so it is paired with the parent's
+    movement from a different moment. Real synchrony should clearly exceed
+    this level. Speeds are computed within runs before shifting, so the
+    splice points between runs do not add spurious movement.
+
+    Args:
+        pose_df: Pose DataFrame (pose_3d schema).
+        parent_track_id: Track ID for the parent.
+        child_track_id: Track ID for the child.
+        window_s: Window duration in seconds.
+        max_lag_s: Maximum lag in seconds for cross-correlation.
+        shift_s: Time shift applied to the child, in seconds.
+
+    Returns:
+        DataFrame with the :data:`XCORR_COLUMNS` columns (window times are
+        the parent's).
+    """
+    runs = _speed_runs(pose_df, parent_track_id, child_track_id, window_s, max_lag_s)
+    if runs is None or not runs.run_ids:
+        return pd.DataFrame(columns=XCORR_COLUMNS)
+    child_all = np.concatenate(runs.child_speed)
+    n = len(child_all)
+    shift = min(int(round(shift_s / runs.dt)), n // 2)
+    shifted = np.roll(child_all, -shift)
+    bounds = np.cumsum([len(s) for s in runs.child_speed])[:-1]
+    return _windowed_xcorr(runs, np.split(shifted, bounds))
+
+
+# ====================================================================
+# Metric 2b: Whole-body movement synchrony (adopted measure)
+# ====================================================================
+
+SYNC_COLUMNS = ["segment_id", "window_start_s", "window_end_s", "sync_r"]
+SYNC_WINDOW_S = 20.0
+SYNC_CONF_MIN = 0.3
+
+
+def _keypoint_arrays(
+    pose_df: pd.DataFrame, track_id: int, frames: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """x, y and confidence per frame (rows) and keypoint (columns) for one person.
+
+    Args:
+        pose_df: Pose DataFrame (pose_3d schema).
+        track_id: Person to extract.
+        frames: frame_idx values to return, in order.
+
+    Returns:
+        Three (len(frames), n_keypoints) arrays; missing entries are NaN.
+    """
+    sub = pose_df[pose_df["track_id"] == track_id]
+    names = sorted(pose_df["keypoint_name"].unique())
+
+    def grid(column: str) -> np.ndarray:
+        table = sub.pivot_table(
+            index="frame_idx", columns="keypoint_name", values=column, aggfunc="first"
         )
-        .sort_values("timestamp_s")
-        .reset_index(drop=True)
-    )
+        return table.reindex(index=frames, columns=names).to_numpy(dtype=float)
 
-    timestamps = merged["timestamp_s"].values.astype(float)
-    speed_p = merged["speed_p"].values.astype(float)
-    speed_c = merged["speed_c"].values.astype(float)
+    return grid("x_m"), grid("y_m"), grid("keypoint_confidence")
 
-    if len(timestamps) == 0:
-        return pd.DataFrame(
-            columns=["window_start_s", "window_end_s", "peak_xcorr", "peak_lag_s"]
-        )
 
-    # Estimate frame interval
-    if len(timestamps) > 1:
-        dt = float(np.median(np.diff(timestamps)))
-    else:
-        dt = 0.2  # default 5 fps
+def _body_energy(
+    x: np.ndarray, y: np.ndarray, conf: np.ndarray, t: np.ndarray, conf_min: float
+) -> np.ndarray:
+    """Mean keypoint speed per frame, over keypoints tracked confidently.
 
-    max_lag_frames = max(1, int(max_lag_s / dt))
-    window_frames = max(2 * max_lag_frames + 1, int(window_s / dt))
+    Speed is a central difference in time within one gap-free run, using only
+    positions with confidence >= ``conf_min``: a speed is kept only when every
+    position it is computed from is confident (or present). A frame with no
+    usable keypoint takes the run's mean energy.
 
-    results = []
-    for start_idx in range(0, len(timestamps) - window_frames + 1, window_frames // 2):
-        end_idx = start_idx + window_frames
-        if end_idx > len(timestamps):
-            break
+    Returns:
+        Motion energy per frame, in pixels per second.
+    """
+    if len(t) < 2:
+        return np.zeros(len(t))
+    # Blank unreliable positions before differencing, so a low-confidence
+    # glitch cannot leak into the speed of its confident neighbours.
+    unreliable = ~(conf >= conf_min)
+    x = np.where(unreliable, np.nan, x)
+    y = np.where(unreliable, np.nan, y)
+    speed = np.hypot(np.gradient(x, t, axis=0), np.gradient(y, t, axis=0))
+    speed[unreliable | ~np.isfinite(speed)] = np.nan
+    with np.errstate(all="ignore"):
+        energy = np.nanmean(speed, axis=1)
+    fill = float(np.nanmean(energy)) if np.isfinite(energy).any() else 0.0
+    return np.where(np.isfinite(energy), energy, fill)
 
-        p_win = speed_p[start_idx:end_idx]
-        c_win = speed_c[start_idx:end_idx]
 
-        # Normalize
-        p_norm = p_win - p_win.mean()
-        c_norm = c_win - c_win.mean()
-
-        p_std = np.std(p_norm)
-        c_std = np.std(c_norm)
-
-        if p_std < 1e-8 or c_std < 1e-8:
-            results.append(
+def _lag0_windows(
+    run_ids: list[int],
+    times: list[np.ndarray],
+    parent: list[np.ndarray],
+    child: list[np.ndarray],
+    window_frames: int,
+) -> pd.DataFrame:
+    """Pearson correlation at lag 0 in half-overlapping windows inside each run."""
+    step = max(1, window_frames // 2)
+    rows = []
+    for run_id, ts, p, c in zip(run_ids, times, parent, child):
+        for start in range(0, len(ts) - window_frames + 1, step):
+            pw = (
+                p[start : start + window_frames]
+                - p[start : start + window_frames].mean()
+            )
+            cw = (
+                c[start : start + window_frames]
+                - c[start : start + window_frames].mean()
+            )
+            denom = np.sqrt(pw @ pw) * np.sqrt(cw @ cw)
+            rows.append(
                 {
-                    "window_start_s": timestamps[start_idx],
-                    "window_end_s": timestamps[end_idx - 1],
-                    "peak_xcorr": 0.0,
-                    "peak_lag_s": 0.0,
+                    "segment_id": run_id,
+                    "window_start_s": ts[start],
+                    "window_end_s": ts[start + window_frames - 1],
+                    "sync_r": float(pw @ cw / denom) if denom > 1e-12 else 0.0,
                 }
             )
+    return pd.DataFrame(rows, columns=SYNC_COLUMNS)
+
+
+def compute_movement_sync(
+    pose_df: pd.DataFrame,
+    parent_track_id: int = 0,
+    child_track_id: int = 1,
+    window_s: float = SYNC_WINDOW_S,
+    conf_min: float = SYNC_CONF_MIN,
+    shift_s: float = XCORR_CHANCE_SHIFT_S,
+    max_shifts: int = 10,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Whole-body movement synchrony and its chance level.
+
+    Each person's motion energy is the mean speed of their confidently tracked
+    keypoints. Parent and child energies are correlated at lag 0 in 20 s
+    windows (50% overlap) placed inside gap-free runs of frames where both are
+    tracked. The chance level repeats this with the child's energy shifted
+    circularly across the concatenated runs, so the child is paired with the
+    parent's movement from another moment; it pools several shifts (multiples
+    of ``shift_s``, at most ``max_shifts``; half the usable data when shorter
+    than two shifts).
+
+    On sessions 1011v3-1020v3 this separated real from shifted data (mean
+    difference +0.17, effect size 1.7), survived removing background motion
+    and frames with possibly shared keypoints, whereas peak torso-speed
+    cross-correlation in 5 s windows did not (+0.01).
+
+    Args:
+        pose_df: Pose DataFrame (pose_3d schema).
+        parent_track_id: Track ID for the parent.
+        child_track_id: Track ID for the child.
+        window_s: Window length in seconds.
+        conf_min: Minimum keypoint confidence for a keypoint to count.
+        shift_s: Step between chance-level shifts of the child, in seconds.
+        max_shifts: Most shifts pooled for the chance level.
+
+    Returns:
+        ``(real, chance)`` tables with segment_id, window_start_s,
+        window_end_s, sync_r (window times are the parent's); ``chance`` also
+        has ``shift_s``.
+    """
+    empty = pd.DataFrame(columns=SYNC_COLUMNS)
+    if pose_df.empty:
+        return empty, empty.copy()
+    times_by_frame = pose_df.groupby("frame_idx")["timestamp_s"].first()
+    tracked = pose_df.groupby("track_id")["frame_idx"].apply(set)
+    if parent_track_id not in tracked or child_track_id not in tracked:
+        return empty, empty.copy()
+    frames = np.array(sorted(tracked[parent_track_id] & tracked[child_track_id]))
+    if len(frames) == 0:
+        return empty, empty.copy()
+    t_all = times_by_frame.reindex(frames).to_numpy(dtype=float)
+    order = np.argsort(t_all)
+    frames, t_all = frames[order], t_all[order]
+
+    dt = _frame_interval(pose_df)
+    window_frames = max(3, int(round(window_s / dt)))
+    px, py, pc = _keypoint_arrays(pose_df, parent_track_id, frames)
+    cx, cy, cc = _keypoint_arrays(pose_df, child_track_id, frames)
+
+    run_ids: list[int] = []
+    times: list[np.ndarray] = []
+    parent: list[np.ndarray] = []
+    child: list[np.ndarray] = []
+    labels = contiguous_runs(t_all, dt)
+    for run_id in np.unique(labels):
+        sel = labels == run_id
+        if sel.sum() < window_frames:
             continue
+        ts = t_all[sel]
+        run_ids.append(int(run_id))
+        times.append(ts)
+        parent.append(_body_energy(px[sel], py[sel], pc[sel], ts, conf_min))
+        child.append(_body_energy(cx[sel], cy[sel], cc[sel], ts, conf_min))
+    if not run_ids:
+        return empty, empty.copy()
 
-        # Compute cross-correlation at lags [-max_lag, +max_lag]
-        best_r = -1.0
-        best_lag = 0
-        for lag in range(-max_lag_frames, max_lag_frames + 1):
-            if lag >= 0:
-                p_seg = p_norm[: len(p_norm) - lag]
-                c_seg = c_norm[lag:]
-            else:
-                p_seg = p_norm[-lag:]
-                c_seg = c_norm[: len(c_norm) + lag]
+    real = _lag0_windows(run_ids, times, parent, child, window_frames)
+    child_all = np.concatenate(child)
+    bounds = np.cumsum([len(c) for c in child])[:-1]
+    chance_tables = []
+    for shift in _chance_shifts(len(child_all), dt, shift_s, max_shifts):
+        shifted = np.split(np.roll(child_all, -shift), bounds)
+        table = _lag0_windows(run_ids, times, parent, shifted, window_frames)
+        chance_tables.append(table.assign(shift_s=round(shift * dt, 6)))
+    if not chance_tables:
+        return real, empty.copy()
+    chance = pd.concat(chance_tables, ignore_index=True)
+    return real, chance
 
-            if len(p_seg) < 2:
-                continue
 
-            r = float(np.dot(p_seg, c_seg)) / (
-                np.sqrt(np.dot(p_seg, p_seg)) * np.sqrt(np.dot(c_seg, c_seg)) + 1e-12
-            )
-            if r > best_r:
-                best_r = r
-                best_lag = lag
+def _chance_shifts(n: int, dt: float, shift_s: float, max_shifts: int) -> list[int]:
+    """Circular shifts (in frames) for the chance level.
 
-        results.append(
-            {
-                "window_start_s": timestamps[start_idx],
-                "window_end_s": timestamps[end_idx - 1],
-                "peak_xcorr": max(0.0, best_r),
-                "peak_lag_s": best_lag * dt,
-            }
-        )
-
-    return pd.DataFrame(results)
+    Multiples of ``shift_s`` that stay at least ``shift_s`` from a full turn,
+    evenly thinned to at most ``max_shifts``; half the data when it is
+    shorter than two shifts. Averaging several shifts steadies the chance
+    level, which a single shift leaves noisy in short blocks.
+    """
+    step = int(round(shift_s / dt))
+    if step <= 0 or n < 2 * step:
+        half = n // 2
+        # Under 40 s of data the shift would be < 20 s: no chance level.
+        return [half] if half * dt >= MIN_CHANCE_SHIFT_S - 1e-9 else []
+    shifts = list(range(step, n - step + 1, step))
+    if len(shifts) > max_shifts:
+        keep = np.linspace(0, len(shifts) - 1, max_shifts).round().astype(int)
+        shifts = [shifts[i] for i in sorted(set(keep))]
+    return shifts
 
 
 # ====================================================================
@@ -269,124 +636,33 @@ def compute_movement_xcorr(
 
 def compute_gaze_categories(
     gaze_df: pd.DataFrame,
+    head_boxes_df: pd.DataFrame,
+    tracks_df: pd.DataFrame,
+    image_size: tuple[int, int],
     parent_track_id: int = 0,
     child_track_id: int = 1,
-    parent_head_centers: dict[int, tuple[float, float]] | None = None,
-    child_head_centers: dict[int, tuple[float, float]] | None = None,
-    proximity_threshold: float | None = None,
 ) -> pd.DataFrame:
-    """Classify gaze patterns per frame into categories.
+    """Classify each frame's parent-child gaze pattern.
 
-    Categories:
-    - mutual_gaze: Both look at each other's head
-    - joint_attention: Both look at the same spot (not each other)
-    - parent_watching: Only parent looks at child
-    - child_watching: Only child looks at parent
-    - independent: Neither looks at the other or a shared spot
+    See :mod:`gaze_analysis.gaze_categories` for the category rules.
 
     Args:
-        gaze_df: Gaze CSV DataFrame with gaze_peak_x, gaze_peak_y per person.
+        gaze_df: Gaze CSV rows (gaze point as image fractions, in/out score).
+        head_boxes_df: Normalized head boxes (``extract_head_bboxes``).
+        tracks_df: Tracks with pixel body boxes.
+        image_size: (width, height) of the frames in pixels.
         parent_track_id: Track ID for the parent.
         child_track_id: Track ID for the child.
-        parent_head_centers: Mapping ``frame_idx -> (x, y)`` of normalized head
-            centers for the parent. Keyed by ``frame_idx`` (not list position)
-            so the function aligns correctly even when the head_bbox dataframe
-            has different frame coverage than the gaze dataframe.
-        child_head_centers: Mapping ``frame_idx -> (x, y)`` for the child.
-        proximity_threshold: Distance threshold (normalized) for "looking at".
-            If None and head centers are provided, uses an adaptive per-frame
-            threshold scaled to 40% of the inter-head distance (clamped to
-            [0.04, 0.15]). If None and no head centers, falls back to 0.15.
 
     Returns:
         DataFrame with frame_idx, timestamp_s, gaze_category columns.
     """
-    use_adaptive = proximity_threshold is None
-    if proximity_threshold is None:
-        proximity_threshold = 0.15  # fallback when no head centers
-
-    parent_gaze = (
-        gaze_df[gaze_df["track_id"] == parent_track_id]
-        .sort_values("frame_idx")
-        .reset_index(drop=True)
+    frames = build_frame_table(
+        gaze_df, head_boxes_df, tracks_df, image_size, parent_track_id, child_track_id
     )
-    child_gaze = (
-        gaze_df[gaze_df["track_id"] == child_track_id]
-        .sort_values("frame_idx")
-        .reset_index(drop=True)
-    )
-
-    # Align by frame_idx
-    merged = (
-        parent_gaze[["frame_idx", "timestamp_s", "gaze_peak_x", "gaze_peak_y"]]
-        .merge(
-            child_gaze[["frame_idx", "gaze_peak_x", "gaze_peak_y"]],
-            on="frame_idx",
-            suffixes=("_p", "_c"),
-        )
-        .sort_values("frame_idx")
-        .reset_index(drop=True)
-    )
-
-    n = len(merged)
-    categories = []
-
-    for i in range(n):
-        row = merged.iloc[i]
-        frame_idx = int(row["frame_idx"])
-        p_gx = row["gaze_peak_x_p"]
-        p_gy = row["gaze_peak_y_p"]
-        c_gx = row["gaze_peak_x_c"]
-        c_gy = row["gaze_peak_y_c"]
-
-        # Head centers for this frame, looked up by frame_idx so the function
-        # tolerates head_bbox / gaze coverage gaps.
-        if parent_head_centers is not None:
-            p_hx, p_hy = parent_head_centers.get(frame_idx, (0.0, 0.0))
-        else:
-            p_hx, p_hy = 0.0, 0.0
-
-        if child_head_centers is not None:
-            c_hx, c_hy = child_head_centers.get(frame_idx, (0.0, 0.0))
-        else:
-            c_hx, c_hy = 0.0, 0.0
-
-        # Per-frame adaptive threshold: scale by inter-head distance
-        if (
-            use_adaptive
-            and parent_head_centers is not None
-            and child_head_centers is not None
-        ):
-            inter_head_dist = np.sqrt((p_hx - c_hx) ** 2 + (p_hy - c_hy) ** 2)
-            thresh_i = float(np.clip(0.4 * inter_head_dist, 0.04, 0.15))
-        else:
-            thresh_i = proximity_threshold
-
-        # Distance from parent's gaze to child's head
-        p_looks_at_child = np.sqrt((p_gx - c_hx) ** 2 + (p_gy - c_hy) ** 2) < thresh_i
-        # Distance from child's gaze to parent's head
-        c_looks_at_parent = np.sqrt((c_gx - p_hx) ** 2 + (c_gy - p_hy) ** 2) < thresh_i
-        # Distance between gaze peaks
-        gaze_close = np.sqrt((p_gx - c_gx) ** 2 + (p_gy - c_gy) ** 2) < thresh_i
-
-        if p_looks_at_child and c_looks_at_parent:
-            cat = "mutual_gaze"
-        elif gaze_close and not p_looks_at_child and not c_looks_at_parent:
-            cat = "joint_attention"
-        elif gaze_close:
-            # Both looking at same area which happens to be near one's head
-            cat = "joint_attention"
-        elif p_looks_at_child:
-            cat = "parent_watching"
-        elif c_looks_at_parent:
-            cat = "child_watching"
-        else:
-            cat = "independent"
-
-        categories.append(cat)
-
-    merged["gaze_category"] = categories
-    return merged[["frame_idx", "timestamp_s", "gaze_category"]]
+    if frames.empty:
+        return pd.DataFrame(columns=["frame_idx", "timestamp_s", "gaze_category"])
+    return gaze_categories(frames)
 
 
 # ====================================================================
@@ -400,7 +676,11 @@ def compute_gaze_convergence(
     parent_track_id: int = 0,
     child_track_id: int = 1,
 ) -> pd.DataFrame:
-    """Compute cosine similarity of parent and child gaze heatmaps per frame.
+    """Compute the overlap of parent and child gaze heatmaps per frame.
+
+    Uses :func:`gaze_analysis.gaze_categories.heatmap_overlap` (background
+    removed, maps normalized to sum to 1, summed elementwise minimum): 1 means
+    identical gaze distributions and 0 disjoint ones.
 
     Args:
         heatmaps: Array of shape [N, 64, 64] from gaze_heatmaps.npz.
@@ -429,16 +709,9 @@ def compute_gaze_convergence(
 
     rows = []
     for frame_key in common_frames:
-        p_hm = heatmaps[parent_frames[frame_key]].flatten().astype(float)
-        c_hm = heatmaps[child_frames[frame_key]].flatten().astype(float)
-
-        p_norm = np.linalg.norm(p_hm)
-        c_norm = np.linalg.norm(c_hm)
-
-        if p_norm < 1e-12 or c_norm < 1e-12:
-            cos_sim = 0.0
-        else:
-            cos_sim = float(np.dot(p_hm, c_hm) / (p_norm * c_norm))
+        cos_sim = heatmap_overlap(
+            heatmaps[parent_frames[frame_key]], heatmaps[child_frames[frame_key]]
+        )
 
         # Extract frame index from key like "f000001"
         frame_idx = int(frame_key[1:])
@@ -461,6 +734,7 @@ def compute_block_summary(
     metrics_df: pd.DataFrame,
     session_config: SessionConfig,
     metric_column: str,
+    camera_id: str | None = None,
 ) -> pd.DataFrame:
     """Compute per-block summary statistics for a metric column.
 
@@ -468,12 +742,18 @@ def compute_block_summary(
         metrics_df: DataFrame with timestamp_s and the metric column.
         session_config: Session config with block definitions.
         metric_column: Column name to summarize.
+        camera_id: Use this camera's own blocks (default: shared blocks).
 
     Returns:
         DataFrame with block_name, mean, std, median, count columns.
     """
     rows = []
-    for block in session_config.session_blocks:
+    blocks = (
+        session_config.blocks_for_camera(camera_id)
+        if camera_id is not None
+        else session_config.session_blocks
+    )
+    for block in blocks:
         mask = (metrics_df["timestamp_s"] >= block.start_s) & (
             metrics_df["timestamp_s"] <= block.end_s
         )
@@ -567,39 +847,17 @@ def main() -> None:
     # Metric 2: Movement cross-correlation
     xcorr_df = compute_movement_xcorr(pose_df, pid, cid)
 
-    # Metric 3: Gaze categories (derive head centers from gaze CSV or head_bbox).
-    # Build dicts keyed by frame_idx so the lookup inside
-    # compute_gaze_categories aligns even when head_bbox is missing frames
-    # that gaze still has (or vice versa).
-    head_bbox_path = camera_dir / "head_bboxes.csv"
-    if head_bbox_path.exists():
-        head_bbox_df = pd.read_csv(head_bbox_path)
-        p_heads = head_bbox_df[head_bbox_df["track_id"] == pid]
-        c_heads = head_bbox_df[head_bbox_df["track_id"] == cid]
-        parent_head_centers = {
-            int(row.frame_idx): (
-                float((row.head_x1 + row.head_x2) / 2),
-                float((row.head_y1 + row.head_y2) / 2),
-            )
-            for row in p_heads.itertuples(index=False)
-        }
-        child_head_centers = {
-            int(row.frame_idx): (
-                float((row.head_x1 + row.head_x2) / 2),
-                float((row.head_y1 + row.head_y2) / 2),
-            )
-            for row in c_heads.itertuples(index=False)
-        }
-    else:
-        parent_head_centers = None
-        child_head_centers = None
-
+    # Metric 3: Gaze categories, from each person's gaze point relative to
+    # the other's head and body boxes (in pixels of the real frame size).
+    tracks_df = pd.read_csv(camera_dir / args.tracks_input)
+    if time_limited:
+        tracks_df = filter_by_time_range(tracks_df, t_start, t_end)
+    image_size = frame_image_size(
+        camera_dir, (session_config.image_width, session_config.image_height)
+    )
+    head_boxes_df = extract_head_bboxes(pose_df, tracks_df, *image_size)
     gaze_cat_df = compute_gaze_categories(
-        gaze_df,
-        pid,
-        cid,
-        parent_head_centers=parent_head_centers,
-        child_head_centers=child_head_centers,
+        gaze_df, head_boxes_df, tracks_df, image_size, pid, cid
     )
 
     # Metric 4: Gaze convergence
@@ -623,7 +881,7 @@ def main() -> None:
     summary: Dict[str, Any] = {"camera_id": args.camera_id}
     if not proximity_df.empty:
         summary["torso_proximity_blocks"] = compute_block_summary(
-            proximity_df, session_config, "torso_distance_px"
+            proximity_df, session_config, "torso_distance_px", args.camera_id
         ).to_dict(orient="records")
 
     if not xcorr_df.empty:

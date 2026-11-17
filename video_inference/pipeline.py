@@ -12,7 +12,11 @@ from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 
 from .compress import CompressionResult, compress_video
-from .frames import FrameExtractionResult, extract_frames_ffmpeg
+from .frames import (
+    FrameExtractionResult,
+    extract_frames_ffmpeg,
+    read_achieved_frame_rate,
+)
 from .rtmlib_runner import RtmlibRunnerConfig, run_rtmlib_pose_on_images
 from .sam3d_runner import RunnerConfig, run_sam3d_on_images
 from .schema import ValidationResult, validate_session_output
@@ -74,6 +78,7 @@ class PipelineConfig:
     reuse_existing: bool = False
     skip_compress: bool = False
     dry_run: bool = False
+    parallel_cameras: bool = False
 
 
 def _default_session_id() -> str:
@@ -319,7 +324,7 @@ def run_camera_pipeline(
         extraction_result = FrameExtractionResult(
             video_path=compression_result.output_path,
             frames_dir=frames_dir,
-            frame_rate=config.frame_rate,
+            frame_rate=read_achieved_frame_rate(frames_dir, config.frame_rate),
             frame_paths=existing_frames,
             command=[],
             executed=False,
@@ -446,20 +451,65 @@ def run_camera_pipeline(
     )
 
 
-def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
+def _run_camera_job(
+    camera_id: str, video_path: str, session_dir: Path, config: PipelineConfig
+) -> CameraPipelineSummary:
+    """Picklable entry point for running one camera in a worker."""
+    return run_camera_pipeline(
+        camera_id=camera_id,
+        source_video=video_path,
+        session_dir=session_dir,
+        config=config,
+    )
+
+
+def run_pipeline(
+    config: PipelineConfig,
+    executor_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Run every configured camera and write ``session_summary.json``.
+
+    Args:
+        config: Pipeline configuration. With ``parallel_cameras`` the cameras
+            run concurrently (one process each by default): the GPU is mostly
+            idle during the CPU-bound parts of a single camera.
+        executor_factory: ``concurrent.futures`` executor class used for
+            parallel cameras (tests pass a thread pool).
+
+    Returns:
+        The session summary payload.
+    """
     session_id = config.session_id or _default_session_id()
     session_dir = Path(config.output_dir) / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    camera_summaries = []
-    for camera_id, video_path in _camera_inputs(config):
-        summary = run_camera_pipeline(
-            camera_id=camera_id,
-            source_video=video_path,
-            session_dir=session_dir,
-            config=config,
-        )
-        camera_summaries.append(summary)
+    cameras = list(_camera_inputs(config))
+    if config.parallel_cameras and len(cameras) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+
+        factory = executor_factory or ProcessPoolExecutor
+        with factory(max_workers=len(cameras)) as pool:
+            futures = [
+                pool.submit(
+                    _run_camera_job,
+                    camera_id,
+                    video_path,
+                    session_dir,
+                    config,
+                )
+                for camera_id, video_path in cameras
+            ]
+            camera_summaries = [future.result() for future in futures]
+    else:
+        camera_summaries = [
+            run_camera_pipeline(
+                camera_id=camera_id,
+                source_video=video_path,
+                session_dir=session_dir,
+                config=config,
+            )
+            for camera_id, video_path in cameras
+        ]
 
     overall_valid = all(summary.schema_valid for summary in camera_summaries)
     summary_payload = {
@@ -511,7 +561,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--tracker-backend",
         default="internal",
-        choices=["internal", "roboflow", "boxmot"],
+        choices=["internal", "roboflow", "boxmot", "offline"],
     )
     run_parser.add_argument("--tracker-name", default="bytetrack", type=str)
     run_parser.add_argument("--max-persons", default=2, type=int)
@@ -558,6 +608,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--reuse-existing", action="store_true", default=False)
     run_parser.add_argument("--skip-compress", action="store_true", default=False)
     run_parser.add_argument("--dry-run", action="store_true", default=False)
+    run_parser.add_argument(
+        "--parallel-cameras",
+        action="store_true",
+        default=False,
+        help="Process camera A and camera B at the same time.",
+    )
     run_parser.add_argument(
         "--rtmlib-mode",
         default="balanced",
@@ -621,6 +677,7 @@ def main() -> None:
             reuse_existing=args.reuse_existing,
             skip_compress=args.skip_compress,
             dry_run=args.dry_run,
+            parallel_cameras=args.parallel_cameras,
         )
         run_pipeline(cfg)
 

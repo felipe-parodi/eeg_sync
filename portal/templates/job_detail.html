@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chip %}
+{% block body %}<section class="panel" id="job" data-job-id="{{ job_id }}" data-state="{{ job.state }}">
+  <h2>{{ job_id }}</h2>
+  <p><span id="job-chip">{{ chip(job.chip_kind, job.chip_label) }}</span></p>
+  <ol class="stages" aria-label="Progress">
+    {%- for stage in job.stages %}
+    <li class="stage stage--{{ stage.status }}" data-stage="{{ stage.key }}"><span class="stage__mark" aria-hidden="true"></span><span class="stage__label">{{ stage.label }}</span><span class="stage__state visually-hidden">{% if stage.status == "done" %} (done){% elif stage.status == "current" %} (now){% elif stage.status == "failed" %} (stopped here){% endif %}</span></li>
+    {%- endfor %}
+  </ol>
+  <p id="job-message" class="job-message{% if job.state == 'failed' %} job-message--failed{% endif %}" aria-live="polite">{{ job.message }}</p>
+  <ul id="job-cameras" class="job-cameras muted"{% if not job.cameras %} hidden{% endif %}>
+    {%- for cam in job.cameras %}<li>{{ cam.message }}</li>{% endfor -%}
+  </ul>
+  {% if job.state == "failed" %}<details class="tech-details"><summary>Show technical details</summary>
+    {% if job.error %}<p class="muted">Error</p><pre>{{ job.error }}</pre>{% endif %}
+    {% if job.log_tail %}<p class="muted">Last lines of the job log</p><pre>{{ job.log_tail }}</pre>{% endif %}
+  </details>{% endif %}
+  {% if show_annotate %}<p class="cta"><a class="button-link" href="/jobs/{{ job_id }}/annotate">Label parent vs child to continue</a></p>{% endif %}
+  {% if results_url or show_download %}<p class="cta">{% if results_url %}<a class="button-link" href="{{ results_url }}">Open results</a> {% endif %}{% if show_download %}<a href="/jobs/{{ job_id }}/download">Download results zip</a>{% endif %}</p>{% endif %}
+  {% if job.notes %}<h3>Notes</h3><ul class="job-notes">
+    {%- for note in job.notes %}<li>{{ note }}</li>{% endfor -%}
+  </ul>{% endif %}
+  {% if coverage_rows is not none %}<h3>Both people tracked, per block</h3><p class="muted">Metrics use only frames where both people were found. The session report has the data check per task and the clips.</p><div class="table-wrap"><table><thead><tr><th>Camera</th><th>Block</th><th>Coverage</th><th></th></tr></thead><tbody>
+    {%- for row in coverage_rows -%}
+    <tr><td>{{ row.camera_id }}</td><td>{{ row.block }}</td><td>{{ row.coverage }}</td><td>{% if row.low %}{{ chip("check", "Low: check the overlay clips") }}{% else %}{{ chip("ok", "OK") }}{% endif %}</td></tr>
+    {%- endfor -%}
+  </tbody></table></div><p><a href="/jobs/{{ job_id }}/gaze-label">Optional: label what people are looking at</a> <span class="muted">(helps us check gaze accuracy)</span></p>{% endif %}
+  {% if dropped_parts %}<h3>Skipped because shorter than {{ min_part_s }} s</h3><p class="muted">These pieces were left over between extra-person windows and are too short to measure reliably, so they are not analysed.</p><ul class="dropped-parts">
+    {%- for part in dropped_parts %}<li><strong>{{ part.name }}</strong> <span class="muted">{{ part.video }}, {{ part.start }} to {{ part.end }} ({{ part.duration }})</span></li>{% endfor -%}
+  </ul>{% endif %}
+  {% if show_log_link %}<p><a href="/jobs/{{ job_id }}/log">View job log</a></p>{% endif %}
+  {% if job.polling %}<p class="muted">This page updates by itself while the job runs.</p>{% endif %}
+  <p><a href="/">Back to sessions</a></p>
+</section>{% if job.polling %}<script src="/static/job.js"></script>{% endif %}{% endblock %}

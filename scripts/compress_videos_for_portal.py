@@ -29,7 +29,7 @@ Notes:
     The script uses only Python's standard library. It tries fast hardware H.264
     encoders first, then falls back to CPU H.264 if hardware encoding is not
     available. The defaults match the portal's expected rapid-compression
-    profile: 8 FPS, max width 854 pixels, no audio, aggressive compression.
+    profile: 10 FPS, max width 854 pixels, no audio, aggressive compression.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ ENCODER_PRESETS = {
 class CompressionSettings:
     """Settings for portal-compatible video compression."""
 
-    target_fps: float = 8.0
+    target_fps: float = 10.0
     max_width: int = 854
     quality: int = 34
     cpu_preset: str = "ultrafast"
@@ -326,7 +326,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--output-dir", default="portal_compressed", help="Output folder."
     )
     parser.add_argument("--suffix", default="_portal", help="Output filename suffix.")
-    parser.add_argument("--target-fps", default=8.0, type=float)
+    parser.add_argument("--target-fps", default=10.0, type=float)
     parser.add_argument("--max-width", default=854, type=int)
     parser.add_argument("--quality", default=34, type=int)
     parser.add_argument("--cpu-preset", default="ultrafast")

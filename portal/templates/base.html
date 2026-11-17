@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="/static/portal.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="site-header__brand" href="/">{{ portal_name }}</a>
+      {% if header_csrf %}<nav class="site-header__nav" aria-label="Main">
+        <a href="/">Sessions</a>
+        <button id="logout-button" class="button--quiet" type="button" data-csrf-token="{{ header_csrf }}">Log out</button>
+      </nav>{% endif %}
+    </div>
+  </header>
+  <main>{% block body %}{% endblock %}</main>
+  {% if header_csrf %}<script src="/static/header.js"></script>{% endif %}
+</body>
+</html>

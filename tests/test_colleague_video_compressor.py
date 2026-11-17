@@ -54,7 +54,7 @@ def test_build_ffmpeg_command_prefers_nvenc_profile(tmp_path: Path) -> None:
 
     assert command[:5] == ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     assert command[command.index("-c:v") + 1] == "h264_nvenc"
-    assert "fps=8.0,scale='min(854,iw)':-2" in command
+    assert "fps=10.0,scale='min(854,iw)':-2" in command
     assert "-an" in command
 
 

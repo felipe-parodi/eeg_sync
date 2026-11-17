@@ -17,6 +17,7 @@ from .tracking import (
     TwoPersonTrackerState,
     assign_two_person_tracks,
 )
+from .weights import resolve_weights
 
 
 @dataclass
@@ -249,6 +250,104 @@ def _resolve_role_indices_from_tracker_ids(
     return parent_idx, child_idx
 
 
+def _frame_timestamps(images: List[Path], frame_rate: float) -> List[float]:
+    """Source-video timestamps for frames, from ``frame_index.csv`` when present."""
+    index_path = images[0].parent / "frame_index.csv" if images else None
+    if index_path is not None and index_path.exists():
+        import csv
+
+        with index_path.open(encoding="utf-8") as handle:
+            by_name = {
+                row["image_name"]: float(row["timestamp_s"])
+                for row in csv.DictReader(handle)
+            }
+        if all(path.name in by_name for path in images):
+            return [by_name[path.name] for path in images]
+    return [i / frame_rate for i in range(len(images))]
+
+
+def _run_offline_two_person(
+    config: UltraRunnerConfig, images: List[Path], ultra_device: str
+) -> Dict[str, Any]:
+    """``tracker_backend='offline'``: cache all detections, then assign roles offline.
+
+    Every detection down to ``DEFAULT_CACHE_CONF`` is cached with its keypoints
+    and an appearance embedding in ``detections.npz`` next to ``output_json``.
+    Identities are then solved over the whole recording by
+    :func:`video_inference.offline_assoc.associate_two_people` without anchors
+    (the taller person is the parent). The portal re-runs that step after the
+    colleague labels anchor frames (``python -m video_inference.offline_assoc``).
+    """
+    from .detection_cache import DEFAULT_CACHE_CONF, build_detection_cache
+    from .offline_assoc import AssocConfig, associate_two_people
+
+    if config.max_persons != 2:
+        raise ValueError(
+            "tracker_backend=offline tracks exactly two people (max_persons=2)."
+        )
+    device = "cuda:0" if ultra_device == "0" else ultra_device
+    cache = build_detection_cache(
+        image_paths=images,
+        frame_idx=list(range(len(images))),
+        timestamp_s=_frame_timestamps(images, config.frame_rate),
+        model_path=config.model_path,
+        conf=min(config.conf, DEFAULT_CACHE_CONF),
+        imgsz=config.imgsz,
+        batch_size=max(config.batch_size, 16),
+        device=device,
+        progress=True,
+    )
+    output_path = Path(config.output_json)
+    cache.save(output_path.with_name("detections.npz"))
+    frames = cache.to_frames()
+    assign = associate_two_people(frames, [], AssocConfig())
+
+    persons_by_frame: Dict[int, List[Dict[str, Any]]] = {}
+    for row in assign.itertuples(index=False):
+        track_id = 0 if row.role == "parent" else 1
+        keypoints = frames[int(row.frame_idx)].keypoints[int(row.det_index)]
+        persons_by_frame.setdefault(int(row.frame_idx), []).append(
+            {
+                "track_id": track_id,
+                "track_label": row.role,
+                "bbox_xyxy": [
+                    float(row.x1),
+                    float(row.y1),
+                    float(row.x2),
+                    float(row.y2),
+                ],
+                "confidence": float(row.conf),
+                "keypoints_3d": _build_pseudo_3d_keypoints(
+                    keypoints[:, :2], keypoints[:, 2]
+                ).tolist(),
+            }
+        )
+    frame_outputs = []
+    for frame_idx, image_path in enumerate(images):
+        persons = sorted(
+            persons_by_frame.get(frame_idx, []), key=lambda p: p["track_id"]
+        )
+        if not persons and not config.keep_empty_frames:
+            continue
+        frame_outputs.append(
+            {
+                "frame_idx": frame_idx,
+                "image_name": image_path.name,
+                "persons": persons,
+                "num_persons_detected": len(persons),
+            }
+        )
+    payload = {
+        "runner_config": asdict(config),
+        "resolved_device": ultra_device,
+        "backend": "ultralytics_pose_offline_two_person",
+        "frames": frame_outputs,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
 def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
     """
     Run Ultralytics pose model on frames and export parent/child-assigned outputs.
@@ -271,10 +370,10 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
     if config.max_persons < 1:
         raise ValueError("max_persons must be >= 1")
 
-    if config.tracker_backend not in {"internal", "roboflow", "boxmot"}:
+    if config.tracker_backend not in {"internal", "roboflow", "boxmot", "offline"}:
         raise ValueError(
             f"Invalid tracker_backend '{config.tracker_backend}'. "
-            "Expected one of: 'internal', 'roboflow', 'boxmot'."
+            "Expected one of: 'internal', 'roboflow', 'boxmot', 'offline'."
         )
     if config.tracker_backend == "internal" and config.max_persons != 2:
         raise ValueError(
@@ -283,8 +382,10 @@ def run_ultralytics_pose_on_images(config: UltraRunnerConfig) -> Dict[str, Any]:
         )
 
     ultra_device = _resolve_ultralytics_device(config.device)
-    model = YOLO(config.model_path)
     images = _iter_image_paths(image_folder, config.max_images)
+    if config.tracker_backend == "offline":
+        return _run_offline_two_person(config, images, ultra_device)
+    model = YOLO(resolve_weights(config.model_path))
 
     state: Optional[TwoPersonTrackerState] = None
     frame_outputs: List[Dict[str, Any]] = []

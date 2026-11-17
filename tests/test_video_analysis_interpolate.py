@@ -261,3 +261,103 @@ def test_interpolate_aligns_non_representable_fps_at_large_offset():
 
     # Every observed frame must survive (no float-mismatch collapse).
     assert int((~out["interpolated"]).sum()) == n
+
+
+# ---- Gap filling at real frame times only (metrics-validity plan, phase 0) ----
+
+
+def _track(times, xs, track_id=0, fps=5.0):
+    return pd.DataFrame(
+        {
+            "frame_idx": [int(round(t * fps)) for t in times],
+            "timestamp_s": times,
+            "track_id": [track_id] * len(times),
+            "track_label": ["parent"] * len(times),
+            "bbox_x1": xs,
+            "bbox_y1": [0.0] * len(times),
+            "bbox_x2": [10.0] * len(times),
+            "bbox_y2": [20.0] * len(times),
+            "track_confidence": [0.9] * len(times),
+        }
+    )
+
+
+def test_long_gap_gets_no_invented_rows_at_all():
+    """A 30 s absence stays empty; nothing creeps in from either side."""
+    grid = np.round(np.arange(0.0, 40.0, 0.2), 6)
+    seen = grid[(grid < 5.0) | (grid >= 35.0)]
+    tracks = _track(list(seen), [float(t) for t in seen])
+
+    out = interpolate_tracks_2d(tracks, grid, target_fps=5.0, max_gap_seconds=1.0)
+
+    inside = out[(out["timestamp_s"] > 4.9) & (out["timestamp_s"] < 35.0)]
+    assert inside.empty
+
+
+def test_short_gap_is_filled_linearly():
+    """A 0.8 s absence (4 frames at 5 fps) is bridged and flagged."""
+    grid = np.round(np.arange(0.0, 3.0, 0.2), 6)
+    seen = grid[(grid < 1.0) | (grid > 1.7)]
+    tracks = _track(list(seen), [100.0 * t for t in seen])
+
+    out = interpolate_tracks_2d(tracks, grid, target_fps=5.0, max_gap_seconds=1.0)
+
+    filled = out[out["interpolated"]]
+    assert sorted(np.round(filled["timestamp_s"], 6)) == [1.0, 1.2, 1.4, 1.6]
+    assert np.allclose(filled["bbox_x1"], 100.0 * filled["timestamp_s"])
+
+
+def test_gap_just_over_limit_is_not_filled():
+    """1.2 s missing with a 1 s limit: left empty."""
+    grid = np.round(np.arange(0.0, 3.0, 0.2), 6)
+    seen = grid[(grid < 1.0) | (grid > 2.1)]
+    tracks = _track(list(seen), [float(t) for t in seen])
+
+    out = interpolate_tracks_2d(tracks, grid, target_fps=5.0, max_gap_seconds=1.0)
+
+    assert not out["interpolated"].any()
+
+
+def test_camera_outputs_use_extracted_frame_times(tmp_path: Path):
+    """Targets come from frames/frame_index.csv: an off-grid block is kept,
+    nothing is added after a block's last frame, and no filling crosses blocks.
+    """
+    camera_dir = tmp_path / "camera_a"
+    (camera_dir / "frames").mkdir(parents=True)
+    block_a = [10.0, 10.2, 10.4, 10.6]
+    block_b = [100.25, 100.45, 100.65, 100.85]  # off the first block's grid
+    index = pd.DataFrame(
+        {
+            "frame_idx": range(8),
+            "timestamp_s": block_a + block_b,
+            "image_name": [f"frame_{i + 1:06d}.jpg" for i in range(8)],
+            "window_name": ["a"] * 4 + ["b"] * 4,
+        }
+    )
+    index.to_csv(camera_dir / "frames" / "frame_index.csv", index=False)
+    # Person seen at the end of block a and the start of block b only.
+    seen = [10.0, 10.2, 100.45, 100.65, 100.85]
+    tracks = _track(seen, [1.0, 2.0, 3.0, 4.0, 5.0])
+    tracks.to_csv(camera_dir / "tracks_2d.csv", index=False)
+    pd.DataFrame(
+        columns=[
+            "frame_idx",
+            "timestamp_s",
+            "track_id",
+            "track_label",
+            "keypoint_name",
+            "x_m",
+            "y_m",
+            "z_m",
+            "keypoint_confidence",
+        ]
+    ).to_csv(camera_dir / "pose_3d.csv", index=False)
+
+    interpolate_camera_outputs(
+        InterpolationConfig(camera_dir=str(camera_dir), target_fps=5.0)
+    )
+    out = pd.read_csv(camera_dir / "tracks_2d_interpolated.csv")
+
+    times = sorted(np.round(out["timestamp_s"], 6))
+    assert times == seen  # all observed rows kept, none invented
+    assert out["frame_idx"].is_unique

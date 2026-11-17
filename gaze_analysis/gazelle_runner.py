@@ -14,6 +14,7 @@ import pandas as pd
 from gaze_analysis.config import (
     add_time_range_args,
     filter_by_time_range,
+    frame_image_size,
     load_session_config,
     resolve_time_range,
 )
@@ -39,6 +40,10 @@ class GazelleConfig:
     tracks_input: str = "tracks_2d.csv"
     output_csv: str = "gaze_heatmap.csv"
     output_npz: str = "gaze_heatmaps.npz"
+    # Run gaze on this many frames per second (0 = every extracted frame).
+    gaze_fps: float = 0.0
+    # Half precision on GPU: about twice as fast with matching heatmaps.
+    half: bool = True
 
 
 def _load_gazelle_model(model_name: str, device: str) -> Tuple[Any, Any]:
@@ -87,28 +92,49 @@ def _load_frame_image(frame_path: Path, transform: Any) -> Any:
     return transform(img)
 
 
-def _find_frame_paths(camera_dir: Path) -> Dict[int, Path]:
-    """Map frame_idx to frame file paths.
+def _find_frame_paths(camera_dir: Path, frame_rate: float) -> Dict[int, Path]:
+    """Map time-grid frame_idx to frame image paths.
+
+    Smoothed tables number frames by source-video time
+    (``frame_idx = round(timestamp_s * frame_rate)``), while extracted images
+    are numbered from 1 within the analysis windows. ``frame_index.csv``
+    records each image's source time, which links the two.
 
     Args:
         camera_dir: Camera output directory containing frames/ subdirectory.
+        frame_rate: Extraction rate used to build the time grid.
 
     Returns:
-        Dict mapping frame_idx (int) to Path.
+        Dict mapping time-grid frame_idx (int) to Path.
     """
     frames_dir = camera_dir / "frames"
-    if not frames_dir.exists():
+    index_path = frames_dir / "frame_index.csv"
+    if not index_path.exists():
         return {}
+    index = pd.read_csv(index_path)
+    grid_idx = np.rint(index["timestamp_s"].to_numpy(float) * frame_rate).astype(int)
+    return {
+        int(idx): frames_dir / name for idx, name in zip(grid_idx, index["image_name"])
+    }
 
-    frame_paths: Dict[int, Path] = {}
-    for p in sorted(frames_dir.glob("frame_*.jpg")):
-        # Filename format: frame_000001.jpg
-        try:
-            idx = int(p.stem.split("_")[1])
-            frame_paths[idx] = p
-        except (IndexError, ValueError):
-            continue
-    return frame_paths
+
+def subsample_frame_indices(
+    frame_indices: List[int], frame_rate: float, target_fps: float
+) -> List[int]:
+    """Keep every n-th time-grid frame so gaze runs at ``target_fps``.
+
+    Args:
+        frame_indices: Time-grid frame indices (``round(t * frame_rate)``).
+        frame_rate: Rate of the time grid.
+        target_fps: Desired gaze rate; 0 or >= frame_rate keeps all frames.
+
+    Returns:
+        The kept frame indices, in order.
+    """
+    if target_fps <= 0 or target_fps >= frame_rate:
+        return list(frame_indices)
+    step = max(1, int(round(frame_rate / target_fps)))
+    return [f for f in frame_indices if f % step == 0]
 
 
 def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
@@ -133,16 +159,19 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
     pose_df = pd.read_csv(camera_dir / config.pose_input)
     tracks_df = pd.read_csv(camera_dir / config.tracks_input)
 
-    # Extract head bounding boxes
+    # Extract head bounding boxes (normalized by the real frame size)
+    image_width, image_height = frame_image_size(
+        camera_dir, (session_config.image_width, session_config.image_height)
+    )
     head_bboxes_df = extract_head_bboxes(
         pose_df,
         tracks_df,
-        image_width=session_config.image_width,
-        image_height=session_config.image_height,
+        image_width=image_width,
+        image_height=image_height,
     )
 
     # Find available frames on disk
-    frame_paths = _find_frame_paths(camera_dir)
+    frame_paths = _find_frame_paths(camera_dir, session_config.frame_rate)
     available_frames = set(frame_paths.keys())
     head_bboxes_df = head_bboxes_df[
         head_bboxes_df["frame_idx"].isin(available_frames)
@@ -162,14 +191,35 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
             head_bboxes_df["frame_idx"].isin(unique_frames)
         ].copy()
 
+    if config.gaze_fps > 0:
+        keep = subsample_frame_indices(
+            sorted(head_bboxes_df["frame_idx"].unique()),
+            session_config.frame_rate,
+            config.gaze_fps,
+        )
+        head_bboxes_df = head_bboxes_df[head_bboxes_df["frame_idx"].isin(keep)].copy()
+
     # Resolve device and load model
     device = _resolve_device(config.device)
     print(f"Loading Gazelle model '{config.model_name}' on {device}...")
     model, transform = _load_gazelle_model(config.model_name, device)
+    use_half = config.half and str(device).startswith("cuda")
 
     # Group head bboxes by frame for batched processing
     frame_groups = head_bboxes_df.groupby("frame_idx", sort=True)
     frame_indices = sorted(frame_groups.groups.keys())
+
+    # Decode the next batch's images on worker threads while the GPU runs.
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(max_workers=8)
+
+    def _load_batch(idxs: List[int]) -> List[Any]:
+        return list(
+            pool.map(lambda f: _load_frame_image(frame_paths[f], transform), idxs)
+        )
+
+    pending = None
 
     result_rows: List[dict] = []
     all_heatmaps: List[np.ndarray] = []
@@ -179,19 +229,22 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
     total_frames = len(frame_indices)
     print(f"Running Gazelle on {total_frames} frames (batch_size={batch_size})...")
 
+    if total_frames:
+        pending = pool.submit(_load_batch, frame_indices[:batch_size])
     for batch_start in range(0, total_frames, batch_size):
         batch_frame_idxs = frame_indices[batch_start : batch_start + batch_size]
+        batch_images = pending.result()
+        next_idxs = frame_indices[
+            batch_start + batch_size : batch_start + 2 * batch_size
+        ]
+        if next_idxs:
+            pending = pool.submit(_load_batch, next_idxs)
 
         # Build batch tensors
-        batch_images = []
         batch_bboxes: List[List[Tuple[float, float, float, float]]] = []
         batch_meta: List[List[dict]] = []
 
         for fidx in batch_frame_idxs:
-            frame_path = frame_paths[fidx]
-            img_tensor = _load_frame_image(frame_path, transform)
-            batch_images.append(img_tensor)
-
             frame_bboxes = frame_groups.get_group(fidx)
             bboxes_for_frame: List[Tuple[float, float, float, float]] = []
             meta_for_frame: List[dict] = []
@@ -212,16 +265,19 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
 
         images_tensor = torch.stack(batch_images).to(device)
 
-        with torch.no_grad():
+        with (
+            torch.no_grad(),
+            torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_half),
+        ):
             output = model({"images": images_tensor, "bboxes": batch_bboxes})
 
         heatmaps = output["heatmap"]  # list of [N_people, 64, 64] tensors
         inout_scores = output.get("inout")  # list of [N_people] tensors or None
 
         for img_idx, meta_list in enumerate(batch_meta):
-            hm = heatmaps[img_idx].cpu().numpy()  # [N_people, 64, 64]
+            hm = heatmaps[img_idx].float().cpu().numpy()  # [N_people, 64, 64]
             inout = (
-                inout_scores[img_idx].cpu().numpy()
+                inout_scores[img_idx].float().cpu().numpy()
                 if inout_scores is not None
                 else np.zeros(len(meta_list))
             )
@@ -260,6 +316,8 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
             processed = min(batch_start + batch_size, total_frames)
             print(f"  Processed {processed}/{total_frames} frames")
 
+    pool.shutdown()
+
     # Write outputs
     gaze_df = pd.DataFrame(result_rows, columns=GAZE_HEATMAP_COLUMNS)
     gaze_csv_path = camera_dir / config.output_csv
@@ -282,6 +340,8 @@ def run_gazelle_inference(config: GazelleConfig) -> Dict[str, Any]:
         "model_name": config.model_name,
         "device": device,
         "batch_size": config.batch_size,
+        "gaze_fps": config.gaze_fps or session_config.frame_rate,
+        "half_precision": use_half,
         "total_frames": total_frames,
         "total_gaze_rows": len(gaze_df),
         "heatmap_npz_size_mb": round(npz_size_mb, 1),
@@ -318,6 +378,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--batch-size", default=16, type=int)
     parser.add_argument(
+        "--gaze-fps",
+        default=0.0,
+        type=float,
+        help="Run gaze on this many frames per second (0 = every frame).",
+    )
+    parser.add_argument(
+        "--full-precision",
+        action="store_true",
+        help="Disable half precision on GPU.",
+    )
+    parser.add_argument(
         "--max-frames",
         default=0,
         type=int,
@@ -350,6 +421,8 @@ def main() -> None:
         tracks_input=args.tracks_input,
         output_csv=args.output_csv,
         output_npz=args.output_npz,
+        gaze_fps=args.gaze_fps,
+        half=not args.full_precision,
     )
     run_gazelle_inference(cfg)
 

@@ -42,7 +42,9 @@ class SessionConfig:
         image_height: Frame height in pixels.
         frame_rate: Video sampling rate in FPS.
         camera_mappings: Per-camera parent/child track ID assignments.
-        session_blocks: Labeled time windows for analysis.
+        session_blocks: Labeled time windows for analysis (all cameras).
+        session_blocks_by_camera: Per-camera windows on each camera's own
+            clock. When present, they take precedence over session_blocks.
     """
 
     session_id: str
@@ -52,6 +54,21 @@ class SessionConfig:
     frame_rate: float = 5.0
     camera_mappings: List[CameraPersonMapping] = field(default_factory=list)
     session_blocks: List[SessionBlock] = field(default_factory=list)
+    session_blocks_by_camera: Dict[str, List[SessionBlock]] = field(
+        default_factory=dict
+    )
+
+    def blocks_for_camera(self, camera_id: str) -> List[SessionBlock]:
+        """Return the analysis blocks on one camera's clock.
+
+        Args:
+            camera_id: Camera identifier (e.g. "camera_a").
+
+        Returns:
+            The camera's own blocks, or the shared session_blocks for
+            configs written before per-camera blocks existed.
+        """
+        return self.session_blocks_by_camera.get(camera_id, self.session_blocks)
 
     def get_session_block(self, name: str) -> SessionBlock:
         """Return the session block with the given name.
@@ -147,15 +164,22 @@ def load_session_config(path: Path | str) -> SessionConfig:
         for m in data["camera_mappings"]
     ]
 
-    session_blocks = [
-        SessionBlock(
-            name=b["name"],
-            start_s=b["start_s"],
-            end_s=b["end_s"],
-            color=b.get("color", "gray"),
-        )
-        for b in data.get("session_blocks", [])
-    ]
+    def _blocks(raw: List[Dict[str, Any]]) -> List[SessionBlock]:
+        return [
+            SessionBlock(
+                name=b["name"],
+                start_s=b["start_s"],
+                end_s=b["end_s"],
+                color=b.get("color", "gray"),
+            )
+            for b in raw
+        ]
+
+    session_blocks = _blocks(data.get("session_blocks", []))
+    session_blocks_by_camera = {
+        camera_id: _blocks(blocks)
+        for camera_id, blocks in (data.get("session_blocks_by_camera") or {}).items()
+    }
 
     return SessionConfig(
         session_id=data["session_id"],
@@ -165,7 +189,34 @@ def load_session_config(path: Path | str) -> SessionConfig:
         frame_rate=data.get("frame_rate", 5.0),
         camera_mappings=camera_mappings,
         session_blocks=session_blocks,
+        session_blocks_by_camera=session_blocks_by_camera,
     )
+
+
+def frame_image_size(
+    camera_dir: Path | str, fallback: Tuple[int, int]
+) -> Tuple[int, int]:
+    """Return the (width, height) of a camera's extracted frames.
+
+    The session config's image size is a default that can disagree with the
+    uploaded video (for example 854x480 configured, 960x540 uploaded). Head
+    boxes are normalized by image size, so the real size must be used.
+
+    Args:
+        camera_dir: Camera output folder with ``frames/``.
+        fallback: Size to use when no frame image is found.
+
+    Returns:
+        (width, height) in pixels.
+    """
+    from PIL import Image
+
+    frames_dir = Path(camera_dir) / "frames"
+    first = next(iter(sorted(frames_dir.glob("frame_*.jpg"))), None)
+    if first is None:
+        return fallback
+    with Image.open(first) as image:
+        return image.size
 
 
 # ====================================================================

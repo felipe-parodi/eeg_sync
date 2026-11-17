@@ -11,6 +11,8 @@ dependencies = [
     "pandas>=2.0.0",
     "opencv-python>=4.8.0",
     "matplotlib>=3.7.0",
+    "openpyxl>=3.1.0",
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +23,8 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "fastapi>=0.115.0",
+    "httpx>=0.27.0",
+    "jinja2>=3.1.6",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30.0",
 ]
@@ -41,6 +45,7 @@ portal = [
     "eeg-video-sync[video,pose3d,gaze]",
     "boxmot>=18.0.0",
     "fastapi>=0.115.0",
+    "jinja2>=3.1.6",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30.0",
 ]
@@ -61,16 +66,28 @@ video-visualize-3d = "video_analysis.visualize_pose_3d:main"
 video-annotate-tracks = "video_analysis.track_annotator:main"
 video-correct-tracks = "video_analysis.track_correction:main"
 video-filter-tracks = "video_analysis.track_filter:main"
-gaze-infer = "gaze_analysis.gazelle_runner:main"
+gaze-infer = "gaze_analysis.page_runner:main"
+gaze-infer-gazelle = "gaze_analysis.gazelle_runner:main"
+gaze-label-eval = "gaze_analysis.label_eval:main"
+video-assoc = "video_inference.offline_assoc:main"
+video-refine-keypoints = "video_inference.topdown_refine:main"
+video-session-report = "video_analysis.session_report:main"
+eeg-red-light = "sync_eeg_vid.red_light:main"
 gaze-synchrony = "gaze_analysis.synchrony:main"
 gaze-plot = "gaze_analysis.plotting:main"
 video-pose-metrics = "video_analysis.pose_metrics:main"
 video-gaze-metrics = "video_analysis.gaze_metrics:main"
 video-anchor-frames = "video_analysis.anchor_frames:main"
 video-gaze-snapshots = "video_analysis.gaze_snapshots:main"
+pose-train-preflight = "pose_training.preflight:main"
+pose-train-sample = "pose_training.sampling:main"
+pose-train-pseudo-label = "pose_training.pseudo_label:main"
+pose-train-dataset = "pose_training.dataset:main"
+pose-train-fit = "pose_training.train:main"
+pose-train-eval = "pose_training.evaluate:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis", "portal"]
+packages = ["sync_eeg_vid", "video_inference", "video_analysis", "gaze_analysis", "portal", "pose_training"]
 
 [build-system]
 requires = ["hatchling"]

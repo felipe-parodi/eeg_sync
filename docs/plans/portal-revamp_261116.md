@@ -1,0 +1,202 @@
+# Portal Revamp Plan (UI/UX and Aesthetics)
+
+## Goal
+
+A non-technical research assistant can submit a session, follow progress, label
+parent vs child, and decide which blocks to use, without reading logs or CSVs.
+Runs in parallel with `metrics-validity_261116.md`; the results page consumes
+that plan's column contract (`valid_seconds_both`, `quality_verdict`,
+`quality_reasons`, `task_metrics.csv`) and falls back to `coverage_both` until
+those columns exist.
+
+Branch: `feat/portal-revamp` (from `feat/pose-quality-overhaul`).
+
+## Current State (review, 2026-11-16)
+
+- All pages are HTML/CSS/JS inside Python f-strings in `portal/app.py` (2,140
+  lines); one inline stylesheet in `_html_page`, page-specific styles scattered.
+- Upload form: free-text blocks/exclusions (`name,start,end[,color]`), one long
+  single-column form; no preview of how exclusions split a task into
+  `_part1/2/3`, no validation against video length.
+- Job page: raw `state` and step names ("Phase 2 step 7 of 15: interpolate tracks
+  camera_a"), full-page reload every 10 s.
+- Anchor labeling: `.anchor-grid`, `.anchor-card`, `.chosen` have no CSS, so
+  clicking a button gives almost no visible feedback; labels via "Track N is
+  parent" buttons rather than clicking the person.
+- Results: coverage table with "Low: check the overlay clips" / "OK"; overlay
+  clips only inside the zip; no recommendation per block; no task-level view.
+- Job list wiped on every restart (`purge_all_jobs`), so links to finished
+  sessions disappear even though outputs are kept.
+- `report.html` (in the zip) has its own separate styling.
+
+## Design Principles
+
+- Plain language everywhere; technical names only in the log.
+- One primary action per page.
+- Show, don't tell: timeline for blocks, inline clips for quality.
+- Server-rendered Jinja templates + one stylesheet + small vanilla JS. No build
+  step, no JS framework, same FastAPI process.
+- Accessible: keyboard operable, visible focus, color never the only signal
+  (verdict chips carry text + icon), colorblind-safe palette.
+- All visual results must be **checked by the user** in a browser before a phase
+  is called done.
+
+## Status
+
+- Phase 1 done (templates). Phase 2 done (design system, Sessions home page,
+  session report route). Visual check by the user pending.
+- Phase 3 done (2026-11-16): numbered step form with task / extra-person rows,
+  per-camera timeline preview, copy A to B, browser checks mirrored on the
+  server (`parse_timecode`, `_parse_blocks_text`, `plan_camera_blocks`),
+  `MIN_PART_S = 10` with dropped parts recorded and listed on the job page,
+  ffprobe length re-check in `/uploads/{id}/finish`, session-ID reuse check
+  (`GET /sessions/{id}/exists`, 409 at init, archive to
+  `output/_archive/<id>_<stamp>` at finish), job page shows results only when
+  complete. M:SS accepts minutes >= 60 (`75:30`); only H:MM:SS limits minutes.
+  Visual check by the user pending.
+- Scope trimmed by the user (2026-11-16): stay close to the original UI.
+  Phases 4-5 keep the bug fixes and drop click-on-image labeling, keyboard
+  shortcuts, auto-advance, the confirm dialog, elapsed timers and progress
+  bars.
+- Phase 4 done (2026-11-16): `JOB_STAGES` + `STEP_STAGE_TABLE` in `jobs.py`
+  map every internal step to a stage and a plain message; status writes carry
+  `stage`, plain `message`, and per-video `cameras` messages while both run.
+  `GET /jobs/{id}/status.json` is polled every 4 s by `static/job.js`, which
+  reloads once when the job stops running. Failures show one plain sentence
+  naming the stage (`failed_status`), keep the raw error in `error`, and put
+  it with the last 30 log lines under "Show technical details" (finding 10).
+  Labels are accepted only while `awaiting_annotation`; 409 otherwise and on
+  empty submissions, checked and marked queued under `ANNOTATION_SUBMIT_LOCK`
+  (finding 8). Check clips are `optional` steps: a failure becomes a job note
+  and the job continues; frames with nobody tracked render raw (finding 4).
+  Visual check by the user pending.
+- Phase 5 done (2026-11-16, trimmed): same buttons; the selected button gets
+  a check mark, outline and `aria-pressed`; the card is tinted when labeled
+  or skipped; the chosen parent's box is outlined on the frame from
+  `bbox_xyxy`; "N of M labeled (K skipped)" counter. No minimum-anchor
+  confirm (dropped with the scope trim). Visual check by the user pending.
+- Phase 6 done (2026-11-16, trimmed): no separate results page. The
+  session's `report.html` (served at `/sessions/{id}`, also in the zip) is
+  the results page: session id and cameras, then the task table from
+  `collect_task_rows` (verdict chip with symbol and plain reasons, usable
+  time as "3 min 12 s", coverage, median distance, synchrony with chance or
+  "too few unbroken 20-second stretches", gaze with chance), a note that
+  pieces are joined and inclusion is the lab's decision, the per-piece
+  table under a collapsed "Per piece", and overlay clips as
+  `<video controls preload="none">` with relative sources and download
+  links, grouped by block. Styling inlines the portal tokens (offline,
+  no external requests); the task table stacks on phones. Home page:
+  "Download study task table" (`/metrics/all_sessions_task_metrics.csv`,
+  auth, 404 when missing; written by the session-report step via
+  `--all-sessions-root`). Finished job page: "Open results" button next to
+  the zip download. Numbers, columns and CSVs unchanged.
+- Phase 7 done (2026-11-16): gaze labeling page restyled with the shared
+  CSS (intro card, sticky counter, cards tinted when both people are
+  answered, chosen answer with check mark, outline and `aria-pressed`); no
+  behaviour or payload change. Failure messages name
+  `PORTAL_SUPPORT_CONTACT` (default "Felipe"). Parent-labeling frames open
+  larger in a new tab on click.
+- **Revamp complete.** Trimmed from the original plan: separate results
+  page and authenticated clip route (the report and the existing session
+  file route cover both), guidance box beyond the task-table note,
+  click-on-image labeling, keyboard shortcuts, auto-advance, the
+  minimum-anchor confirm dialog, elapsed timers and progress bars. Visual
+  check by the user pending for Phases 2-7.
+
+## Phase 1: Template infrastructure (pure refactor)
+
+- `uv add jinja2` (already installed transitively; declare it).
+- `portal/templates/` (`base.html`, one template per page) and
+  `portal/static/portal.css`, `portal/static/*.js`; mount `/static`.
+- Port every page 1:1 (login, index, job, log, annotate, gaze-label) with no
+  visual change. CSRF token passed as template variable, not string replace.
+- Tests: existing `tests/test_portal_*.py` pass unchanged; add a test that every
+  route renders with autoescaping on.
+
+## Phase 2: Design system and home page
+
+- CSS tokens (color, spacing, type scale), system font stack, light theme;
+  status/verdict chips; buttons; cards; tables.
+- Home = "Sessions" list built from `OUTPUT_ROOT` (survives restarts): session,
+  cameras, date, overall verdict, link. Running jobs pinned on top with a live
+  status chip. Keep purging upload/job scratch on restart.
+- "New session" as the single primary button.
+
+## Phase 3: New-session form
+
+- Step layout: 1 Session ID -> 2 Videos (drop zones; read duration in-browser
+  from `<video>` metadata) -> 3 Tasks per camera -> 4 Extra-person windows ->
+  5 Options (gaze) -> Review & start.
+- Tasks and exclusions as structured rows (task name with suggestions
+  grocery / storybook / synchrony, start, end) with live checks: end > start,
+  inside video length, no overlaps.
+- Timeline preview per camera: task bars, exclusion hatching, resulting
+  `_partN` labels, and a note that parts are rejoined in the task summary.
+- "Copy camera A tasks to camera B" helper (clocks differ, so it pre-fills
+  for editing, never silently).
+- Still posts the existing text format, so the backend contract does not change.
+- Validation from the bug hunt (finding 9): reject `13:06:00`-style hours when
+  minutes were meant (confirm with the user), negative, `nan`/`inf`, minutes or
+  seconds >= 60, duplicate or colliding block names (`story_part1` vs generated
+  parts), parts shorter than 10 s, blocks wholly inside an exclusion (say so),
+  and times past the video length (browser-read duration; ffprobe re-check on
+  the server after upload).
+- Session ID reuse (finding 5): warn when `output/<session_id>` exists and ask
+  to pick a new ID or confirm replacing (archive, never mix).
+- Tests: rendering; server-side validation unchanged; JS kept small enough to
+  review by hand.
+
+## Phase 4: Job progress page
+
+- Stepper: Upload -> Prepare video -> Find people -> Label parent (you) ->
+  Track and refine -> Measure -> Report. Map internal step names to these in one
+  table in `jobs.py`.
+- Plain-language current step, elapsed time, per-camera progress.
+- `GET /jobs/{id}/status.json`; poll with `fetch` instead of full reload.
+- Failure state: one-sentence explanation naming the step + "show technical
+  log" disclosure; never a raw command line (finding 10).
+- Accept parent labels only while the job is waiting for them; otherwise say
+  so (finding 8: submits relaunched phase 2 on finished/running jobs).
+- An overlay clip with nobody tracked must not fail the job: render the raw
+  frames or skip that clip with a note (finding 4).
+
+## Phase 5: Parent labeling page
+
+- Click the person in the image (boxes overlaid from `bbox_xyxy`), or keys
+  `1`/`2` and `S` to skip; clear selected state; "8 of 12 labeled" counter;
+  next-unlabeled auto-scroll.
+- Confirm dialog only if fewer than the minimum anchors are labeled.
+- Test: payload shape unchanged (`parent_track_id`, `child_track_id`,
+  `skipped`).
+
+## Phase 6: Results page
+
+- Header: session, cameras, overall verdict, Download results.
+- Per camera x task cards: verdict chip (`usable` / `check` / `insufficient`),
+  plain reasons, valid time ("3 min 12 s with both people visible"), key
+  numbers, and the overlay clips playable inline (new authenticated mp4 route
+  with range requests).
+- Task-level summary (from `task_metrics.csv`) above the per-part detail.
+- Guidance box: what to include, what to watch in clips. Synchrony shown only
+  with its chance level.
+- Fallback to `coverage_both` when contract columns are missing.
+
+## Phase 7: Gaze labeling and report.html
+
+- Restyle gaze labeling with the shared CSS and the same interaction pattern as
+  Phase 5.
+- `report.html` reuses the same tokens (inlined, since it must work offline from
+  the zip) and the same verdict cards.
+
+## Open Questions
+
+- Portal name/branding for the header (currently `PORTAL_DISPLAY_NAME`).
+- Should research assistants be able to delete or rename sessions from the
+  portal, or is that admin-only?
+- Dark mode: needed, or light only?
+
+## Test Strategy
+
+pytest with FastAPI `TestClient` for every route (status, key text, escaping);
+existing portal tests stay green after Phase 1. Visual review by the user at the
+end of Phases 2, 3, 5 and 6 (screenshots via the local portal).

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import zipfile
@@ -13,24 +14,58 @@ from typing import Any, Iterable, Sequence
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4"}
 CHUNK_CAMERA_IDS = {"camera_a", "camera_b"}
-# 6 fps balances temporal resolution against inference cost: it still yields
-# ~30 samples per 5 s synchrony window (plenty for the cross-correlation) while
-# cutting frames vs 8 fps, and phase-2 interpolation fills the grid in between.
-PORTAL_DEFAULT_FRAME_RATE = 6.0
+# 5 fps: every 2nd frame of the 10 fps portal-compressed videos, so frames are
+# evenly spaced (6 fps from 10 fps alternated 100/200 ms steps, which put a
+# 2 Hz artifact into every person's measured movement). The rate actually
+# achieved for each video is read back after frame extraction.
+PORTAL_DEFAULT_FRAME_RATE = 5.0
 PORTAL_DEFAULT_IMAGE_WIDTH = 854
 PORTAL_DEFAULT_IMAGE_HEIGHT = 480
 # Two detections per frame: the parent and the child. Extra-person windows
 # (e.g. an experimenter in the room) are excluded from the analysis blocks
 # before inference, so a third tracked person is noise we do not want to keep.
 PORTAL_DEFAULT_MAX_PERSONS = 2
-# The larger L pose model localizes keypoints more accurately and with higher
-# confidence than the M model, which reduces per-frame jitter and leaves fewer
-# joints below the overlay's 0.2 draw threshold.
-PORTAL_DEFAULT_MODEL_PATH = "yolo11l-pose.pt"
+# Shortest analysis part kept after extra-person windows are removed. Shorter
+# pieces (e.g. a 4 s gap between two windows) hold too few frames for stable
+# metrics, so they are dropped and listed on the job page instead.
+MIN_PART_S = 10.0
+# Domain-adapted pose model. ``yolo11l-pose-dense.pt`` is a yolo11l-pose
+# fine-tuned on 3-teacher consensus pseudo-labels (yolo11x-pose + ViTPose-Huge +
+# RTMPose, box-matched and majority-voted) sampled from the timing-windowed,
+# 2-person-only sections of all 36 session videos -- same architecture and
+# latency as stock yolo11l-pose, but better detection and keypoints on this
+# footage (overhead, occlusion, young children). It supersedes the earlier
+# ``yolo11l-pose-fused3.pt`` after winning a blind A/B on fresh (non-training)
+# frames (dense 15, fused3 7, 9 ties of 31). Both are local artifacts
+# (gitignored *.pt); we prefer dense, fall back to fused3, then to the stock
+# model (downloaded on demand). See pose_training/ and AGENTS.md.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_PORTAL_POSE_WEIGHTS = (
+    _REPO_ROOT / "models" / "yolo11l-pose-dense.pt",
+    _REPO_ROOT / "models" / "yolo11l-pose-fused3.pt",
+)
+PORTAL_DEFAULT_MODEL_PATH = next(
+    (str(path) for path in _PORTAL_POSE_WEIGHTS if path.exists()),
+    "yolo11l-pose.pt",
+)
+# Inference resolution. The fine-tuned students are trained at 960, but the
+# pipeline default is 640 -- so without this the deployed model would run at a
+# resolution it was not trained for. 960 matches training and measurably
+# improves detection (at a modest GPU cost).
+PORTAL_DEFAULT_INFER_IMGSZ = 960
 # Length of each per-block QC overlay clip. One clip is rendered per analysis
 # block (capped at this length), so the colleague sees tracking quality for
 # every block rather than only the first.
 PORTAL_DEFAULT_OVERLAY_SECONDS = 30.0
+# Who research assistants contact when a job fails (``PORTAL_SUPPORT_CONTACT``).
+DEFAULT_SUPPORT_CONTACT = "Felipe"
+# Tracker used in phase 1. "offline" replaced BoT-SORT after a benchmark on 31
+# camera views of past portal sessions (pose_training/bench.py): frames with
+# both parent and child 0.52 -> 0.73, role accuracy on held-out anchor labels
+# 0.78 -> 0.99. See docs/plans/pose-quality-overhaul_261009.md.
+PORTAL_TRACKER_BACKEND = "offline"
+PORTAL_TRACKER_NAME = "two_person_offline"
+DETECTION_CACHE_RELPATH = Path("intermediate") / "detections.npz"
 
 
 @dataclass
@@ -56,7 +91,9 @@ class ExclusionWindow:
 class CompressionSettings:
     """Compression settings used before inference."""
 
-    target_fps: float = 8.0
+    # 10 fps divides evenly into the 5 fps analysis rate (8 fps could only
+    # give an even 4 fps).
+    target_fps: float = 10.0
     max_width: int = 854
     quality: int = 34
     cpu_preset: str = "ultrafast"
@@ -71,6 +108,13 @@ class CommandStep:
 
     name: str
     argv: list[str]
+    camera_id: str | None = None
+    # GPU-bound steps never overlap across cameras: two at once only contend
+    # (two ViTPose refinements took 110 s each in parallel vs 48 s alone).
+    gpu_heavy: bool = False
+    # A failing optional step (a QC check clip) is recorded as a note and the
+    # job carries on; any other failing step stops the job.
+    optional: bool = False
 
 
 @dataclass
@@ -93,7 +137,16 @@ class PortalJobConfig:
     max_persons: int = PORTAL_DEFAULT_MAX_PERSONS
     device: str = "cuda"
     model_path: str = PORTAL_DEFAULT_MODEL_PATH
+    infer_imgsz: int = PORTAL_DEFAULT_INFER_IMGSZ
     overlay_seconds: float = PORTAL_DEFAULT_OVERLAY_SECONDS
+    refine_keypoints: bool = True
+    # Gaze model: "page" (PaGE ViT-B; preferred over Gaze-LLE in a blind
+    # side-by-side on lab footage and better on published child-gaze
+    # benchmarks) or "gazelle" (Gaze-LLE ViT-L, the previous default).
+    gaze_model: str = "page"
+    # Process camera A and camera B at the same time (the GPU is mostly
+    # idle during one camera's CPU-bound work): ~halves job wall time.
+    parallel_cameras: bool = True
 
     @property
     def session_output_dir(self) -> Path:
@@ -101,8 +154,18 @@ class PortalJobConfig:
         return self.output_root / self.session_id
 
 
+_TIME_FORMS_HINT = "Use seconds (90), M:SS (1:30) or H:MM:SS (1:01:30)."
+_SECONDS_RE = re.compile(r"^\d+(?:\.\d+)?$")
+_CLOCK_RE = re.compile(r"^(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$")
+
+
 def parse_timecode(value: str) -> float:
-    """Parse seconds, MM:SS, or HH:MM:SS into seconds.
+    """Parse seconds, M:SS, or H:MM:SS into seconds.
+
+    Minutes and hours must be whole numbers; only the seconds field may have
+    a decimal part. In H:MM:SS, minutes must be under 60; seconds must be
+    under 60 whenever a colon is used. M:SS accepts any number of minutes
+    (``75:30`` is 75 minutes 30 seconds).
 
     Args:
         value: User-entered time string.
@@ -111,24 +174,58 @@ def parse_timecode(value: str) -> float:
         Time in seconds.
 
     Raises:
-        ValueError: If the value cannot be parsed.
+        ValueError: With a plain-language message when the value is empty,
+            negative, not a number (``nan``, ``inf``, ``1e3``), malformed
+            (``1.5:30``), or has 60 or more seconds/minutes in a field.
     """
     text = value.strip()
     if not text:
-        raise ValueError("time value cannot be empty")
-
-    if ":" not in text:
+        raise ValueError("Time is empty.")
+    if text.startswith("-") and (
+        _SECONDS_RE.match(text[1:]) or _CLOCK_RE.match(text[1:])
+    ):
+        raise ValueError(
+            f'"{text}" is negative. Times count from the start of the video.'
+        )
+    if _SECONDS_RE.match(text):
         return float(text)
+    match = _CLOCK_RE.match(text)
+    if not match:
+        raise ValueError(f'"{text}" is not a time. {_TIME_FORMS_HINT}')
+    hours_raw, minutes_raw, seconds_raw = match.groups()
+    seconds = float(seconds_raw)
+    minutes = int(minutes_raw)
+    if seconds >= 60:
+        raise ValueError(
+            f'"{text}" has {seconds_raw.lstrip("0") or "0"} seconds. '
+            "Seconds must be under 60."
+        )
+    if hours_raw is None:
+        return minutes * 60 + seconds
+    if minutes >= 60:
+        raise ValueError(f'"{text}" has {minutes} minutes. Minutes must be under 60.')
+    return int(hours_raw) * 3600 + minutes * 60 + seconds
 
-    parts = text.split(":")
-    if len(parts) == 2:
-        minutes, seconds = parts
-        return int(minutes) * 60 + float(seconds)
-    if len(parts) == 3:
-        hours, minutes, seconds = parts
-        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
-    raise ValueError(f"cannot parse time value: {value!r}")
+def format_clock(seconds: float) -> str:
+    """Format seconds as M:SS, or H:MM:SS from one hour on.
+
+    Args:
+        seconds: Non-negative time in seconds.
+
+    Returns:
+        Clock text such as ``"13:26"``, ``"13:06:00"`` or ``"1:05.5"`` (one
+        decimal only when the time is not a whole second).
+    """
+    total = round(float(seconds), 1)
+    whole = int(total)
+    fraction = round(total - whole, 1)
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    sec_text = f"{secs:02d}" if fraction == 0 else f"{secs + fraction:04.1f}"
+    if hours:
+        return f"{hours}:{minutes:02d}:{sec_text}"
+    return f"{minutes}:{sec_text}"
 
 
 def format_seconds_for_cli(seconds: float) -> str:
@@ -208,6 +305,38 @@ def split_blocks_for_exclusions(
     return result
 
 
+def split_blocks_with_min_part(
+    blocks: Sequence[SessionBlock],
+    exclusions: Sequence[ExclusionWindow],
+    min_part_s: float = MIN_PART_S,
+) -> tuple[list[SessionBlock], list[SessionBlock]]:
+    """Remove exclusion windows, then drop parts shorter than ``min_part_s``.
+
+    Parts are numbered before short ones are dropped, so the kept names do
+    not change when a neighbour is dropped (``grocery_part1`` and
+    ``grocery_part3`` when ``grocery_part2`` is a 4 s sliver). The browser
+    form mirrors this logic in ``portal/static/index.js`` for its preview.
+
+    Args:
+        blocks: Original analysis blocks.
+        exclusions: Windows where extra people are visible.
+        min_part_s: Shortest part to keep, in seconds.
+
+    Returns:
+        ``(kept, dropped)`` analysis blocks.
+    """
+    kept: list[SessionBlock] = []
+    dropped: list[SessionBlock] = []
+    # Any piece longer than zero is numbered, so the numbering never depends
+    # on the minimum length.
+    for part in split_blocks_for_exclusions(blocks, exclusions, min_duration_s=1e-9):
+        if part.end_s - part.start_s >= min_part_s:
+            kept.append(part)
+        else:
+            dropped.append(part)
+    return kept, dropped
+
+
 def build_blocks_arg(blocks: Sequence[SessionBlock]) -> str:
     """Build the semicolon-delimited block string for track filtering.
 
@@ -221,6 +350,45 @@ def build_blocks_arg(blocks: Sequence[SessionBlock]) -> str:
         f"{block.name},{format_seconds_for_cli(block.start_s)},{format_seconds_for_cli(block.end_s)}"
         for block in blocks
     )
+
+
+def achieved_session_frame_rate(config: PortalJobConfig) -> float:
+    """Frame rate actually kept by frame extraction, shared by all cameras.
+
+    Frame extraction keeps every k-th source frame, so the achieved rate is
+    the source rate divided by k (5 fps from a 10 fps video, 4 fps from an
+    8 fps one). Everything after extraction must use this rate.
+
+    Args:
+        config: Portal job configuration (after phase 1 has run).
+
+    Returns:
+        The achieved rate, or ``config.frame_rate`` when extraction did not
+        record one (older runs).
+
+    Raises:
+        ValueError: If the cameras ended up at different rates.
+    """
+    from video_inference.frames import read_achieved_frame_rate
+
+    rates = {
+        camera_id: read_achieved_frame_rate(
+            config.session_output_dir / camera_id / "frames", config.frame_rate
+        )
+        for camera_id in active_camera_ids(config)
+    }
+    distinct = sorted({round(rate, 6) for rate in rates.values()})
+    if len(distinct) > 1:
+        detail = ", ".join(
+            f"Video {camera_id[-1].upper()} {rate:g}"
+            for camera_id, rate in rates.items()
+        )
+        raise ValueError(
+            "The two videos ended up at different frames per second "
+            f"({detail}). Compress both videos with the portal compressor "
+            "(10 frames per second) and submit the session again."
+        )
+    return float(distinct[0]) if distinct else config.frame_rate
 
 
 def active_camera_ids(config: PortalJobConfig) -> list[str]:
@@ -313,6 +481,48 @@ def probe_video_path(path: Path, ffprobe_bin: str = "ffprobe") -> None:
         raise RuntimeError(f"ffprobe returned invalid JSON for {path.name}") from error
     if not payload.get("streams"):
         raise ValueError(f"No video stream found in uploaded file: {path.name}")
+
+
+def probe_video_duration(path: Path, ffprobe_bin: str = "ffprobe") -> float:
+    """Return a video's length in seconds as reported by ffprobe.
+
+    Args:
+        path: Video path to probe.
+        ffprobe_bin: ffprobe executable name or path.
+
+    Returns:
+        Duration in seconds.
+
+    Raises:
+        RuntimeError: If ffprobe is unavailable, fails, or reports no
+            usable duration.
+    """
+    command = [
+        ffprobe_bin,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"'{ffprobe_bin}' not found. Install ffmpeg/ffprobe or set PORTAL_FFPROBE_BIN."
+        ) from error
+    except subprocess.CalledProcessError as error:
+        stderr = error.stderr.strip() if error.stderr else "no stderr"
+        raise RuntimeError(f"ffprobe could not read {path.name}: {stderr}") from error
+    try:
+        duration = float(json.loads(result.stdout or "{}")["format"]["duration"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"Could not read the length of {path.name}.") from error
+    if not duration > 0 or duration == float("inf"):
+        raise RuntimeError(f"Could not read the length of {path.name}.")
+    return duration
 
 
 def validate_video_path(
@@ -645,14 +855,18 @@ def build_phase1_steps(config: PortalJobConfig) -> list[CommandStep]:
             "ultralytics",
             "--ultralytics-model-path",
             config.model_path,
+            # Offline two-person association: caches every detection (down
+            # to conf 0.05) with an appearance embedding, then solves parent
+            # and child over the whole recording. Phase 2 re-solves it with
+            # the colleague's anchor labels. See video_inference/offline_assoc.
             "--tracker-backend",
-            "boxmot",
-            "--tracker-name",
-            "botsort",
+            PORTAL_TRACKER_BACKEND,
             "--max-persons",
             str(config.max_persons),
             "--frame-rate",
             str(config.frame_rate),
+            "--imgsz",
+            str(config.infer_imgsz),
         ]
     )
     for camera_id in camera_ids:
@@ -676,7 +890,15 @@ def build_phase1_steps(config: PortalJobConfig) -> list[CommandStep]:
             config.session_id,
         ]
     )
+    if config.parallel_cameras:
+        pose_argv.append("--parallel-cameras")
     return [CommandStep(name="pose inference", argv=pose_argv)]
+
+
+GAZE_RUNNER_MODULES = {
+    "page": "gaze_analysis.page_runner",
+    "gazelle": "gaze_analysis.gazelle_runner",
+}
 
 
 def build_phase2_steps(
@@ -697,27 +919,43 @@ def build_phase2_steps(
     camera_ids = active_camera_ids(config)
     anchors_map = anchors_json_by_camera or {}
     steps: list[CommandStep] = []
+    camera_starts: list[tuple[str, int]] = []
 
     for camera_id in camera_ids:
         camera_blocks = blocks_for_camera(config, camera_id)
         blocks_arg = build_blocks_arg(camera_blocks)
         camera_dir = session_dir / camera_id
+        camera_starts.append((camera_id, len(steps)))
 
-        filter_argv = [
-            python,
-            "-m",
-            "video_analysis.track_filter",
-            "--session-dir",
-            str(session_dir),
-            "--camera",
-            camera_id,
-            "--blocks",
-            blocks_arg,
-            "--source-fps",
-            str(config.frame_rate),
-            "--n-keep",
-            "2",
-        ]
+        offline = (camera_dir / DETECTION_CACHE_RELPATH).exists()
+        refine = offline and config.refine_keypoints
+        pose_after_roles = "pose_3d_refined.csv" if refine else "pose_3d_filtered.csv"
+        if offline:
+            # Re-solve parent/child over the whole recording with the anchors.
+            filter_argv = [
+                python,
+                "-m",
+                "video_inference.offline_assoc",
+                "--camera-dir",
+                str(camera_dir),
+            ]
+        else:
+            # Jobs from before the offline tracker: block filter on raw tracks.
+            filter_argv = [
+                python,
+                "-m",
+                "video_analysis.track_filter",
+                "--session-dir",
+                str(session_dir),
+                "--camera",
+                camera_id,
+                "--blocks",
+                blocks_arg,
+                "--source-fps",
+                str(config.frame_rate),
+                "--n-keep",
+                "2",
+            ]
         anchors_path = anchors_map.get(camera_id)
         if anchors_path is not None:
             filter_argv.extend(["--anchors-json", str(anchors_path)])
@@ -728,6 +966,29 @@ def build_phase2_steps(
                     name=f"filter tracks {camera_id}",
                     argv=filter_argv,
                 ),
+            ]
+        )
+        if refine:
+            # Re-estimate each person's keypoints with ViTPose-Large from their
+            # box (~24% less keypoint jitter on past sessions); falls back
+            # to the original keypoints where ViTPose disagrees on who it is.
+            steps.append(
+                CommandStep(
+                    gpu_heavy=True,
+                    name=f"refine keypoints {camera_id}",
+                    argv=[
+                        python,
+                        "-m",
+                        "video_inference.topdown_refine",
+                        "--camera-dir",
+                        str(camera_dir),
+                        "--device",
+                        config.device,
+                    ],
+                )
+            )
+        steps.extend(
+            [
                 # Fill short detection gaps before smoothing: reindex each
                 # track onto a regular frame grid and linearly interpolate the
                 # bbox and pose across gaps. The interpolator caps the fill at
@@ -747,7 +1008,7 @@ def build_phase2_steps(
                         "--tracks-input",
                         "tracks_2d_filtered.csv",
                         "--pose-input",
-                        "pose_3d_filtered.csv",
+                        pose_after_roles,
                         "--tracks-output",
                         "tracks_2d_interpolated.csv",
                         "--pose-output",
@@ -819,6 +1080,7 @@ def build_phase2_steps(
             for out_name, name_suffix, win_start, win_end in overlay_windows:
                 steps.append(
                     CommandStep(
+                        optional=True,
                         name=f"overlay video {camera_id} {block.name}{name_suffix}",
                         argv=[
                             python,
@@ -844,11 +1106,12 @@ def build_phase2_steps(
             steps.extend(
                 [
                     CommandStep(
+                        gpu_heavy=True,
                         name=f"gaze inference {camera_id}",
                         argv=[
                             python,
                             "-m",
-                            "gaze_analysis.gazelle_runner",
+                            GAZE_RUNNER_MODULES[config.gaze_model],
                             "--camera-dir",
                             str(camera_dir),
                             "--session-config",
@@ -916,6 +1179,10 @@ def build_phase2_steps(
                 ]
             )
 
+    bounds = camera_starts + [(None, len(steps))]
+    for (camera_id, start), (_, end) in zip(bounds, bounds[1:]):
+        for step in steps[start:end]:
+            step.camera_id = camera_id
     return steps
 
 
@@ -950,6 +1217,284 @@ def read_status(job_dir: Path) -> dict[str, Any]:
     return payload
 
 
+# Stages shown on the job page, in order: (key, label).
+JOB_STAGES: tuple[tuple[str, str], ...] = (
+    ("upload", "Upload"),
+    ("prepare", "Prepare video"),
+    ("find_people", "Find people"),
+    ("label_parent", "Label parent (you)"),
+    ("track_refine", "Track and refine"),
+    ("measure", "Measure"),
+    ("report", "Report"),
+)
+JOB_STAGE_KEYS = tuple(key for key, _ in JOB_STAGES)
+
+# The one table that maps internal step names to a stage and plain words.
+# Matched by prefix against ``current_step`` / ``CommandStep.name`` (the
+# camera id and block name that follow the prefix only name the video).
+# Each row: (step-name prefix, stage key, what is happening, failure phrase).
+STEP_STAGE_TABLE: tuple[tuple[str, str, str, str], ...] = (
+    ("uploading", "upload", "Receiving the videos.", "receiving the videos"),
+    ("queued", "upload", "Waiting for another job to finish.", "waiting its turn"),
+    (
+        "finalize uploads",
+        "upload",
+        "Putting the uploaded videos together.",
+        "putting the uploaded videos together",
+    ),
+    (
+        "compression",
+        "prepare",
+        "Making the videos smaller for processing.",
+        "preparing the videos",
+    ),
+    (
+        "pose inference",
+        "find_people",
+        "Finding the people in every frame. This is the longest step.",
+        "finding the people in the videos",
+    ),
+    (
+        "extract anchors",
+        "find_people",
+        "Picking a few frames for you to label.",
+        "picking frames for you to label",
+    ),
+    (
+        "awaiting annotation",
+        "label_parent",
+        "Waiting for you to mark the parent in a few frames.",
+        "waiting for your labels",
+    ),
+    (
+        "phase 2 queued",
+        "track_refine",
+        "Labels received. Waiting to continue.",
+        "starting after your labels",
+    ),
+    (
+        "filter tracks",
+        "track_refine",
+        "Following the parent and the child through the video.",
+        "following the parent and the child",
+    ),
+    (
+        "refine keypoints",
+        "track_refine",
+        "Refining body positions.",
+        "refining body positions",
+    ),
+    (
+        "interpolate tracks",
+        "track_refine",
+        "Filling short gaps in tracking.",
+        "filling short gaps in tracking",
+    ),
+    ("smooth tracks", "track_refine", "Smoothing movement.", "smoothing movement"),
+    ("pose metrics", "measure", "Measuring movement.", "measuring movement"),
+    (
+        "overlay video",
+        "measure",
+        "Making short check clips.",
+        "making the check clips",
+    ),
+    ("gaze", "measure", "Estimating where each person looks.", "estimating gaze"),
+    (
+        "session report",
+        "report",
+        "Writing the session report.",
+        "writing the session report",
+    ),
+    ("results zip", "report", "Packing the results.", "packing the results"),
+)
+
+CAMERA_LABELS = {"camera_a": "Video A", "camera_b": "Video B"}
+
+
+def describe_step(step_name: str | None) -> dict[str, str]:
+    """Translate an internal step name into a stage and plain words.
+
+    Args:
+        step_name: Internal step name such as ``"smooth tracks camera_a"``.
+
+    Returns:
+        Dict with ``stage`` (a ``JOB_STAGE_KEYS`` entry, or ``""`` when the
+        step is unknown), ``message`` (what is happening, in plain words,
+        naming the video when the step belongs to one camera) and
+        ``failure`` (a phrase for "the job stopped while ...").
+    """
+    name = (step_name or "").strip()
+    camera = next((cid for cid in CAMERA_LABELS if cid in name.split()), None)
+    for prefix, stage, message, failure in STEP_STAGE_TABLE:
+        if name == prefix or name.startswith(prefix + " "):
+            if camera is not None:
+                video = CAMERA_LABELS[camera]
+                message = f"{video}: {message}"
+                failure = f"{failure} for {video}"
+            return {"stage": stage, "message": message, "failure": failure}
+    return {"stage": "", "message": "Working.", "failure": "processing"}
+
+
+def running_status(
+    step_name: str, phase: int | None = None, **extra: Any
+) -> dict[str, Any]:
+    """Build a ``running`` status payload for one internal step.
+
+    Args:
+        step_name: Internal step name (kept as ``current_step`` for the log).
+        phase: Pipeline phase (1 before labeling, 2 after).
+        **extra: Further fields (e.g. ``cameras``).
+
+    Returns:
+        Status dict with ``state``, plain ``message``, ``stage`` and
+        ``current_step``.
+    """
+    info = describe_step(step_name)
+    payload: dict[str, Any] = {
+        "state": "running",
+        "message": info["message"],
+        "stage": info["stage"],
+        "current_step": step_name,
+    }
+    if phase is not None:
+        payload["phase"] = phase
+    payload.update(extra)
+    return payload
+
+
+def support_contact() -> str:
+    """Return who to contact about a failed job.
+
+    Returns:
+        ``PORTAL_SUPPORT_CONTACT`` when set and not blank, else
+        ``DEFAULT_SUPPORT_CONTACT``.
+    """
+    return os.environ.get("PORTAL_SUPPORT_CONTACT", "").strip() or (
+        DEFAULT_SUPPORT_CONTACT
+    )
+
+
+def friendly_failure_message(step_name: str | None, error: BaseException) -> str:
+    """Return a short plain message saying where a job stopped.
+
+    A raw command line (``Command '[...]' returned non-zero exit status``)
+    is never part of it. ``ValueError`` messages are written for people
+    (e.g. "The two videos ended up at different frames per second ..."),
+    so they follow the sentence; any other error stays in the details.
+
+    Args:
+        step_name: Internal name of the step that was running.
+        error: The exception that stopped the job.
+
+    Returns:
+        A short message for the job page.
+    """
+    phrase = describe_step(step_name)["failure"]
+    if isinstance(error, ValueError) and str(error):
+        return f"The job stopped while {phrase}. {error}"
+    return (
+        f"The job stopped while {phrase}. Open the technical details below "
+        f"and send them to {support_contact()}."
+    )
+
+
+def failed_status(
+    step_name: str | None, error: BaseException, **extra: Any
+) -> dict[str, Any]:
+    """Build a ``failed`` status payload with a plain message.
+
+    Args:
+        step_name: Internal name of the step that was running.
+        error: The exception that stopped the job (kept in ``error``).
+        **extra: Further fields (e.g. ``phase``, ``log_path``).
+
+    Returns:
+        Status dict with ``state``, plain ``message``, ``stage``,
+        ``failed_step`` and the raw ``error`` text.
+    """
+    payload: dict[str, Any] = {
+        "state": "failed",
+        "message": friendly_failure_message(step_name, error),
+        "stage": describe_step(step_name)["stage"],
+        "current_step": None,
+        "failed_step": step_name,
+        "error": f"{type(error).__name__}: {error}",
+    }
+    payload.update(extra)
+    return payload
+
+
+def failing_step_name(error: BaseException, default: str | None) -> str | None:
+    """Return the step a failure came from (tagged by ``run_steps``).
+
+    Args:
+        error: The exception raised by a step.
+        default: Step name to use when the error carries none.
+
+    Returns:
+        The failing step's internal name, or ``default``.
+    """
+    return getattr(error, "portal_step_name", None) or default
+
+
+JOB_NOTES_FILENAME = "notes.json"
+
+
+def read_job_notes(job_dir: Path) -> list[str]:
+    """Return the job's plain-language notes (empty when there are none).
+
+    Args:
+        job_dir: Job working directory.
+
+    Returns:
+        Notes in the order they were added.
+    """
+    path = job_dir / JOB_NOTES_FILENAME
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return [str(item) for item in payload] if isinstance(payload, list) else []
+
+
+def add_job_note(job_dir: Path, text: str) -> None:
+    """Append one plain-language note to the job (listed on the job page).
+
+    Args:
+        job_dir: Job working directory.
+        text: The note.
+    """
+    notes = read_job_notes(job_dir)
+    notes.append(text)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / JOB_NOTES_FILENAME).write_text(
+        json.dumps(notes, indent=2), encoding="utf-8"
+    )
+
+
+def overlay_skip_note(step: CommandStep) -> str:
+    """Plain note for a check clip that could not be made.
+
+    Args:
+        step: The overlay step (name ``overlay video <camera> <block>[ (end)]``).
+
+    Returns:
+        A sentence naming the video and block.
+    """
+    parts = step.name.split(" ", 3)
+    block = parts[3] if len(parts) > 3 else step.name
+    if block.endswith(" (end)"):
+        block = block[: -len(" (end)")] + " end clip"
+    video = CAMERA_LABELS.get(step.camera_id or "", "")
+    where = f"{video}, {block}" if video else block
+    return (
+        f"Check clip not made ({where}). This usually means the block runs "
+        "past the end of the video. The measurements are not affected."
+    )
+
+
 def job_config_to_dict(config: PortalJobConfig) -> dict[str, Any]:
     """Convert a job config to a JSON-safe dictionary.
 
@@ -973,18 +1518,155 @@ def run_command_step(step: CommandStep, cwd: Path, log_path: Path) -> None:
         cwd: Working directory.
         log_path: Log file path.
     """
-    with log_path.open("a", encoding="utf-8") as log_file:
-        log_file.write(f"\n\n== {step.name} ==\n")
-        log_file.write(" ".join(step.argv) + "\n")
-        log_file.flush()
-        subprocess.run(
-            step.argv,
-            cwd=cwd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            check=True,
-            text=True,
+    from portal import run_log
+
+    started = run_log.now()
+    ok = False
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"\n\n== {step.name} ==\n")
+            log_file.write(" ".join(step.argv) + "\n")
+            log_file.flush()
+            subprocess.run(
+                step.argv,
+                cwd=cwd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                check=True,
+                text=True,
+            )
+        ok = True
+    finally:
+        run_log.record_step(
+            Path(log_path).parent, step.name, step.camera_id, started, run_log.now(), ok
         )
+
+
+def build_session_report_step(config: PortalJobConfig) -> CommandStep:
+    """Build the step that writes the session table, report, and study table.
+
+    Runs after every camera's chain: it reads all cameras' metric summaries
+    and rebuilds ``all_sessions_metrics.csv`` across every processed session.
+
+    Args:
+        config: Portal job configuration.
+
+    Returns:
+        The session report command.
+    """
+    return CommandStep(
+        name="session report",
+        argv=[
+            sys.executable,
+            "-m",
+            "video_analysis.session_report",
+            "--session-dir",
+            str(config.session_output_dir),
+            "--all-sessions-root",
+            str(config.output_root),
+        ],
+    )
+
+
+def run_steps(
+    steps: Sequence[CommandStep],
+    cwd: Path,
+    log_path: Path,
+    on_start: Any = None,
+    parallel_cameras: bool = False,
+    on_optional_failure: Any = None,
+) -> None:
+    """Run command steps, optionally one thread per camera.
+
+    Steps of one camera always run in order. With ``parallel_cameras`` the
+    cameras' chains run concurrently; each writes its own log section, which
+    is appended to ``log_path`` (camera A first) when the chains finish, so the
+    job log stays readable.
+
+    Args:
+        steps: Steps to run (``camera_id`` groups them).
+        cwd: Working directory for the subprocesses.
+        log_path: Job log.
+        on_start: Optional callback ``(step_number, total, step)`` called as
+            each step starts.
+        parallel_cameras: Run different cameras' chains concurrently.
+        on_optional_failure: Optional callback ``(step, error)`` called when
+            an ``optional`` step fails; the chain then continues.
+
+    Raises:
+        subprocess.CalledProcessError: The first failing required step (after
+            every chain has stopped). The error carries the step's name as
+            ``portal_step_name``.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    groups: dict[str | None, list[CommandStep]] = {}
+    for step in steps:
+        groups.setdefault(step.camera_id, []).append(step)
+    total = len(steps)
+    started = 0
+    lock = threading.Lock()
+
+    def notify(step: CommandStep) -> None:
+        nonlocal started
+        with lock:
+            started += 1
+            if on_start is not None:
+                on_start(started, total, step)
+
+    def run_one(step: CommandStep, step_log: Path) -> None:
+        try:
+            run_command_step(step, cwd=cwd, log_path=step_log)
+        except Exception as error:
+            if step.optional:
+                if on_optional_failure is not None:
+                    on_optional_failure(step, error)
+                return
+            if getattr(error, "portal_step_name", None) is None:
+                try:
+                    error.portal_step_name = step.name  # type: ignore[attr-defined]
+                except AttributeError:
+                    pass
+            raise
+
+    if not parallel_cameras or len(groups) <= 1:
+        for step in steps:
+            notify(step)
+            run_one(step, log_path)
+        return
+
+    part_logs = {
+        key: log_path.with_name(f"{log_path.stem}.{key or 'session'}{log_path.suffix}")
+        for key in groups
+    }
+
+    gpu_lock = threading.Lock()
+
+    def run_chain(key: str | None) -> None:
+        for step in groups[key]:
+            notify(step)
+            if step.gpu_heavy:
+                with gpu_lock:
+                    run_one(step, part_logs[key])
+            else:
+                run_one(step, part_logs[key])
+
+    errors: list[BaseException] = []
+    with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+        futures = [pool.submit(run_chain, key) for key in groups]
+        for future in futures:
+            try:
+                future.result()
+            except BaseException as error:  # noqa: BLE001 - re-raised below
+                errors.append(error)
+    with log_path.open("a", encoding="utf-8") as log_file:
+        for key, part in part_logs.items():
+            if part.exists():
+                log_file.write(part.read_text(encoding="utf-8", errors="replace"))
+                part.unlink()
+    if errors:
+        raise errors[0]
 
 
 RESULT_ZIP_EXCLUDED_DIRS = frozenset({"frames", "intermediate"})
@@ -1000,7 +1682,7 @@ def make_result_zip(
     Skips intermediate artifacts the colleague never opens: extracted
     JPEG frames under any ``frames/`` directory and the raw inference
     JSON under any ``intermediate/`` directory. These can be hundreds
-    of MB at 8 fps over a 10-minute block; the per-frame information
+    of MB at 5 fps over a 10-minute block; the per-frame information
     is already encoded in the CSVs that *are* included.
 
     Args:
@@ -1069,6 +1751,9 @@ frame).
 ```
 {config.session_id}/
   README.md                <- this file
+  report.html              <- START HERE: one-page summary (open in a browser)
+  session_metrics.csv      <- all headline numbers, one row per camera x block
+  task_metrics.csv         <- the same, one row per camera x task (parts rejoined)
   session_summary.json     <- run-level config + validation status
 {camera_tree}
   portal_metadata/         <- provenance: what you submitted + the run log
@@ -1078,6 +1763,32 @@ Each `camera_*/` folder is one camera angle and is self-contained:
 
 {camera_blocks_md}
 
+## Start here
+
+Open **`report.html`** in a browser. It shows, for every camera and block,
+how much of the block had both people tracked, the headline numbers, and
+links to the overlay clips and figures.
+
+**`session_metrics.csv`** holds the same numbers as a table (one row per
+camera and block) for stats software. **`task_metrics.csv`** has one row per
+camera and task: when extra-person windows split a task into `_part1`,
+`_part2`, ..., the parts are rejoined by pooling their frames (distance, gaze)
+and their 20-second windows (movement synchrony). The portal also keeps a combined table
+for every processed session; download it from the portal's home page
+("Download all sessions table").
+
+Key columns:
+
+| column | meaning |
+|---|---|
+| `block_start_s`, `block_end_s`, `block_frames` | The block on this camera's own clock, and how many frames it spans. |
+| `frames_with_parent`, `frames_with_child`, `frames_with_both` | Frames in the block where each person (or both) was tracked. |
+| `coverage_both` | `frames_with_both / block_frames`. All dyad metrics use only those frames. |
+| `low_coverage` | `True` if `coverage_both` is below 0.5. Treat that block's metrics with care and check the overlay clips. |
+| `proximity_*`, `xcorr_*`, `lag_*` | Pose metrics (see `pose_metrics_summary.json` below). |
+| `gaze_*` | Gaze metrics per block, when gaze analysis was requested. |
+| `tracking_*` | Whole-camera tracking stats from `two_person_summary.json`. |
+
 ## Which files to analyze
 
 Use the **`*_smooth.csv`** files. They are the final, analysis-ready outputs.
@@ -1086,8 +1797,9 @@ The other CSVs are earlier stages kept for transparency and debugging:
 | Stage | tracks file | pose file | What it is |
 |---|---|---|---|
 | 1. raw | `tracks_2d.csv` | `pose_3d.csv` | Every detection from every tracked person, before role assignment. |
-| 2. filtered | `tracks_2d_filtered.csv` | `pose_3d_filtered.csv` | Restricted to the two people (parent, child) inside the analysis blocks, using your anchor labels. |
-| 3. interpolated | `tracks_2d_interpolated.csv` | `pose_3d_interpolated.csv` | Detection gaps up to 1 s linearly filled so boxes/joints do not flicker. Longer gaps are left empty. Filled rows are flagged in the `interpolated` column. |
+| 2. filtered | `tracks_2d_filtered.csv` | `pose_3d_filtered.csv` | The parent and the child, identified across the whole recording using your anchor labels. |
+| 2b. refined | | `pose_3d_refined.csv` | Same people, keypoints re-estimated by a stronger pose model (ViTPose-Large) for steadier joints. Present for new jobs. |
+| 3. interpolated | `tracks_2d_interpolated.csv` | `pose_3d_interpolated.csv` | Short detection gaps (1 s or less, inside one block) linearly filled so boxes/joints do not flicker. Longer gaps are left completely empty. Only real video frame times are filled. Filled rows are flagged in the `interpolated` column. |
 | 4. smooth | `tracks_2d_smooth.csv` | `pose_3d_smooth.csv` | Stage 3 + temporal EMA smoothing. **Use these.** |
 
 After stage 2, `track_id` is canonical: **`0` = parent, `1` = child**
@@ -1139,20 +1851,32 @@ COCO-17 keypoint order (`kp_000`→nose, increasing index):
 | `torso_distance_px` | float | Distance between the parent and child torso centroids, in **image pixels**. Smaller = closer. Pixel scale is camera-dependent; compare within a session, not across cameras. |
 | `block` | str | Which analysis block this frame belongs to. |
 
-### `pose_metrics_xcorr.csv` — movement synchrony (per 5 s window)
+### `pose_metrics_sync.csv` — movement synchrony (per 20 s window)
 
 | column | type | meaning |
 |---|---|---|
+| `segment_id` | int | Which unbroken stretch of the block (both people tracked, no gap) the window comes from. |
+| `window_start_s,window_end_s` | float | The 20 s window analyzed. |
+| `sync_r` | float | Correlation between the parent's and the child's whole-body movement in that window, -1 to 1. Compare with the block's chance level (`sync_chance_mean` in the summary). |
+| `block` | str | Analysis block. |
+
+### `pose_metrics_xcorr.csv` — superseded torso-speed synchrony (per 5 s window)
+
+| column | type | meaning |
+|---|---|---|
+| `segment_id` | int | Which unbroken stretch of the block (both people tracked, no gap) the window comes from. Windows never cross a gap. |
 | `window_start_s,window_end_s` | float | The 5 s window analyzed. |
-| `peak_xcorr` | float | Peak cross-correlation of parent vs child movement in that window, -1…1. Higher = more synchronized motion. |
+| `peak_xcorr` | float | Peak cross-correlation of parent vs child movement in that window, 0…1 (negative values are shown as 0). Higher = more synchronized motion. |
 | `peak_lag_s` | float | Lag at the peak, in seconds. **Positive = child follows parent**; negative = child leads. |
 | `block` | str | Analysis block. |
 
 ### `pose_metrics_summary.json` — per-block roll-up
 
 A list of objects, one per block, with `proximity_mean/std/median/n_frames`
-and `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows`. This is the
-headline table for each block.
+and `sync_mean/std`, `sync_n_windows`, `sync_chance_mean`, `sync_minus_chance`
+(movement synchrony; only the part above chance reflects the interaction),
+the superseded `xcorr_*` / `lag_*` columns, plus the tracking coverage columns
+described under "Start here".
 
 ### Figures and video
 
@@ -1161,10 +1885,41 @@ headline table for each block.
 - `overlay_<block>.mp4` and `overlay_<block>_end.mp4` — ~{int(config.overlay_seconds)} s clips of the **start** and **end** of each block, with boxes and skeletons drawn, to eyeball tracking quality at both ends. (A block shorter than ~{int(config.overlay_seconds)} s yields a single full-block `overlay_<block>.mp4`.) Every keypoint is drawn; keypoints that were gap-filled or low-confidence-infilled (`interpolated = True`) are shown muted (hollow dot, thin dimmed bone) so you can tell them from directly observed joints.
 - SVGs are editable vector versions of the PNGs.
 
+### Gaze (when requested)
+
+A gaze model (PaGE) estimates, for each person in each frame, the point in the
+image they are looking at (`gaze_heatmap.csv`: `gaze_peak_x/y` as fractions of
+image width/height; `inout_score` = probability the target is inside the
+image). Each frame is then given one category (`gaze_metrics_categories.csv`):
+
+| category | rule |
+|---|---|
+| `mutual_gaze` | each person's gaze lands on the other's face |
+| `parent_watching` / `child_watching` | one person's gaze lands on the other (face or body); the other's does not land back |
+| `both_watching` | each looks at the other, not face to face |
+| `joint_attention` | both look at something in view (not each other), gaze points within 1.5 head-heights |
+| `independent` | both look at different things in view |
+| `unknown` | someone's gaze is out of view, or a box is missing |
+
+One-frame flickers are absorbed into the surrounding category.
+`gaze_metrics_summary.json` gives each category's share per block
+(`<category>_pct`, summing to 100) and its **chance level**
+(`<category>_chance_pct`): the share with the child's gaze shifted 60 s in time,
+which keeps seating positions but breaks the moment-to-moment pairing. Treat a
+category as meaningful only when it clearly exceeds its chance level.
+`convergence_mean` is the overlap of the two people's gaze maps (0 = disjoint,
+1 = identical), with `convergence_chance` computed the same way.
+
+Gaze estimates have not been validated against human coding on this lab's
+videos; a blind visual comparison of two models on 50 random frames was used
+to choose PaGE.
+
 ### `session_summary.json` and `portal_metadata/`
 
 `session_summary.json` records the run configuration and a per-block validity
-flag. `portal_metadata/` holds `submission_metadata.json` (exactly what was
+flag. Each camera folder also has `two_person_summary.json` (how many frames
+contain the parent, the child, or both) and `keypoint_refinement_summary.json`
+(share of person-frames whose keypoints were refined). `portal_metadata/` holds `submission_metadata.json` (exactly what was
 submitted: blocks, exclusion windows), `job_config.json`, and `job.log` (the
 full processing log) for provenance.
 
@@ -1244,6 +1999,10 @@ def extract_job_anchor_frames(
             source_video=Path(source_video),
             output_dir=out_dir,
             n_anchors=n_anchors,
+            blocks=[
+                (block.name, block.start_s, block.end_s)
+                for block in blocks_for_camera(config, camera_id)
+            ],
         )
         summary[camera_id] = {
             "count": len(metadata),
@@ -1279,15 +2038,9 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
     compression_settings = CompressionSettings(
         ffmpeg_bin=os.environ.get("PORTAL_FFMPEG_BIN", "ffmpeg")
     )
+    current_step = "compression"
     try:
-        write_status(
-            config.job_dir,
-            {
-                "state": "running",
-                "message": "Compressing uploaded videos if needed.",
-                "current_step": "compression",
-            },
-        )
+        write_status(config.job_dir, running_status(current_step))
 
         compressed_dir = repo_root / "video_inference" / "compressed" / config.job_id
         compression_summaries = []
@@ -1320,38 +2073,39 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
         _write_json(config.job_dir / "job_config.json", job_config_to_dict(config))
 
         steps = build_phase1_steps(config)
-        for index, step in enumerate(steps, start=1):
-            write_status(
-                config.job_dir,
-                {
-                    "state": "running",
-                    "message": f"Phase 1 step {index} of {len(steps)}: {step.name}",
-                    "current_step": step.name,
-                    "phase": 1,
-                },
-            )
+        for step in steps:
+            current_step = step.name
+            write_status(config.job_dir, running_status(step.name, phase=1))
             run_command_step(step, cwd=repo_root, log_path=log_path)
+
+        # Record the real frame size (uploads are often 960x540, not the
+        # 854x480 default); gaze head boxes are normalized by it.
+        from gaze_analysis.config import frame_image_size
+
+        config.image_width, config.image_height = frame_image_size(
+            config.session_output_dir / active_camera_ids(config)[0],
+            (config.image_width, config.image_height),
+        )
+        # Use the frame rate extraction actually achieved from here on.
+        config.frame_rate = achieved_session_frame_rate(config)
+        write_session_config(config)
+        _write_json(config.job_dir / "job_config.json", job_config_to_dict(config))
 
         # After pose+tracking, extract anchor frames per camera and pause
         # for the colleague to label which detection is the parent. Phase 2
         # resumes via resume_portal_job_phase2 once annotations arrive.
-        write_status(
-            config.job_dir,
-            {
-                "state": "running",
-                "message": "Preparing anchor frames for annotation.",
-                "current_step": "extract anchors",
-                "phase": 1,
-            },
-        )
+        current_step = "extract anchors"
+        write_status(config.job_dir, running_status(current_step, phase=1))
         anchor_summary = extract_job_anchor_frames(config)
         write_status(
             config.job_dir,
             {
                 "state": "awaiting_annotation",
                 "message": (
-                    "Label which detection is the parent on each anchor frame."
+                    "Ready for you: mark which person is the parent in a few "
+                    "frames so processing can continue."
                 ),
+                "stage": "label_parent",
                 "current_step": "awaiting annotation",
                 "phase": 1,
                 "annotate_url": f"/jobs/{config.job_id}/annotate",
@@ -1361,13 +2115,16 @@ def run_portal_job(config: PortalJobConfig, repo_root: Path) -> None:
     except Exception as error:
         write_status(
             config.job_dir,
-            {
-                "state": "failed",
-                "message": str(error),
-                "current_step": None,
-                "log_path": str(log_path),
-            },
+            failed_status(
+                failing_step_name(error, current_step),
+                error,
+                phase=1,
+                log_path=str(log_path),
+            ),
         )
+        from portal import run_log
+
+        run_log.write_run_record(config, "failed", error=error)
         raise
 
 
@@ -1379,22 +2136,58 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
     filter -> smooth -> metrics -> overlay chain, then bundles the result
     zip.
     """
+    import threading
+
     log_path = config.job_dir / "job.log"
+    current_step = "phase 2 queued"
+    # Latest plain message per video, so both cameras show while they run
+    # side by side (on_start is called under run_steps' lock).
+    cameras: dict[str, str] = {}
+    notes_lock = threading.Lock()
     try:
+        # The config is rebuilt from the upload, so re-read the frame rate
+        # that frame extraction actually achieved in phase 1.
+        config.frame_rate = achieved_session_frame_rate(config)
         anchors_map = resolve_anchors_json_paths(config)
         steps = build_phase2_steps(config, anchors_json_by_camera=anchors_map)
-        for index, step in enumerate(steps, start=1):
+
+        def on_start(index: int, total: int, step: CommandStep) -> None:
+            nonlocal current_step
+            current_step = step.name
+            if step.camera_id:
+                cameras[step.camera_id] = describe_step(step.name)["message"]
             write_status(
                 config.job_dir,
-                {
-                    "state": "running",
-                    "message": f"Phase 2 step {index} of {len(steps)}: {step.name}",
-                    "current_step": step.name,
-                    "phase": 2,
-                },
+                running_status(
+                    step.name,
+                    phase=2,
+                    cameras=dict(sorted(cameras.items())) if step.camera_id else {},
+                ),
             )
-            run_command_step(step, cwd=repo_root, log_path=log_path)
 
+        def on_optional_failure(step: CommandStep, error: BaseException) -> None:
+            with notes_lock:
+                add_job_note(config.job_dir, overlay_skip_note(step))
+
+        run_steps(
+            steps,
+            cwd=repo_root,
+            log_path=log_path,
+            on_start=on_start,
+            parallel_cameras=config.parallel_cameras,
+            on_optional_failure=on_optional_failure,
+        )
+        report_step = build_session_report_step(config)
+        on_start(len(steps) + 1, len(steps) + 1, report_step)
+        run_command_step(report_step, cwd=repo_root, log_path=log_path)
+        current_step = "results zip"
+        write_status(config.job_dir, running_status(current_step, phase=2))
+
+        # Run record (timings, versions, outcome); written before the zip so
+        # the session's copy ships with the results.
+        from portal import run_log
+
+        run_log.write_run_record(config, "complete")
         zip_path = config.job_dir / f"{config.session_id}_results.zip"
         metadata_root = Path(config.session_id) / "portal_metadata"
         readme_path = config.job_dir / "README.md"
@@ -1433,6 +2226,7 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
             {
                 "state": "complete",
                 "message": "Processing complete.",
+                "stage": "report",
                 "current_step": None,
                 "result_zip": str(zip_path),
                 "artifacts": artifacts,
@@ -1441,11 +2235,14 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
     except Exception as error:
         write_status(
             config.job_dir,
-            {
-                "state": "failed",
-                "message": str(error),
-                "current_step": None,
-                "log_path": str(log_path),
-            },
+            failed_status(
+                failing_step_name(error, current_step),
+                error,
+                phase=2,
+                log_path=str(log_path),
+            ),
         )
+        from portal import run_log
+
+        run_log.write_run_record(config, "failed", error=error)
         raise

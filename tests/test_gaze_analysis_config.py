@@ -308,3 +308,24 @@ def test_filter_heatmaps_noop() -> None:
         heatmaps, keys, frame_ts, 0.0, float("inf")
     )
     assert len(filtered_keys) == 4
+
+
+def test_blocks_for_camera_uses_that_cameras_own_windows(tmp_path: Path) -> None:
+    """Each camera's metrics must use only its own task windows."""
+    by_camera = {
+        "camera_a": [{"name": "grocery", "start_s": 1175, "end_s": 1826}],
+        "camera_b": [{"name": "grocery", "start_s": 1213, "end_s": 1871}],
+    }
+    path = _write_config(tmp_path, {"session_blocks_by_camera": by_camera})
+    config = load_session_config(path)
+
+    a = config.blocks_for_camera("camera_a")
+    b = config.blocks_for_camera("camera_b")
+    assert [(blk.name, blk.start_s) for blk in a] == [("grocery", 1175)]
+    assert [(blk.name, blk.start_s) for blk in b] == [("grocery", 1213)]
+
+
+def test_blocks_for_camera_falls_back_to_shared_blocks(tmp_path: Path) -> None:
+    """Configs without per-camera blocks keep using session_blocks."""
+    config = load_session_config(_write_config(tmp_path))
+    assert config.blocks_for_camera("camera_b") == config.session_blocks
