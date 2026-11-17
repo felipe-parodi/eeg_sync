@@ -1124,7 +1124,7 @@ def overall_session_verdict(table: Any) -> tuple[str, str]:
     """Summarize a session's blocks as one verdict chip.
 
     When the ``quality_verdict`` column from
-    ``docs/metrics-validity_261116.md`` is present it decides: any
+    ``docs/plans/metrics-validity_261116.md`` is present it decides: any
     ``insufficient`` block gives "Not enough data", any ``check`` block gives
     "Check", otherwise "Looks OK". Until that column exists, the fallback uses
     ``coverage_both`` (share of the block with both people tracked): every

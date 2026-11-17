@@ -122,7 +122,7 @@ python -m video_inference.topdown_refine --camera-dir <camera_dir>
 
 `anchors.json` is the portal's format: a list of `{frame_idx, parent_track_id,
 child_track_id}` (or `{frame_idx, skipped: true}`) referring to `tracks_2d.csv`.
-Benchmark and rationale: `docs/pose-quality-overhaul_261009.md`.
+Benchmark and rationale: `docs/plans/pose-quality-overhaul_261009.md`.
 
 ### Per-camera outputs
 

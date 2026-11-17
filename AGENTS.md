@@ -15,7 +15,8 @@ Pose, gaze, and synchrony analysis pipeline for parent-child interaction videos,
 - `docs/PIPELINE.md` — stage-by-stage CLI reference (LLM-readable)
 - `docs/INPUTS.md` — input contract (folder layout, session_config, segment/exclusion formats)
 - `docs/OUTPUTS.md` — output catalog with column dictionaries for every CSV
-- `docs/GETTING_STARTED.md`, `docs/HOW_TO_USE_SYNC.md`, `docs/TUTORIAL_POSE_EEG.md`, `docs/CLOCK_DRIFT.md` — EEG-sync–side tutorials
+- `docs/eeg_sync/GETTING_STARTED.md`, `docs/eeg_sync/HOW_TO_USE_SYNC.md`, `docs/eeg_sync/TUTORIAL_POSE_EEG.md`, `docs/eeg_sync/CLOCK_DRIFT.md` — EEG-sync–side tutorials
+- `docs/plans/` — dated feature plans (`name_YYMMDD.md`) and the old portal roadmap; history and rationale, not current instructions
 - `templates/` — starter `session_config.example.json`, `segment_timings.example.csv`, `exclusion_windows.example.csv`
 
 ## Build & Run Commands

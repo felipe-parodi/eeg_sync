@@ -239,10 +239,10 @@ eeg_a_time = eeg_b_time + eeg_a_to_eeg_b_offset
 
 Tutorials for downstream EEG analysis:
 
-- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — first multi-modal analysis (≈10 min read)
-- [docs/HOW_TO_USE_SYNC.md](docs/HOW_TO_USE_SYNC.md) — using `sync_results.json` in code
-- [docs/TUTORIAL_POSE_EEG.md](docs/TUTORIAL_POSE_EEG.md) — joining pose data to EEG
-- [docs/CLOCK_DRIFT.md](docs/CLOCK_DRIFT.md) — when single-point sync isn't enough
+- [docs/eeg_sync/GETTING_STARTED.md](docs/eeg_sync/GETTING_STARTED.md) — first multi-modal analysis (≈10 min read)
+- [docs/eeg_sync/HOW_TO_USE_SYNC.md](docs/eeg_sync/HOW_TO_USE_SYNC.md) — using `sync_results.json` in code
+- [docs/eeg_sync/TUTORIAL_POSE_EEG.md](docs/eeg_sync/TUTORIAL_POSE_EEG.md) — joining pose data to EEG
+- [docs/eeg_sync/CLOCK_DRIFT.md](docs/eeg_sync/CLOCK_DRIFT.md) — when single-point sync isn't enough
 
 ### Interactive video viewer controls
 

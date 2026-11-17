@@ -62,7 +62,7 @@ DEFAULT_SUPPORT_CONTACT = "Felipe"
 # Tracker used in phase 1. "offline" replaced BoT-SORT after a benchmark on 31
 # camera views of past portal sessions (pose_training/bench.py): frames with
 # both parent and child 0.52 -> 0.73, role accuracy on held-out anchor labels
-# 0.78 -> 0.99. See docs/pose-quality-overhaul_261009.md.
+# 0.78 -> 0.99. See docs/plans/pose-quality-overhaul_261009.md.
 PORTAL_TRACKER_BACKEND = "offline"
 PORTAL_TRACKER_NAME = "two_person_offline"
 DETECTION_CACHE_RELPATH = Path("intermediate") / "detections.npz"

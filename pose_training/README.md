@@ -6,7 +6,7 @@ result, to improve pose quality on this domain (parent-child interaction,
 overhead/wide GoPro angles, occlusion). The keypoint layout stays COCO-17, so
 every downstream stage (gaze head bbox, overlays, metrics) works unchanged.
 
-Plan and rationale: [`docs/pseudo-label-pose-train_260531.md`](../docs/pseudo-label-pose-train_260531.md).
+Plan and rationale: [`docs/plans/pseudo-label-pose-train_260531.md`](../docs/plans/pseudo-label-pose-train_260531.md).
 
 Labeling is fully automatic (no manual keypoint correction). The teacher is the
 quality ceiling, so the pipeline invests in a strong teacher pass (higher

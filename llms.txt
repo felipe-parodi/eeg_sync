@@ -62,10 +62,10 @@
 - [sync_eeg_vid/sync_pipeline.py](sync_eeg_vid/sync_pipeline.py): `sync_two_eeg_files`, `sync_eeg_to_video`, `sync_videos`
 - [sync_eeg_vid/eeg_io.py](sync_eeg_vid/eeg_io.py): OpenBCI parsing + IR pulse detection
 - [sync_eeg_vid/viewer.py](sync_eeg_vid/viewer.py): OpenCV frame viewer
-- [docs/HOW_TO_USE_SYNC.md](docs/HOW_TO_USE_SYNC.md): using `sync_results.json` in analysis
-- [docs/TUTORIAL_POSE_EEG.md](docs/TUTORIAL_POSE_EEG.md): joining pose data to EEG
-- [docs/CLOCK_DRIFT.md](docs/CLOCK_DRIFT.md): when single-point sync isn't enough
-- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md): first multi-modal analysis
+- [docs/eeg_sync/HOW_TO_USE_SYNC.md](docs/eeg_sync/HOW_TO_USE_SYNC.md): using `sync_results.json` in analysis
+- [docs/eeg_sync/TUTORIAL_POSE_EEG.md](docs/eeg_sync/TUTORIAL_POSE_EEG.md): joining pose data to EEG
+- [docs/eeg_sync/CLOCK_DRIFT.md](docs/eeg_sync/CLOCK_DRIFT.md): when single-point sync isn't enough
+- [docs/eeg_sync/GETTING_STARTED.md](docs/eeg_sync/GETTING_STARTED.md): first multi-modal analysis
 
 ## Configuration
 

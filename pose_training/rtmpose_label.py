@@ -7,7 +7,7 @@ any single teacher. It also supplies its own boxes (derived from keypoints),
 adding genuine box diversity to the fusion.
 
 Output uses the SAME ``pseudo_labels_raw.json`` schema as the other teachers.
-See docs/vitpose-teacher_260531.md (fusion plan).
+See docs/plans/vitpose-teacher_260531.md (fusion plan).
 """
 
 from __future__ import annotations

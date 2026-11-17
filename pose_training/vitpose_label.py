@@ -8,7 +8,7 @@ the current portal model on those cases.
 
 Output is written in the SAME ``pseudo_labels_raw.json`` schema as
 ``pseudo_label.py``, so ``dataset.py`` / ``train.py`` / ``evaluate.py`` consume
-it unchanged. See docs/vitpose-teacher_260531.md.
+it unchanged. See docs/plans/vitpose-teacher_260531.md.
 """
 
 from __future__ import annotations
