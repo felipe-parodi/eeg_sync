@@ -212,7 +212,7 @@ Writes `tracks_2d_corrected.csv`, `pose_3d_corrected.csv`. Use these as inputs t
 
 ## Stage 4 — `video-interpolate` (optional)
 
-Linearly upsamples low-FPS outputs (e.g. 1 fps → 8 fps). Gap-aware: won't interpolate across `--max-gap-s` (default ~10 frames worth). Usually **not needed** if you ran inference at 5 fps already.
+Fills short gaps (at most `--max-gap-seconds`, default 1 s) by straight-line interpolation at the extracted frame times listed in `frames/frame_index.csv`. Longer gaps stay empty, and filling never crosses from one block into another. Filled rows are flagged `interpolated`.
 
 ```bash
 video-interpolate \
