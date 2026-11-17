@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import math
@@ -105,39 +106,148 @@ def validate_startup_configuration() -> None:
     portal_secret_key()
 
 
-def purge_all_jobs() -> int:
-    """Delete every job directory and matching upload-chunk directory.
+# Jobs in these states are doing work; a restart interrupts them.
+ACTIVE_STATES = frozenset({"uploading", "queued", "running"})
+# An upload whose status has not changed for this long was abandoned (browser
+# closed) and must not block a restart forever.
+STALE_UPLOAD_S = 30 * 60
+# Exit code that tells start-portal.ps1 to start the server again (the
+# tunnel keeps running, so the public link stays the same).
+RESTART_EXIT_CODE = 3
+RESTART_FLAG_NAME = ".restart_requested"
+RESTART_POLL_S = 10.0
+
+
+def restart_flag_path() -> Path:
+    """File whose presence asks the portal to restart when idle."""
+    return JOB_ROOT / RESTART_FLAG_NAME
+
+
+def request_restart() -> Path:
+    """Ask the running portal to restart as soon as no job is running.
 
     Returns:
-        Number of job directories removed.
-
-    Note:
-        Restarting the portal is treated as a clean slate: no job state,
-        completed downloads, or failed-job logs survive. Only direct
-        subdirectories under JOB_ROOT/UPLOAD_ROOT are removed; loose log
-        files (tunnel, server) are left alone.
+        The request file written.
     """
+    JOB_ROOT.mkdir(parents=True, exist_ok=True)
+    flag = restart_flag_path()
+    flag.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+    return flag
+
+
+def _job_dirs() -> list[Path]:
     if not JOB_ROOT.exists():
-        return 0
-    removed = 0
-    for job_dir in JOB_ROOT.iterdir():
-        if not job_dir.is_dir():
+        return []
+    return [
+        d for d in JOB_ROOT.iterdir() if d.is_dir() and (d / "status.json").exists()
+    ]
+
+
+def portal_is_idle(now: float | None = None) -> bool:
+    """True when no job is uploading, queued or running.
+
+    Jobs waiting for parent labels do not count: a restart keeps them.
+    Uploads untouched for ``STALE_UPLOAD_S`` count as abandoned.
+    """
+    now = time.time() if now is None else now
+    for job_dir in _job_dirs():
+        state = str(read_status(job_dir).get("state", ""))
+        if state not in ACTIVE_STATES:
             continue
-        upload_dir = UPLOAD_ROOT / job_dir.name
-        shutil.rmtree(job_dir, ignore_errors=True)
-        shutil.rmtree(upload_dir, ignore_errors=True)
-        removed += 1
-    return removed
+        if state == "uploading":
+            age = now - (job_dir / "status.json").stat().st_mtime
+            if age > STALE_UPLOAD_S:
+                continue
+        return False
+    return True
+
+
+def restart_due() -> bool:
+    """Consume a pending restart request if the portal is idle.
+
+    Returns:
+        True when a restart was requested and nothing is running (the request
+        file is then removed); False otherwise.
+    """
+    flag = restart_flag_path()
+    if not flag.exists() or not portal_is_idle():
+        return False
+    flag.unlink(missing_ok=True)
+    return True
+
+
+def tidy_jobs_on_startup() -> dict[str, int]:
+    """Keep job folders across restarts and clean up what cannot continue.
+
+    - Every job folder is kept, so finished and failed jobs stay listed.
+    - Jobs that were uploading, queued or running are marked failed with a
+      plain "the portal was restarted" message (their work stopped).
+    - Uploaded videos are kept only for jobs waiting for parent labels (phase
+      2 needs them); others, and uploads without a job folder, are removed.
+
+    Returns:
+        Counts: ``kept`` job folders, ``interrupted`` jobs, ``uploads_removed``.
+    """
+    summary = {"kept": 0, "interrupted": 0, "uploads_removed": 0}
+    keep_uploads: set[str] = set()
+    for job_dir in _job_dirs():
+        summary["kept"] += 1
+        status = read_status(job_dir)
+        state = str(status.get("state", ""))
+        if state in ACTIVE_STATES:
+            write_status(
+                job_dir,
+                {
+                    **status,
+                    "state": "failed",
+                    "message": (
+                        "The portal was restarted while this job was in progress, "
+                        "so it stopped. Please submit the session again."
+                    ),
+                    "error": f"Interrupted by a portal restart (state was {state}).",
+                },
+            )
+            summary["interrupted"] += 1
+        elif state == "awaiting_annotation":
+            keep_uploads.add(job_dir.name)
+    if UPLOAD_ROOT.exists():
+        for upload_dir in UPLOAD_ROOT.iterdir():
+            if upload_dir.is_dir() and upload_dir.name not in keep_uploads:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+                summary["uploads_removed"] += 1
+    return summary
+
+
+async def _restart_when_idle_loop() -> None:
+    """Exit with ``RESTART_EXIT_CODE`` once a restart is requested and idle."""
+    while True:
+        await asyncio.sleep(RESTART_POLL_S)
+        try:
+            due = restart_due()
+        except OSError:
+            due = False
+        if due:
+            print(
+                "Restart requested and no job is running: restarting now.", flush=True
+            )
+            os._exit(RESTART_EXIT_CODE)
 
 
 @asynccontextmanager
 async def portal_lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Validate portal configuration and wipe all jobs on startup."""
+    """Validate configuration, tidy jobs, and watch for restart requests."""
     validate_startup_configuration()
-    removed = purge_all_jobs()
-    if removed:
-        print(f"Purged {removed} job(s) from a previous run.")
-    yield
+    summary = tidy_jobs_on_startup()
+    if summary["interrupted"]:
+        print(
+            f"Marked {summary['interrupted']} job(s) interrupted by the restart.",
+            flush=True,
+        )
+    watcher = asyncio.create_task(_restart_when_idle_loop())
+    try:
+        yield
+    finally:
+        watcher.cancel()
 
 
 PORTAL_PACKAGE_DIR = Path(__file__).resolve().parent

@@ -168,7 +168,16 @@ if (-not $NoTunnel) {
 Write-Host "Launching portal on port $portForBanner (Ctrl+C to stop) ..."
 
 try {
-    uv run video-processing-portal
+    # Exit code 3 = restart requested with `uv run python -m portal.restart`
+    # and no job running: start the server again with the new code. The
+    # tunnel keeps running, so the public URL stays the same.
+    do {
+        uv run video-processing-portal
+        $portalExit = $LASTEXITCODE
+        if ($portalExit -eq 3) {
+            Write-Host "Restarting the portal with the latest code (same public URL) ..."
+        }
+    } while ($portalExit -eq 3)
 } finally {
     if ($tunnelProc -and -not $tunnelProc.HasExited) {
         Write-Host "Stopping tunnel ..."

@@ -66,49 +66,6 @@ def test_portal_password_and_secret_must_be_configured(monkeypatch) -> None:
         portal_app.portal_secret_key()
 
 
-def test_purge_all_jobs_removes_every_job_regardless_of_state(
-    monkeypatch, tmp_path: Path
-) -> None:
-    job_root = tmp_path / "jobs"
-    upload_root = tmp_path / "uploads"
-    job_root.mkdir()
-    upload_root.mkdir()
-
-    states = {
-        "20260101_000000_PXXX_upload": "uploading",
-        "20260101_000001_PXXX_done": "completed",
-        "20260101_000002_PXXX_fail": "failed",
-    }
-    for job_id, state in states.items():
-        job_dir = job_root / job_id
-        job_dir.mkdir()
-        write_status(job_dir, {"state": state, "message": "x"})
-        upload_dir = upload_root / job_id
-        upload_dir.mkdir()
-        (upload_dir / "chunk_0001.part").write_bytes(b"partial")
-    # A loose log file in JOB_ROOT should not be touched.
-    loose_log = job_root / "server.out.log"
-    loose_log.write_text("server log", encoding="utf-8")
-
-    monkeypatch.setattr(portal_app, "JOB_ROOT", job_root)
-    monkeypatch.setattr(portal_app, "UPLOAD_ROOT", upload_root)
-
-    removed = portal_app.purge_all_jobs()
-
-    assert removed == len(states)
-    for job_id in states:
-        assert not (job_root / job_id).exists()
-        assert not (upload_root / job_id).exists()
-    assert loose_log.exists()
-
-
-def test_purge_all_jobs_handles_missing_job_root(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(portal_app, "JOB_ROOT", tmp_path / "does_not_exist")
-    monkeypatch.setattr(portal_app, "UPLOAD_ROOT", tmp_path / "uploads")
-
-    assert portal_app.purge_all_jobs() == 0
-
-
 def test_run_chunked_portal_job_records_failure_and_does_not_raise(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:

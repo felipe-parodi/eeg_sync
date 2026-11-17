@@ -58,8 +58,14 @@ In the browser the user:
 
 The job page shows per-block tracking coverage. It also links to an optional
 gaze labeling page, which builds a small human-coded set for checking gaze
-accuracy on the lab's own videos. Restarting the portal clears its job list,
-but each session's outputs in `video_inference/output/<session>/` stay.
+accuracy on the lab's own videos.
+
+To load new code without interrupting anyone, run
+`uv run python -m portal.restart`: the portal restarts by itself as soon as no
+job is uploading, queued or running (jobs waiting for parent labels are kept),
+and the public link stays the same. A restart keeps the job list; jobs that
+were mid-run when the portal stopped are marked interrupted. Every job also
+writes a run record to `video_inference/output/portal_runs.jsonl`.
 
 ---
 
