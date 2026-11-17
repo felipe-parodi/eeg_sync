@@ -554,18 +554,28 @@ details.explainer[open] { padding-bottom: var(--space-4); }
 .anchor-state { font-weight: 600; }
 
 /* ---- Gaze labeling page (/jobs/{id}/gaze-label) ------------------------- */
+/* Same look as the parent-labeling cards: tinted once both people have an
+   answer; the chosen answer gets a check mark and an outline. */
+.gaze-intro input#labeler { max-width: 10em; }
+.person { font-weight: 700; }
+.person--parent { color: #1f8a4c; }
+.person--child { color: #b35c00; }
 .gcard {
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  border: 2px solid var(--color-border);
   border-radius: var(--radius-lg);
   padding: var(--space-3);
-  margin: var(--space-3) 0;
+  margin: var(--space-3) 0 var(--space-4);
 }
+.gcard.is-labeled { border-color: var(--color-ok-edge); background: var(--color-ok-bg); }
+.gcard.is-partial { border-color: var(--color-warn-edge); }
+.gcard__caption { font-size: var(--text-sm); color: var(--color-text-muted); margin-bottom: var(--space-2); }
 .gcard canvas { width: 100%; max-width: 854px; cursor: crosshair; display: block; border-radius: var(--radius-md); }
-.grow { margin: var(--space-2) 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.grow { margin: var(--space-3) 0 0; display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.grow > strong { flex: 0 0 100%; font-size: var(--text-sm); }
 .grow button {
-  min-height: 32px;
-  padding: var(--space-1) var(--space-2);
+  min-height: 36px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid var(--color-border-strong);
   background: var(--color-surface);
   border-radius: var(--radius-md);
@@ -573,9 +583,15 @@ details.explainer[open] { padding-bottom: var(--space-4); }
   font-weight: 500;
 }
 .grow button:hover { background: var(--color-neutral-bg); color: var(--color-text); }
-.grow button.chosen { background: var(--color-text); color: #ffffff; border-color: var(--color-text); }
-.grow button.armed { outline: 3px solid var(--color-warn-edge); }
-#labeler { width: 6em; display: inline-block; margin-left: var(--space-2); }
+.grow button.chosen {
+  outline: 3px solid var(--color-text);
+  outline-offset: 1px;
+  font-weight: 700;
+  background: var(--color-surface);
+}
+.grow button.chosen::before { content: "✓ "; }
+.grow button.mark-btn { border-style: dashed; color: var(--color-accent-strong); }
+.grow button.armed { outline: 3px solid var(--color-warn-edge); background: var(--color-warn-bg); }
 
 /* ---- New-session form (/new) --------------------------------------------- */
 form.steps-form { background: none; border: 0; box-shadow: none; padding: 0; }
@@ -805,6 +821,7 @@ label.check { display: flex; align-items: center; font-weight: 600; margin: var(
 .anchor-card.is-skipped { border-color: var(--color-neutral-edge); background: var(--color-neutral-bg); }
 .anchor-frame { position: relative; line-height: 0; }
 .anchor-frame img { width: 100%; height: auto; border-radius: var(--radius-sm); }
+.anchor-frame a { display: block; cursor: zoom-in; }
 .anchor-frame svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .anchor-frame .box-parent { fill: none; stroke: #fff; stroke-width: 4; stroke-dasharray: 10 6; }
 .anchor-frame .box-parent-label { fill: #fff; paint-order: stroke; stroke: #000; stroke-width: 4; font-weight: 700; }

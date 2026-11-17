@@ -3,6 +3,7 @@
   const D = JSON.parse(document.getElementById("gaze-data").textContent);
   const COLORS = { parent: "#1f8a4c", child: "#d9730d" };
   const NAMES = { parent: "Parent", child: "Child" };
+  const CAMERAS = { camera_a: "Video A", camera_b: "Video B" };
   const state = {}; // "cam|frame|person" -> {target, point}
   for (const [cam, labels] of Object.entries(D.existing)) {
     for (const l of labels) {
@@ -18,21 +19,31 @@
     document.getElementById("progress").textContent = done + " of " + total + " answers";
   }
 
+  // Tint a card once both people have an answer (presentation only).
+  function refreshCard(card, cam, frame) {
+    const answered = ["parent", "child"].filter((p) => {
+      const s = state[cam + "|" + frame + "|" + p];
+      return s && s.target;
+    }).length;
+    card.classList.toggle("is-labeled", answered === 2);
+    card.classList.toggle("is-partial", answered === 1);
+  }
+
   function clock(t) {
     return Math.floor(t / 60) + ":" + String(Math.round(t % 60)).padStart(2, "0");
   }
 
   for (const [cam, items] of Object.entries(D.items)) {
     const h = document.createElement("h3");
-    h.textContent = cam;
+    h.textContent = CAMERAS[cam] || cam;
     cards.appendChild(h);
     items.forEach((it, i) => {
       const card = document.createElement("div");
       card.className = "gcard";
       const cap = document.createElement("div");
-      cap.className = "muted";
+      cap.className = "gcard__caption";
       cap.textContent =
-        cam + ", frame " + (i + 1) + " of " + items.length + " (" + it.block + ", " + clock(it.timestamp_s) + ")";
+        (CAMERAS[cam] || cam) + ", frame " + (i + 1) + " of " + items.length + " (" + it.block + ", " + clock(it.timestamp_s) + ")";
       const canvas = document.createElement("canvas");
       const img = new Image();
       img.src = D.frames_url + cam + "/" + it.image_name;
@@ -77,7 +88,7 @@
         const row = document.createElement("div");
         row.className = "grow";
         const lab = document.createElement("strong");
-        lab.style.color = COLORS[p];
+        lab.className = "person person--" + p;
         lab.textContent = NAMES[p] + " is looking at:";
         row.appendChild(lab);
         const key = cam + "|" + it.frame_idx + "|" + p;
@@ -86,12 +97,17 @@
           const b = document.createElement("button");
           b.type = "button";
           b.textContent = text;
-          if (state[key] && state[key].target === value) b.classList.add("chosen");
+          const chosen = Boolean(state[key] && state[key].target === value);
+          b.classList.toggle("chosen", chosen);
+          b.setAttribute("aria-pressed", chosen ? "true" : "false");
           b.onclick = () => {
             state[key] = state[key] || {};
             state[key].target = value;
-            btns.forEach((x) => x.classList.remove("chosen"));
-            b.classList.add("chosen");
+            btns.forEach((x) => {
+              x.classList.toggle("chosen", x === b);
+              x.setAttribute("aria-pressed", x === b ? "true" : "false");
+            });
+            refreshCard(card, cam, it.frame_idx);
             progress();
           };
           btns.push(b);
@@ -100,6 +116,7 @@
         const mark = document.createElement("button");
         mark.type = "button";
         mark.textContent = "Mark spot";
+        mark.className = "mark-btn";
         mark.onclick = () => {
           if (armed) armed.button.classList.remove("armed");
           armed = { card, person: p, button: mark };
@@ -108,6 +125,7 @@
         row.appendChild(mark);
         card.appendChild(row);
       }
+      refreshCard(card, cam, it.frame_idx);
       cards.appendChild(card);
     });
   }

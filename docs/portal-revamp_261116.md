@@ -75,6 +75,33 @@ Branch: `feat/portal-revamp` (from `feat/pose-quality-overhaul`).
   or skipped; the chosen parent's box is outlined on the frame from
   `bbox_xyxy`; "N of M labeled (K skipped)" counter. No minimum-anchor
   confirm (dropped with the scope trim). Visual check by the user pending.
+- Phase 6 done (2026-11-16, trimmed): no separate results page. The
+  session's `report.html` (served at `/sessions/{id}`, also in the zip) is
+  the results page: session id and cameras, then the task table from
+  `collect_task_rows` (verdict chip with symbol and plain reasons, usable
+  time as "3 min 12 s", coverage, median distance, synchrony with chance or
+  "too few unbroken 20-second stretches", gaze with chance), a note that
+  pieces are joined and inclusion is the lab's decision, the per-piece
+  table under a collapsed "Per piece", and overlay clips as
+  `<video controls preload="none">` with relative sources and download
+  links, grouped by block. Styling inlines the portal tokens (offline,
+  no external requests); the task table stacks on phones. Home page:
+  "Download study task table" (`/metrics/all_sessions_task_metrics.csv`,
+  auth, 404 when missing; written by the session-report step via
+  `--all-sessions-root`). Finished job page: "Open results" button next to
+  the zip download. Numbers, columns and CSVs unchanged.
+- Phase 7 done (2026-11-16): gaze labeling page restyled with the shared
+  CSS (intro card, sticky counter, cards tinted when both people are
+  answered, chosen answer with check mark, outline and `aria-pressed`); no
+  behaviour or payload change. Failure messages name
+  `PORTAL_SUPPORT_CONTACT` (default "Felipe"). Parent-labeling frames open
+  larger in a new tab on click.
+- **Revamp complete.** Trimmed from the original plan: separate results
+  page and authenticated clip route (the report and the existing session
+  file route cover both), guidance box beyond the task-table note,
+  click-on-image labeling, keyboard shortcuts, auto-advance, the
+  minimum-anchor confirm dialog, elapsed timers and progress bars. Visual
+  check by the user pending for Phases 2-7.
 
 ## Phase 1: Template infrastructure (pure refactor)
 

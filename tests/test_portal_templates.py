@@ -411,3 +411,15 @@ def test_static_assets_have_browser_content_types(portal_env: Path) -> None:
     assert "javascript" in js.headers["content-type"]
     assert anonymous.get("/static/missing.js").status_code == 404
     assert anonymous.get("/static/../app.py").status_code == 404
+
+
+def test_gaze_label_page_uses_shared_card_layout(
+    client: TestClient, portal_env: Path
+) -> None:
+    _gaze_job(portal_env)
+
+    text = client.get(f"/jobs/{JOB_ID}/gaze-label").text
+
+    assert 'class="card gaze-intro"' in text
+    assert 'class="annotate-progress" id="progress"' in text
+    assert 'style="color:' not in text  # colors come from the shared CSS

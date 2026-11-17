@@ -829,3 +829,28 @@ def test_failed_job_page_escapes_support_contact(
     text = client.get(f"/jobs/{JOB_ID}").text
 
     assert "send them to &lt;b&gt;Lab&lt;/b&gt;." in text
+
+
+def test_annotate_frames_open_larger_in_new_tab(
+    client: TestClient, portal_env: Path
+) -> None:
+    _anchor_job(portal_env)
+
+    text = client.get(f"/jobs/{JOB_ID}/annotate").text
+
+    assert text.count('target="_blank" rel="noopener"') == 3
+    assert f'<a href="/jobs/{JOB_ID}/anchors/camera_a/' in text
+
+
+def test_gaze_label_script_keeps_the_payload_shape() -> None:
+    script = (Path(portal_app.__file__).parent / "static" / "gaze_label.js").read_text(
+        encoding="utf-8"
+    )
+    for key in ("frame_idx: Number(frame)", "timestamp_s: it.timestamp_s", "person,"):
+        assert key in script
+    assert "target: v.target," in script and "point: v.point || null," in script
+    assert (
+        'JSON.stringify({ labeler: document.getElementById("labeler").value, labels })'
+        in script
+    )
+    assert '"x-csrf-token": D.csrf' in script
