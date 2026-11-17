@@ -55,15 +55,15 @@ BLOCK_COLORS = {
 # flagged: their metrics describe only part of the block.
 LOW_COVERAGE_THRESHOLD = 0.5
 
-# Data-check defaults behind ``quality_verdict``. These describe whether the
-# numbers rest on enough data; they are not the lab's inclusion rule, which is
-# a study decision made before looking at results.
-# A block with less than this much time with both people tracked has too little
-# data for its numbers to mean much.
-MIN_VALID_SECONDS = 60.0
-# Movement synchrony needs at least this many 20 s windows (unbroken stretches
-# with both people tracked); with fewer it is not reported.
-MIN_SYNC_WINDOWS = 3
+# Thresholds behind ``quality_verdict``; "usable" is the recommended inclusion
+# rule for a task (pieces joined). Basis (2026-11-16, 1011v3-1020v3): across
+# dyads, distance from a 2 min sample correlates r = 0.85 with the full-task
+# value, and synchrony from 10 windows r ~ 0.87 (3 windows only r = 0.66).
+# Need at least this much time with both people tracked.
+MIN_VALID_SECONDS = 120.0
+# Movement synchrony needs at least this many 20 s windows (about 2 minutes of
+# unbroken tracking); with fewer it is not reported.
+MIN_SYNC_WINDOWS = 10
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +129,8 @@ def quality_verdict(stats: Dict[str, Any]) -> tuple[str, str]:
     ``insufficient`` when both people are tracked for less than
     ``MIN_VALID_SECONDS``; ``check`` when coverage is below
     ``LOW_COVERAGE_THRESHOLD`` or there are fewer than ``MIN_SYNC_WINDOWS``
-    synchrony windows; otherwise ``usable``. This is a guide for looking at
-    the overlay clips, not an inclusion rule.
+    synchrony windows; otherwise ``usable``. ``usable`` is the recommended
+    inclusion rule, together with a check of the overlay clips.
 
     Args:
         stats: Row with ``valid_seconds_both``, ``coverage_both`` and

@@ -325,8 +325,8 @@ def _split_session_with_valid_time(session: Path) -> None:
     blocks = json.loads(path.read_text(encoding="utf-8"))
     for block in blocks:
         block["valid_seconds_both"] = {
-            "grocery_part1": 25.0,
-            "grocery_part2": 50.0,
+            "grocery_part1": 50.0,
+            "grocery_part2": 100.0,
             "storybook": 90.0,
         }[block["block"]]
     path.write_text(json.dumps(blocks), encoding="utf-8")
@@ -341,14 +341,14 @@ def test_report_task_table_has_verdict_chips_and_reasons(tmp_path: Path) -> None
     html = render_report_html(session, collect_session_rows(session))
 
     assert 'class="task-table' in html
-    # grocery: 75 s valid, 450/660 = 68% coverage, 10 windows -> usable.
+    # grocery: 150 s valid, 450/660 = 68% coverage, 10 windows -> usable.
     assert "chip--ok" in html and "Usable" in html
-    assert "1 min 15 s" in html  # pooled usable time of the two pieces
+    assert "2 min 30 s" in html  # pooled usable time of the two pieces
     assert "1 min 30 s" in html  # storybook
     # Verdict text comes with a symbol, not color alone.
     assert 'class="chip__icon" aria-hidden="true">✓<' in html
-    # Pieces are joined and inclusion is left to the lab.
-    assert "joined" in html and "lab" in html
+    # Pieces are joined and the recommended inclusion rule is stated.
+    assert "joined" in html and "Recommended rule" in html
     # Per-piece table kept, collapsed.
     assert "<details" in html and "Per piece" in html
     assert "grocery_part2" in html

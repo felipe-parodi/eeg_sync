@@ -231,3 +231,28 @@ def test_block_stats_include_quality_verdict():
     ):
         assert key in stats
     assert stats["quality_verdict"] in {"usable", "check", "insufficient"}
+
+
+def test_verdict_thresholds_match_lab_recommendation():
+    """Usable needs >= 2 min with both people tracked and >= 10 synchrony
+    windows (from the 2026-11-16 reliability check on 1011-1020)."""
+    from video_analysis.pose_metrics import quality_verdict
+
+    assert (
+        quality_verdict(
+            {"valid_seconds_both": 100.0, "coverage_both": 0.9, "sync_n_windows": 20}
+        )[0]
+        == "insufficient"
+    )
+    assert (
+        quality_verdict(
+            {"valid_seconds_both": 300.0, "coverage_both": 0.9, "sync_n_windows": 5}
+        )[0]
+        == "check"
+    )
+    assert (
+        quality_verdict(
+            {"valid_seconds_both": 300.0, "coverage_both": 0.9, "sync_n_windows": 10}
+        )[0]
+        == "usable"
+    )

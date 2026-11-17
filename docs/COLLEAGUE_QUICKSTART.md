@@ -89,16 +89,31 @@ the overlay clips play in the page.
 with skeletons drawn. Make sure the boxes follow the parent and the child,
 not someone else or an object.
 
-**The verdict** next to each block is a data check, not a decision:
+**The verdict** next to each task says whether there is enough data:
 
 | Verdict | Meaning |
 |---|---|
-| Usable | Enough data with both people tracked. |
-| Check | Both people tracked less than half the time, or too few unbroken 20-second stretches to measure movement synchrony. Watch the clips. |
-| Not enough data | Both people tracked for less than 60 s in total. |
+| Usable | Both people tracked for at least 2 minutes and at least 10 unbroken 20-second stretches for movement synchrony. |
+| Check | Both people tracked less than half the time, or fewer than 10 unbroken 20-second stretches (movement synchrony is then not shown). Watch the clips. |
+| Not enough data | Both people tracked for less than 2 minutes in total. |
 
-Which blocks to include in analyses is a lab decision. Make it before looking
-at the results, and use the same rule for every session.
+**Recommended inclusion rule** (use it for every session, decided before
+looking at results):
+
+1. For each task, use the camera with more usable time. Do not average the
+   two cameras; distances in pixels differ between them.
+2. Include distance and gaze for a task when both people are tracked for at
+   least 2 minutes (`valid_seconds_both` >= 120).
+3. Include movement synchrony only with at least 10 windows
+   (`sync_n_windows` >= 10).
+4. Exclude any task whose clips show the boxes on the wrong person or an
+   object, whatever its numbers.
+5. Report usable time (or coverage) as a covariate; missing time is not
+   random, because the child is lost mostly when moving around.
+
+Why these numbers: on sessions 1011-1020, 2 minutes of data rank dyads'
+distance almost like the whole task (r = 0.85), and 10 synchrony windows do
+the same for synchrony (r ~ 0.87); with 3 windows it is only r = 0.66.
 
 **The tables** (in the session folder and the zip):
 

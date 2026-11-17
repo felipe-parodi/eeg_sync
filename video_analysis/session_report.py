@@ -669,8 +669,11 @@ def render_report_html(
 <p class="muted">When extra-person windows cut a task into pieces, the pieces
 are joined here: distances and synchrony windows are pooled across them. The
 data check says whether there is enough data behind the numbers and which
-clips to watch. Which tasks to include in analyses is the lab's decision;
-make it the same way for every session.</p>
+clips to watch. <strong>Recommended rule:</strong> for each task use the camera
+with more usable time; include distance and gaze when both people are tracked
+for at least 2 minutes, and movement synchrony only with at least 10 windows
+(both together give "Usable"); exclude any task whose clips show the wrong
+person or an object.</p>
 <details class="pieces"><summary>Per piece ({len(rows)} rows)</summary>
 <div class="table-wrap"><table>{head}{"".join(body)}</table></div>
 </details>
