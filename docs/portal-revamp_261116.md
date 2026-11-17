@@ -70,6 +70,11 @@ Branch: `feat/portal-revamp` (from `feat/pose-quality-overhaul`).
   (finding 8). Check clips are `optional` steps: a failure becomes a job note
   and the job continues; frames with nobody tracked render raw (finding 4).
   Visual check by the user pending.
+- Phase 5 done (2026-11-16, trimmed): same buttons; the selected button gets
+  a check mark, outline and `aria-pressed`; the card is tinted when labeled
+  or skipped; the chosen parent's box is outlined on the frame from
+  `bbox_xyxy`; "N of M labeled (K skipped)" counter. No minimum-anchor
+  confirm (dropped with the scope trim). Visual check by the user pending.
 
 ## Phase 1: Template infrastructure (pure refactor)
 

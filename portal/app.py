@@ -2253,7 +2253,15 @@ def annotate_job(
                 bgr = track.get("color_bgr", [0, 0, 0])
                 # Manifest colors are OpenCV BGR; CSS wants r,g,b.
                 rgb = f"{int(bgr[2])},{int(bgr[1])},{int(bgr[0])}"
-                tracks.append({"track_id": int(track["track_id"]), "rgb": rgb})
+                box = track.get("bbox_xyxy")
+                bbox = (
+                    ",".join(f"{float(v):g}" for v in box)
+                    if isinstance(box, list) and len(box) == 4
+                    else ""
+                )
+                tracks.append(
+                    {"track_id": int(track["track_id"]), "rgb": rgb, "bbox": bbox}
+                )
             cards.append(
                 {
                     "anchor_idx": int(entry["anchor_idx"]),
@@ -2263,7 +2271,13 @@ def annotate_job(
                     "tracks": tracks,
                 }
             )
-        cameras.append({"camera_id": camera_id, "cards": cards})
+        cameras.append(
+            {
+                "camera_id": camera_id,
+                "label": VIDEO_LABELS.get(camera_id, camera_id),
+                "cards": cards,
+            }
+        )
     # The page is GET-only; the form's POST goes through require_csrf, so the
     # token is handed to annotate.js through a data attribute on the form.
     csrf = csrf_token_for_session(session_token)
@@ -2273,6 +2287,7 @@ def annotate_job(
         session_token=session_token,
         job_id=safe_job_id,
         cameras=cameras,
+        total_cards=sum(len(camera["cards"]) for camera in cameras),
         csrf_token=csrf,
     )
 

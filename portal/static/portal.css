@@ -780,3 +780,40 @@ label.check { display: flex; align-items: center; font-weight: 600; margin: var(
 .tech-details pre { max-height: 24rem; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 .job-notes li { margin-bottom: var(--space-1); }
 
+/* ---------- Parent labeling page ---------- */
+.annotate-progress {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--color-bg);
+  padding: var(--space-2) 0;
+  font-weight: 600;
+}
+.anchor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--space-4);
+}
+.anchor-card {
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.anchor-card.is-labeled { border-color: var(--color-ok-edge); background: var(--color-ok-bg); }
+.anchor-card.is-skipped { border-color: var(--color-neutral-edge); background: var(--color-neutral-bg); }
+.anchor-frame { position: relative; line-height: 0; }
+.anchor-frame img { width: 100%; height: auto; border-radius: var(--radius-sm); }
+.anchor-frame svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.anchor-frame .box-parent { fill: none; stroke: #fff; stroke-width: 4; stroke-dasharray: 10 6; }
+.anchor-frame .box-parent-label { fill: #fff; paint-order: stroke; stroke: #000; stroke-width: 4; font-weight: 700; }
+.anchor-card figcaption { font-size: var(--text-sm); color: var(--color-text-muted); margin: var(--space-2) 0; }
+.anchor-buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.anchor-buttons button { flex: 1 1 auto; }
+.anchor-buttons button.chosen { outline: 3px solid var(--color-text); outline-offset: 2px; font-weight: 700; }
+.anchor-buttons button.chosen::before { content: "✓ "; }
+.anchor-buttons .skip-btn { background: var(--color-surface); color: var(--color-text); border: 1px solid var(--color-border-strong); }
+.anchor-buttons .skip-btn.chosen { background: var(--color-neutral-bg); }
+.anchor-state { margin-top: var(--space-2); font-size: var(--text-sm); font-weight: 600; }
+.anchor-card.is-labeled .anchor-state { color: var(--color-ok-text); }

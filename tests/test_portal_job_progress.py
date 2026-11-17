@@ -702,3 +702,53 @@ def test_simultaneous_submits_launch_phase2_once(
 
     assert sorted(codes) == [200, 409]
     assert launches == [JOB_ID]
+
+
+# ---------------------------------------------------------------------------
+# Labeling page
+# ---------------------------------------------------------------------------
+
+
+def test_annotate_page_shows_counter_boxes_and_buttons(
+    client: TestClient, portal_env: Path
+) -> None:
+    _anchor_job(portal_env)
+
+    text = client.get(f"/jobs/{JOB_ID}/annotate").text
+
+    assert 'id="annotate-progress"' in text
+    assert "0 of 3 labeled" in text
+    assert "<h3>Video A</h3>" in text
+    assert 'data-bbox="863,280.5,959,533.5"' in text
+    assert 'data-bbox="538.5,0,706.5,463.75"' in text
+    assert text.count('<svg aria-hidden="true"') == 3
+    assert text.count('class="track-btn"') == 6
+    assert text.count('class="skip-btn"') == 3
+
+
+def test_annotate_page_without_boxes_still_renders(
+    client: TestClient, portal_env: Path
+) -> None:
+    job_dir = _anchor_job(portal_env)
+    manifest = job_dir / "anchors" / "camera_a" / "manifest.json"
+    entries = json.loads(manifest.read_text("utf-8"))
+    for entry in entries:
+        for track in entry["tracks"]:
+            del track["bbox_xyxy"]
+    manifest.write_text(json.dumps(entries), encoding="utf-8")
+
+    text = client.get(f"/jobs/{JOB_ID}/annotate").text
+
+    assert "data-bbox" not in text
+    assert text.count('class="track-btn"') == 6
+
+
+def test_annotate_script_keeps_the_payload_shape() -> None:
+    script = (Path(portal_app.__file__).parent / "static" / "annotate.js").read_text(
+        encoding="utf-8"
+    )
+    for key in ("anchor_idx", "parent_track_id", "child_track_id", "skipped"):
+        assert key in script
+    assert "JSON.stringify({ annotations: payload })" in script
+    assert "form.dataset.csrfToken" in script
+    assert '"x-csrf-token": CSRF_TOKEN' in script
