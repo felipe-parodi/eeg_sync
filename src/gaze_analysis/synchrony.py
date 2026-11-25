@@ -690,10 +690,11 @@ def compute_movement_sync(
         shifted = np.split(np.roll(child_all, -shift), bounds)
         table = _lag0_windows(run_ids, times, parent, shifted, window_frames)
         # Same moments as the real windows, so real and reference compare
-        # like with like (a window undefined in either is left out of both
-        # only through this shift's mean).
+        # like with like.
         table = table.merge(real_keys, on=["segment_id", "window_start_s"])
-        if not table.empty:
+        # Keep a shift only if it covers every real window, so the reference
+        # and the real mean always average over the same moments.
+        if len(table) == len(real_keys):
             chance_tables.append(table.assign(shift_s=round(shift * dt, 6)))
     if not chance_tables:
         return real, empty.copy()

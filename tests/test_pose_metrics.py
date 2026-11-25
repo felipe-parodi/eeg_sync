@@ -442,3 +442,14 @@ def test_ruler_needs_enough_confident_frames():
 
     assert "proximity_median" in stats
     assert "proximity_scaled_median" not in stats
+
+
+def test_empty_blocks_are_stamped_with_the_version():
+    from video_analysis.pose_metrics import METRICS_VERSION
+
+    pose = _upright_pose(10, 300.0, 600.0, 80.0, 40.0)
+    blocks = [SessionBlock("later", 500.0, 600.0, "#999")]  # no pose rows
+
+    stats = compute_per_block_metrics(pose, blocks, frame_rate=5.0)["block_stats"][0]
+
+    assert stats["metrics_version"] == METRICS_VERSION

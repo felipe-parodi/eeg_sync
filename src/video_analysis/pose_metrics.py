@@ -275,6 +275,7 @@ def compute_per_block_metrics(
             empty_stats["quality_verdict"], empty_stats["quality_reasons"] = (
                 quality_verdict(empty_stats)
             )
+            empty_stats["metrics_version"] = METRICS_VERSION
             block_stats.append(empty_stats)
             continue
 

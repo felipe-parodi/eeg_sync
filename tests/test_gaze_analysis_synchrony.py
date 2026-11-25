@@ -736,7 +736,7 @@ def test_body_sync_chance_windows_match_real_windows() -> None:
 
     real_keys = set(zip(real["segment_id"], real["window_start_s"]))
     for _, table in chance.groupby("shift_s"):
-        assert set(zip(table["segment_id"], table["window_start_s"])) <= real_keys
+        assert set(zip(table["segment_id"], table["window_start_s"])) == real_keys
 
 
 def test_chance_shifts_never_fewer_than_three_after_thinning() -> None:
@@ -744,3 +744,19 @@ def test_chance_shifts_never_fewer_than_three_after_thinning() -> None:
 
     assert _chance_shifts(1000, 0.2, 10.0, max_shifts=2) == []
     assert len(_chance_shifts(1000, 0.2, 10.0, max_shifts=3)) == 3
+
+
+def test_body_sync_drops_shifts_that_miss_a_real_window() -> None:
+    """A shift that puts the still child under a real window cannot cover it,
+    so that shift is dropped instead of averaging over fewer windows."""
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 200, 0.2), 6)
+    child = _random_walk(len(ts), 17)
+    child[500:650] = child[500]  # still for 30 s near the end
+    real, chance = compute_movement_sync(
+        _make_body_pose(ts, _random_walk(len(ts), 18), child), 0, 1
+    )
+
+    n_real = len(real)
+    assert (chance.groupby("shift_s").size() == n_real).all()
