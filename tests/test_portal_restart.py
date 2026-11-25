@@ -124,3 +124,34 @@ def test_restart_cli_writes_and_cancels_request(roots, capsys) -> None:
 
     restart.main(["--cancel"])
     assert not portal_app.restart_flag_path().exists()
+
+
+def test_portal_is_not_idle_while_recalculating_numbers(roots) -> None:
+    from portal import refresh
+
+    refresh._refreshing.set()
+    try:
+        assert portal_app.portal_is_idle() is False
+    finally:
+        refresh._refreshing.clear()
+    assert portal_app.portal_is_idle() is True
+
+
+def test_startup_starts_recalculation_in_the_background(
+    roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from portal import refresh
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        refresh,
+        "refresh_outdated_jobs",
+        lambda *args, **kwargs: calls.append((args, kwargs))
+        or {"refreshed": 0, "failed": 0},
+    )
+
+    thread = portal_app.start_metrics_refresh()
+    thread.join(timeout=5)
+
+    assert calls and calls[0][0][0] == portal_app.JOB_ROOT
+    assert calls[0][1]["lock"] is portal_app.JOB_RUN_LOCK

@@ -1707,6 +1707,40 @@ def make_result_zip(
                 zf.write(source_path, archive_path)
 
 
+def bundle_result_zip(job_dir: Path, session_id: str, session_output_dir: Path) -> Path:
+    """Build ``<job>/<session>_results.zip``: outputs, README and job metadata.
+
+    Args:
+        job_dir: Portal job folder (holds README.md, job.log and metadata).
+        session_id: Session ID.
+        session_output_dir: The session's output folder.
+
+    Returns:
+        The zip path.
+    """
+    job_dir = Path(job_dir)
+    zip_path = job_dir / f"{session_id}_results.zip"
+    metadata_root = Path(session_id) / "portal_metadata"
+    make_result_zip(
+        Path(session_output_dir),
+        zip_path,
+        extra_files=[
+            (job_dir / "README.md", Path(session_id) / "README.md"),
+            (
+                job_dir / "submission_metadata.json",
+                metadata_root / "submission_metadata.json",
+            ),
+            (job_dir / "job_config.json", metadata_root / "job_config.json"),
+            (
+                job_dir / "rapid_compression_summary.json",
+                metadata_root / "rapid_compression_summary.json",
+            ),
+            (job_dir / "job.log", metadata_root / "job.log"),
+        ],
+    )
+    return zip_path
+
+
 def build_results_readme(config: PortalJobConfig) -> str:
     """Build the README.md that ships at the top of the results zip.
 
@@ -2189,30 +2223,14 @@ def resume_portal_job_phase2(config: PortalJobConfig, repo_root: Path) -> None:
         from portal import run_log
 
         run_log.write_run_record(config, "complete")
-        zip_path = config.job_dir / f"{config.session_id}_results.zip"
-        metadata_root = Path(config.session_id) / "portal_metadata"
         readme_path = config.job_dir / "README.md"
         readme_path.write_text(build_results_readme(config), encoding="utf-8")
-        make_result_zip(
-            config.session_output_dir,
-            zip_path,
-            extra_files=[
-                (readme_path, Path(config.session_id) / "README.md"),
-                (
-                    config.job_dir / "submission_metadata.json",
-                    metadata_root / "submission_metadata.json",
-                ),
-                (
-                    config.job_dir / "job_config.json",
-                    metadata_root / "job_config.json",
-                ),
-                (
-                    config.job_dir / "rapid_compression_summary.json",
-                    metadata_root / "rapid_compression_summary.json",
-                ),
-                (log_path, metadata_root / "job.log"),
-            ],
+        zip_path = bundle_result_zip(
+            config.job_dir, config.session_id, config.session_output_dir
         )
+        from portal.refresh import write_marker
+
+        write_marker(config.job_dir)
         artifacts = _iter_existing_artifacts(
             [
                 zip_path,

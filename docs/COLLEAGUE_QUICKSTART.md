@@ -123,6 +123,12 @@ the same for synchrony (r ~ 0.87); with 3 windows it is only r = 0.66.
 | `session_metrics.csv` | camera and block (piece) | checking individual pieces |
 | `all_sessions_task_metrics.csv` (home page, **Download study task table**) | every session, camera and task | the study table |
 
+When we improve how a number is calculated, the portal recalculates
+finished sessions by itself (from the tracking it already has; nothing is
+re-uploaded or re-tracked). The job page then says "Numbers recalculated",
+and `metrics_version` in the tables shows which definitions were used:
+download the results again.
+
 Key columns:
 
 - `coverage_both`, `valid_seconds_both`: share and seconds of the time with
