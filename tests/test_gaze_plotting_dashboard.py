@@ -61,3 +61,13 @@ def test_dashboard_falls_back_to_xcorr_for_old_runs() -> None:
     fig = plot_dashboard(prox, xcorr, gaze, conv, blocks)
 
     assert any("Cross-Correlation" in ax.get_title() for ax in fig.axes)
+
+
+def test_dashboard_keeps_sync_panel_when_selection_has_no_windows() -> None:
+    prox, xcorr, gaze, conv, sync, blocks = _inputs()
+
+    fig = plot_dashboard(prox, xcorr, gaze, conv, blocks, sync_df=sync.iloc[0:0])
+
+    titles = [ax.get_title() for ax in fig.axes]
+    assert any("Movement synchrony" in t for t in titles)
+    assert not any("Cross-Correlation" in t for t in titles)

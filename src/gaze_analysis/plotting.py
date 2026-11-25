@@ -136,6 +136,15 @@ def plot_movement_sync(
     if not sync_df.empty:
         mid = (sync_df["window_start_s"] + sync_df["window_end_s"]) / 2
         ax.bar(mid, sync_df["sync_r"], width=8.0, color="steelblue", alpha=0.7)
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No unbroken 20-second stretches with both people tracked",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
     for block in blocks:
         level = (chance or {}).get(block.name)
         if level is not None and not pd.isna(level):
@@ -284,7 +293,9 @@ def plot_dashboard(
     Returns:
         Matplotlib Figure.
     """
-    use_sync = sync_df is not None and not sync_df.empty
+    # A run with pose_metrics_sync.csv always shows the reported measure, even
+    # when the selected time range holds no windows.
+    use_sync = sync_df is not None
     n_rows = 4 if use_sync else 5
     fig, axes = plt.subplots(n_rows, 1, figsize=(16, 3.6 * n_rows), sharex=True)
     fig.suptitle(title, fontsize=14, fontweight="bold", y=0.98)
