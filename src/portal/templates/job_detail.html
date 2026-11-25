@@ -2,6 +2,7 @@
 {% from "_macros.html" import chip %}
 {% block body %}<section class="panel" id="job" data-job-id="{{ job_id }}" data-state="{{ job.state }}">
   <h2>{{ job_id }}</h2>
+  {% if job.submitted %}<p class="muted">Submitted {{ job.submitted }}{% if job.updated %} · {{ job.updated_label }} {{ job.updated }}{% endif %}</p>{% endif %}
   <p><span id="job-chip">{{ chip(job.chip_kind, job.chip_label) }}</span></p>
   <ol class="stages" aria-label="Progress">
     {%- for stage in job.stages %}

@@ -435,6 +435,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .job-item:last-child { border-bottom: 0; }
 .job-item__id { font-weight: 600; font-size: var(--text-sm); word-break: break-all; }
 .job-item__message { color: var(--color-text-muted); font-size: var(--text-sm); }
+.job-item__when { display: block; font-weight: 400; color: var(--color-text-muted); font-size: var(--text-xs, 0.8rem); }
 .job-item--active { box-shadow: inset 4px 0 0 var(--color-accent); }
 .session-id { font-weight: 600; color: var(--color-text); }
 .cameras { display: inline-flex; gap: var(--space-1); }
