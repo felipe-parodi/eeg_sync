@@ -127,21 +127,28 @@ Key columns:
 
 - `coverage_both`, `valid_seconds_both`: share and seconds of the time with
   both people tracked.
-- `proximity_scaled_median` (and `_mean`): distance between the two torsos
-  in body sizes (divided by the pair's average torso length). Use this one.
+- `proximity_scaled_median` (and `_mean`): torso-normalized distance, the
+  distance between the two torsos divided by the pair's typical torso length
+  on that camera. Use this one. It is not a distance in meters.
   `proximity_mean`, `proximity_median` are the same in image pixels, which
   depend on zoom and are not comparable across cameras.
 - Why the two cameras can still disagree: each camera is a flat picture. It
   sees distance across the image, never toward or away from it. Two people
   standing one behind the other, as seen by a camera, look close together even
-  when they are far apart. So pick one camera per dyad (the one with more
-  usable time), use it for every task and measure, and include camera as a
-  covariate.
+  when they are far apart.
+- Choosing a camera, decided before looking at results: per dyad, prefer a
+  camera that is `usable` for both tasks; among those, take the one with more
+  both-tracked seconds (`valid_seconds_both`) summed over the tasks; on an
+  exact tie, camera A. If no camera is usable for both tasks, flag the dyad.
+  Use that camera for every measure, include camera as a fixed effect, and
+  repeat key analyses with one fixed camera as a check.
 - `sync_mean` and `sync_chance_mean`: movement synchrony (how closely the
   amount of whole-body movement of the two rises and falls together, in
   20-second windows) and the same measure with the child's movement taken
-  from other moments. Only `sync_minus_chance` above zero reflects the
-  interaction.
+  from other moments (averaged over several time shifts; empty when the task
+  is too short for at least 3). Only `sync_minus_chance` above zero reflects
+  the interaction. With split tasks, also look at how the windows are spread
+  across the pieces in `session_metrics.csv`.
 - `gaze_<category>_pct` and `gaze_<category>_chance_pct`: share of frames in
   each gaze category and its chance level. A category means something only
   when it clearly exceeds chance.

@@ -631,18 +631,59 @@ def test_body_sync_windows_are_20s_inside_gap_free_runs() -> None:
 
 
 def test_body_sync_chance_averages_several_shifts() -> None:
-    """Long blocks average shifts at 60 s steps (at most 10); short ones use half."""
+    """One rule for every length: shifts every 10 s, at least 20 s from zero
+    and from a full turn, thinned evenly to at most 10."""
     from gaze_analysis.synchrony import compute_movement_sync
 
-    ts = np.round(np.arange(0, 300, 0.2), 6)  # 5 min: shifts 60, 120, 180, 240 s
+    ts = np.round(np.arange(0, 300, 0.2), 6)  # 300 s: candidates 20..280 s
     walk = _random_walk(len(ts), 6)
     _, chance = compute_movement_sync(_make_body_pose(ts, walk, walk), 0, 1)
-    assert sorted(chance["shift_s"].unique()) == [60.0, 120.0, 180.0, 240.0]
+    shifts = sorted(chance["shift_s"].unique())
+    assert len(shifts) == 10
+    assert shifts[0] == 20.0 and shifts[-1] == 280.0
 
-    short = np.round(np.arange(0, 90, 0.2), 6)
+    short = np.round(np.arange(0, 90, 0.2), 6)  # 90 s: 20, 30, ..., 70 s
     walk = _random_walk(len(short), 7)
     _, chance = compute_movement_sync(_make_body_pose(short, walk, walk), 0, 1)
-    assert list(chance["shift_s"].unique()) == [45.0]
+    assert sorted(chance["shift_s"].unique()) == [20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
+
+
+def test_body_sync_no_chance_level_with_fewer_than_three_shifts() -> None:
+    """50 s of data allows only the 20 s and 30 s shifts: too few to average."""
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 50, 0.2), 6)
+    walk = _random_walk(len(ts), 12)
+    real, chance = compute_movement_sync(_make_body_pose(ts, walk, walk), 0, 1)
+
+    assert not real.empty
+    assert chance.empty
+
+
+def test_body_sync_flat_windows_are_missing_not_zero() -> None:
+    """A child who does not move at all gives undefined, not zero, synchrony."""
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 120, 0.2), 6)
+    still = np.zeros(len(ts))
+    real, _ = compute_movement_sync(
+        _make_body_pose(ts, _random_walk(len(ts), 13), still), 0, 1
+    )
+
+    assert real.empty
+
+
+def test_body_sync_untracked_child_keypoints_give_no_windows() -> None:
+    """No confident child keypoint at all: no windows rather than zeros."""
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 120, 0.2), 6)
+    walk = _random_walk(len(ts), 14)
+    real, _ = compute_movement_sync(
+        _make_body_pose(ts, walk, walk, child_conf=0.1), 0, 1
+    )
+
+    assert real.empty
 
 
 def test_body_sync_brief_low_confidence_outlier_does_not_leak() -> None:

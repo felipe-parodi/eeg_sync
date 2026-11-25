@@ -123,6 +123,15 @@ def block_coverage(
     }
 
 
+def _finite_or_none(value: Any) -> Optional[float]:
+    """``float(value)`` when it is a finite number, else None."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
 def quality_verdict(stats: Dict[str, Any]) -> tuple[str, str]:
     """Data check for one block or task: is there enough data behind the numbers?
 
@@ -139,11 +148,14 @@ def quality_verdict(stats: Dict[str, Any]) -> tuple[str, str]:
     Returns:
         ``(verdict, reasons)``; reasons are plain sentences joined by "; ".
     """
-    seconds = float(stats.get("valid_seconds_both", 0.0) or 0.0)
-    coverage = float(stats.get("coverage_both", 0.0) or 0.0)
-    windows = stats.get("sync_n_windows")
-    windows = 0 if windows is None or pd.isna(windows) else int(windows)
+    seconds = _finite_or_none(stats.get("valid_seconds_both"))
+    coverage = _finite_or_none(stats.get("coverage_both"))
+    windows = _finite_or_none(stats.get("sync_n_windows"))
+    windows = 0 if windows is None else int(windows)
     reasons = []
+    if seconds is None or coverage is None:
+        # Fail closed: unknown tracking time is not enough tracking time.
+        return "insufficient", "how long both people were tracked is unknown"
     if seconds < MIN_VALID_SECONDS:
         reasons.append(
             f"both people tracked for only {seconds:.0f} s "
@@ -162,17 +174,19 @@ def quality_verdict(stats: Dict[str, Any]) -> tuple[str, str]:
 def body_scaled_proximity(
     prox: pd.DataFrame, ruler_frames: Optional[pd.DataFrame] = None
 ) -> Dict[str, float]:
-    """Torso distance expressed in body sizes, comparable across zoom levels.
+    """Torso-normalized distance: torso distance divided by a torso ruler.
 
     The ruler is the average of the parent's and the child's median torso
     length (medians, so brief bends and mis-detections do not move it).
     Callers pass all of a camera's frames as ``ruler_frames``, so one camera
     has one ruler: a per-task ruler would leak posture into task contrasts
     (sitting in storybook shortens the torso on screen), whereas a single
-    ruler keeps the contrast between tasks the same as in pixels. Dividing by
-    it removes differences in zoom and in how far the camera stands from the
-    pair; it does not remove viewing-angle effects, because a 2D camera cannot
-    see distance toward or away from itself.
+    ruler keeps the contrast between tasks the same as in pixels. It reduces
+    the overall scale difference between camera views; it is not a physical
+    distance and does not correct viewing angle, people moving nearer or
+    farther, or lens distortion (a 2D camera cannot see distance toward or
+    away from itself). Torso lengths come only from frames where all four
+    torso joints are confident (see ``_torso_length``).
 
     Args:
         prox: Per-frame proximity rows to summarise, with torso_distance_px
@@ -190,7 +204,7 @@ def body_scaled_proximity(
         return {}
     parent = ruler["parent_torso_px"].median()
     child = ruler["child_torso_px"].median()
-    if pd.isna(parent) or pd.isna(child) or parent + child <= 0:
+    if not (np.isfinite(parent) and np.isfinite(child)) or parent <= 0 or child <= 0:
         return {}
     scale = float((parent + child) / 2)
     dist = prox["torso_distance_px"]
@@ -408,8 +422,9 @@ def plot_synchrony(
 ) -> None:
     """Figure 2: whole-body movement synchrony per block, against chance.
 
-    Left: each block's mean synchrony (bar, with its standard error) next to
-    its chance level (black line), with every 20 s window as a dot. Blocks
+    Left: each block's mean synchrony (bar) next to its chance level (black
+    line), with every 20 s window as a dot (windows overlap by half, so no
+    error bars are drawn). Blocks
     with fewer than ``MIN_SYNC_WINDOWS`` windows are drawn faded and labelled,
     matching the report. Right: every window over session time, so gaps and
     drifts are visible.
@@ -440,14 +455,13 @@ def plot_synchrony(
         enough = len(r) >= MIN_SYNC_WINDOWS
         alpha = 0.75 if enough else 0.25
         mean = float(np.mean(r))
-        sem = float(np.std(r, ddof=1) / np.sqrt(len(r))) if len(r) > 1 else 0.0
+        # No error bars: windows overlap by half and are autocorrelated, so
+        # SD / sqrt(n) would overstate the precision. The dots show the spread.
         ax_bar.bar(
             i,
             mean,
-            yerr=sem,
             color=color,
             alpha=alpha,
-            capsize=5,
             edgecolor="black",
             linewidth=0.5,
             width=0.6,
@@ -495,7 +509,11 @@ def plot_synchrony(
     )
     ax_bar.set_ylabel("Movement synchrony (r)")
     ax_bar.set_ylim(-1, 1)
-    ax_bar.set_title("Per block: bar = mean, line = chance", pad=26, fontsize=11)
+    ax_bar.set_title(
+        "Per block: bar = mean, line = chance,\ndots = 20 s windows (overlapping)",
+        pad=26,
+        fontsize=11,
+    )
     ax_time.axhline(0, color="black", linewidth=0.5)
     ax_time.set_ylim(-1, 1)
     ax_time.set_xlabel("Time in video (min)")
@@ -516,6 +534,40 @@ def plot_synchrony(
     fig.savefig(str(output_path) + ".svg", bbox_inches="tight")
     plt.close(fig)
     print(f"[pose-metrics] saved {output_path}.png/.svg")
+
+
+SYNC_TABLE_COLUMNS = ["segment_id", "window_start_s", "window_end_s", "sync_r", "block"]
+
+
+def save_sync_outputs(
+    camera_dir: Path,
+    sync_df: pd.DataFrame,
+    block_stats: List[Dict[str, Any]],
+    blocks: List[SessionBlock],
+) -> None:
+    """Write ``pose_metrics_sync.csv`` and ``pose_synchrony.png/.svg``.
+
+    The table is always written (header only when there are no windows), so
+    a rerun never leaves an earlier run's windows behind and the dashboard
+    can tell a current run from an old one by the file being there. With no
+    windows, an earlier synchrony figure is removed rather than left stale.
+
+    Args:
+        camera_dir: Camera output folder.
+        sync_df: Per-window synchrony (may be empty).
+        block_stats: Per-block summaries.
+        blocks: Session blocks.
+    """
+    camera_dir = Path(camera_dir)
+    table = sync_df if not sync_df.empty else pd.DataFrame(columns=SYNC_TABLE_COLUMNS)
+    sync_path = camera_dir / "pose_metrics_sync.csv"
+    table.to_csv(sync_path, index=False)
+    print(f"[pose-metrics] wrote {sync_path} ({len(table)} rows)")
+    if sync_df.empty:
+        for suffix in (".png", ".svg"):
+            (camera_dir / f"pose_synchrony{suffix}").unlink(missing_ok=True)
+        return
+    plot_synchrony(sync_df, block_stats, blocks, camera_dir / "pose_synchrony")
 
 
 # ---------------------------------------------------------------------------
@@ -574,10 +626,6 @@ def main() -> None:
         results["proximity_df"].to_csv(prox_path, index=False)
         print(f"[pose-metrics] wrote {prox_path} ({len(results['proximity_df'])} rows)")
 
-    if not results["sync_df"].empty:
-        sync_path = camera_dir / "pose_metrics_sync.csv"
-        results["sync_df"].to_csv(sync_path, index=False)
-        print(f"[pose-metrics] wrote {sync_path} ({len(results['sync_df'])} rows)")
     if not results["xcorr_df"].empty:
         xcorr_path = camera_dir / "pose_metrics_xcorr.csv"
         results["xcorr_df"].to_csv(xcorr_path, index=False)
@@ -608,13 +656,7 @@ def main() -> None:
     if not results["proximity_df"].empty:
         plot_proximity(results["proximity_df"], blocks, camera_dir / "pose_proximity")
 
-    if not results["sync_df"].empty:
-        plot_synchrony(
-            results["sync_df"],
-            results["block_stats"],
-            blocks,
-            camera_dir / "pose_synchrony",
-        )
+    save_sync_outputs(camera_dir, results["sync_df"], results["block_stats"], blocks)
 
 
 if __name__ == "__main__":

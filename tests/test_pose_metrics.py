@@ -368,3 +368,48 @@ def test_plot_synchrony_draws_new_measure(tmp_path):
 
     assert (tmp_path / "pose_synchrony.png").stat().st_size > 0
     assert (tmp_path / "pose_synchrony.svg").exists()
+
+
+def test_quality_verdict_fails_closed_on_missing_support():
+    from video_analysis.pose_metrics import quality_verdict
+
+    for bad in (float("nan"), float("inf"), None):
+        verdict, reasons = quality_verdict(
+            {"valid_seconds_both": bad, "coverage_both": bad, "sync_n_windows": 10}
+        )
+        assert verdict == "insufficient", bad
+        assert reasons
+
+
+def test_ruler_ignores_low_confidence_torso_joints():
+    """A mis-detected hip (confidence 0.1) on half the frames must not move the ruler."""
+    pose = _upright_pose(20, 300.0, 600.0, parent_torso=80.0, child_torso=40.0)
+    bad = (
+        (pose["track_id"] == 0)
+        & (pose["keypoint_name"] == "kp_011")
+        & (pose["frame_idx"] < 10)
+    )
+    pose.loc[bad, "y_m"] += 200.0
+    pose.loc[bad, "keypoint_confidence"] = 0.1
+    blocks = [SessionBlock("grocery", 0.0, 10.0, "#999")]
+
+    stats = compute_per_block_metrics(pose, blocks, frame_rate=5.0)["block_stats"][0]
+
+    assert stats["body_scale_px"] == pytest.approx(60.0)
+
+
+def test_save_sync_outputs_replaces_stale_files_when_no_windows(tmp_path):
+    from video_analysis.pose_metrics import save_sync_outputs
+
+    (tmp_path / "pose_metrics_sync.csv").write_text("old", encoding="utf-8")
+    (tmp_path / "pose_synchrony.png").write_bytes(b"old")
+    (tmp_path / "pose_synchrony.svg").write_bytes(b"old")
+    blocks = [SessionBlock("grocery", 0.0, 10.0, "#999")]
+
+    save_sync_outputs(tmp_path, pd.DataFrame(), [{"block": "grocery"}], blocks)
+
+    written = pd.read_csv(tmp_path / "pose_metrics_sync.csv")
+    assert written.empty
+    assert {"window_start_s", "window_end_s", "sync_r", "block"} <= set(written.columns)
+    assert not (tmp_path / "pose_synchrony.png").exists()
+    assert not (tmp_path / "pose_synchrony.svg").exists()

@@ -37,7 +37,9 @@ TASK_METRICS_CSV = "task_metrics.csv"
 # Bump when metric definitions change, so study tables never silently mix
 # sessions processed under different definitions. 2026-11-16: 5 fps even frame
 # timing, short-gap-only filling, whole-body synchrony, task table, verdict.
-METRICS_VERSION = "2026-11-16"
+# 2026-11-25: torso-normalized distance, one chance-shift rule for all block
+# lengths (>= 3 shifts), flat windows left out, verdict fails closed.
+METRICS_VERSION = "2026-11-25"
 LEGACY_METRICS_VERSION = "before-2026-11-16"
 ALL_SESSIONS_TASK_CSV = "all_sessions_task_metrics.csv"
 
@@ -207,12 +209,21 @@ def collect_task_rows(session_dir: Path) -> pd.DataFrame:
                 row["sync_mean"] = float(windows.mean())
                 row["sync_std"] = float(windows.std())
                 row["sync_n_windows"] = int(len(windows))
+                # Chance weighted by each part's windows, only when every
+                # part that has windows also has a chance level; otherwise
+                # the subtraction would mix supports, so leave it missing.
+                row["sync_chance_mean"] = float("nan")
+                row["sync_minus_chance"] = float("nan")
                 if {"sync_chance_mean", "sync_n_windows"} <= set(parts.columns):
-                    chance = _weighted_mean(
-                        parts["sync_chance_mean"], parts["sync_n_windows"]
-                    )
-                    row["sync_chance_mean"] = chance
-                    row["sync_minus_chance"] = row["sync_mean"] - chance
+                    n_win = pd.to_numeric(parts["sync_n_windows"], errors="coerce")
+                    with_windows = parts[n_win.fillna(0) > 0]
+                    if with_windows["sync_chance_mean"].notna().all():
+                        chance = _weighted_mean(
+                            with_windows["sync_chance_mean"],
+                            with_windows["sync_n_windows"],
+                        )
+                        row["sync_chance_mean"] = chance
+                        row["sync_minus_chance"] = row["sync_mean"] - chance
 
         if "gaze_n_frames" in parts:
             weight = parts["gaze_n_frames"]
@@ -700,10 +711,11 @@ person or an object.</p>
 found. <strong>Both people tracked</strong>: the same as a share of the task.
 Every other number uses only those frames.</li>
 <li><strong>Distance</strong>: distance between the parent's and the child's
-torso centers, in body sizes (divided by the pair's average torso length, so
-zoom and how far the camera stands do not matter). Each camera is a flat
-picture: it sees distance across the image but not toward or away from it, so
-the two cameras can still disagree. Compare tasks within one camera.</li>
+torso centers, divided by the pair's typical torso length on this camera
+(torso-normalized; not a physical distance). This reduces the zoom difference
+between cameras, but each camera is a flat picture: it sees distance across
+the image, not toward or away from it, so the two cameras can still disagree.
+Compare tasks within one camera.</li>
 <li><strong>Movement synchrony</strong>: how closely the amount of whole-body
 movement of the two people rises and falls together, as a correlation in
 20-second windows (0 = unrelated, 1 = identical). <em>Chance</em> is the same

@@ -461,3 +461,26 @@ def test_task_rows_without_torso_columns_have_no_scaled_proximity(
 
     assert "proximity_scaled_median" not in tasks.columns
     assert tasks["proximity_median"].notna().all()
+
+
+def test_task_chance_is_missing_when_a_part_with_windows_has_none(
+    tmp_path: Path,
+) -> None:
+    """Never subtract a chance level that covers only some of the windows."""
+    from video_analysis.session_report import collect_task_rows
+
+    session = tmp_path / "1019"
+    _write_split_session(session)
+    summary_path = session / "camera_a" / "pose_metrics_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    for row in summary:
+        if row["block"] == "grocery_part1":
+            row.pop("sync_chance_mean")
+            row.pop("sync_minus_chance")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    g = collect_task_rows(session).set_index("task").loc["grocery"]
+
+    assert abs(g["sync_mean"] - 0.18) < 1e-9  # raw mean keeps all windows
+    assert pd.isna(g["sync_chance_mean"])
+    assert pd.isna(g["sync_minus_chance"])
