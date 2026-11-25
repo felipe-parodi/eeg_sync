@@ -1882,7 +1882,7 @@ described under "Start here".
 ### Figures and video
 
 - `pose_proximity.png` / `.svg` — torso distance over time and per-block comparison.
-- `pose_synchrony.png` / `.svg` — synchrony strength and lead/follow per block.
+- `pose_synchrony.png` / `.svg` — movement synchrony per block against its chance level, and every 20 s window over time.
 - `overlay_<block>.mp4` and `overlay_<block>_end.mp4` — ~{int(config.overlay_seconds)} s clips of the **start** and **end** of each block, with boxes and skeletons drawn, to eyeball tracking quality at both ends. (A block shorter than ~{int(config.overlay_seconds)} s yields a single full-block `overlay_<block>.mp4`.) Every keypoint is drawn; keypoints that were gap-filled or low-confidence-infilled (`interpolated = True`) are shown muted (hollow dot, thin dimmed bone) so you can tell them from directly observed joints.
 - SVGs are editable vector versions of the PNGs.
 

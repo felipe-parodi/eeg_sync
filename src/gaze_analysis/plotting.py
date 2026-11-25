@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -108,6 +109,58 @@ def plot_movement_xcorr(
     ax_lag.set_title("Peak Lag (positive = child follows)")
 
     return ax_r, ax_lag
+
+
+def plot_movement_sync(
+    sync_df: pd.DataFrame,
+    blocks: List[SessionBlock],
+    chance: Optional[Dict[str, float]] = None,
+    ax: Optional[plt.Axes] = None,
+) -> plt.Axes:
+    """Plot whole-body movement synchrony per 20 s window, with chance levels.
+
+    Args:
+        sync_df: ``pose_metrics_sync.csv`` rows (window_start_s, window_end_s,
+            sync_r, block).
+        blocks: Session blocks for background shading.
+        chance: Chance level per block name, drawn as a dashed line across
+            that block.
+        ax: Axes to draw on (creates if None).
+
+    Returns:
+        The axes.
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(14, 3))
+    _shade_blocks(ax, blocks)
+    if not sync_df.empty:
+        mid = (sync_df["window_start_s"] + sync_df["window_end_s"]) / 2
+        ax.bar(mid, sync_df["sync_r"], width=8.0, color="steelblue", alpha=0.7)
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No unbroken 20-second stretches with both people tracked",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+    for block in blocks:
+        level = (chance or {}).get(block.name)
+        if level is not None and not pd.isna(level):
+            ax.hlines(
+                level,
+                block.start_s,
+                block.end_s,
+                color="black",
+                linestyle="--",
+                linewidth=1.2,
+            )
+    ax.axhline(0, color="gray", linewidth=0.5)
+    ax.set_ylim(-1, 1)
+    ax.set_ylabel("r")
+    ax.set_title("Movement synchrony (whole body, 20 s windows; dashed = chance)")
+    return ax
 
 
 def plot_gaze_categories(
@@ -218,39 +271,55 @@ def plot_dashboard(
     convergence_df: pd.DataFrame,
     blocks: List[SessionBlock],
     title: str = "Parent-Child Synchrony Dashboard",
+    sync_df: Optional[pd.DataFrame] = None,
+    sync_chance: Optional[Dict[str, float]] = None,
 ) -> plt.Figure:
-    """Create a 4-panel synchrony dashboard.
+    """Create the synchrony dashboard.
+
+    Runs with ``pose_metrics_sync.csv`` show the whole-body synchrony windows
+    (the reported measure) in one panel; older runs without it fall back to
+    the earlier cross-correlation and lag panels.
 
     Args:
         proximity_df: Torso proximity data.
-        xcorr_df: Cross-correlation data.
+        xcorr_df: Cross-correlation data (used only without ``sync_df``).
         gaze_cat_df: Gaze category data.
         convergence_df: Gaze convergence data.
         blocks: Session blocks for background shading.
         title: Figure title.
+        sync_df: Whole-body synchrony windows, if available.
+        sync_chance: Chance level per block for ``sync_df``.
 
     Returns:
         Matplotlib Figure.
     """
-    fig, axes = plt.subplots(5, 1, figsize=(16, 18), sharex=True)
+    # A run with pose_metrics_sync.csv always shows the reported measure, even
+    # when the selected time range holds no windows.
+    use_sync = sync_df is not None
+    n_rows = 4 if use_sync else 5
+    fig, axes = plt.subplots(n_rows, 1, figsize=(16, 3.6 * n_rows), sharex=True)
     fig.suptitle(title, fontsize=14, fontweight="bold", y=0.98)
 
     plot_torso_proximity(proximity_df, blocks, ax=axes[0])
-    plot_movement_xcorr(xcorr_df, blocks, axes=(axes[1], axes[2]))
-    plot_gaze_categories(gaze_cat_df, blocks, ax=axes[3])
-
-    if not convergence_df.empty:
-        plot_gaze_convergence(convergence_df, blocks, ax=axes[4])
+    if use_sync:
+        plot_movement_sync(sync_df, blocks, chance=sync_chance, ax=axes[1])
     else:
-        axes[4].text(
+        plot_movement_xcorr(xcorr_df, blocks, axes=(axes[1], axes[2]))
+    plot_gaze_categories(gaze_cat_df, blocks, ax=axes[n_rows - 2])
+
+    last = axes[n_rows - 1]
+    if not convergence_df.empty:
+        plot_gaze_convergence(convergence_df, blocks, ax=last)
+    else:
+        last.text(
             0.5,
             0.5,
             "No gaze convergence data",
             ha="center",
             va="center",
-            transform=axes[4].transAxes,
+            transform=last.transAxes,
         )
-        axes[4].set_title("Gaze Convergence")
+        last.set_title("Gaze Convergence")
 
     # Add block legend to bottom
     from matplotlib.patches import Patch
@@ -325,6 +394,22 @@ def main() -> None:
             columns=["window_start_s", "window_end_s", "peak_xcorr", "peak_lag_s"]
         )
 
+    # Whole-body synchrony from the pose-metrics step, when it has run.
+    sync_df = None
+    sync_chance: Dict[str, float] = {}
+    sync_csv = camera_dir / "pose_metrics_sync.csv"
+    if sync_csv.exists():
+        sync_df = filter_by_time_range(
+            pd.read_csv(sync_csv), t_start, t_end, time_column="window_start_s"
+        )
+        summary = camera_dir / "pose_metrics_summary.json"
+        if summary.exists():
+            sync_chance = {
+                s["block"]: s["sync_chance_mean"]
+                for s in json.loads(summary.read_text(encoding="utf-8"))
+                if s.get("sync_chance_mean") is not None
+            }
+
     gaze_cat_df = metrics_df[["frame_idx", "timestamp_s", "gaze_category"]].dropna(
         subset=["gaze_category"]
     )
@@ -345,6 +430,8 @@ def main() -> None:
         convergence_df,
         blocks,
         title=f"Synchrony: {session_config.session_id} / {args.camera_id}",
+        sync_df=sync_df,
+        sync_chance=sync_chance,
     )
 
     output_path = camera_dir / args.output

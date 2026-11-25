@@ -67,6 +67,45 @@ def _torso_centroid(pose_df: pd.DataFrame, track_id: int) -> pd.DataFrame:
     return grouped
 
 
+TORSO_RULER_CONF_MIN = 0.5
+
+
+def _torso_length(pose_df: pd.DataFrame, track_id: int) -> pd.DataFrame:
+    """Per-frame torso length: mid-shoulder to mid-hip distance in pixels.
+
+    Used as a ruler for torso-normalized distance: the same person filmed
+    from further away has a shorter torso on screen, so dividing by it reduces
+    zoom differences between cameras. It does not correct viewing angle
+    (distance toward or away from the camera stays invisible).
+
+    Args:
+        pose_df: Pose DataFrame with keypoint_name, x_m, y_m columns.
+        track_id: Which track to measure.
+
+    Returns:
+        DataFrame with frame_idx and torso_length_px. Frames are left out
+        unless all four torso keypoints are present with confidence >=
+        ``TORSO_RULER_CONF_MIN`` (no torso is built from fewer joints).
+    """
+    subset = pose_df[
+        (pose_df["track_id"] == track_id)
+        & (pose_df["keypoint_name"].isin(_TORSO_KEYPOINTS))
+    ]
+    if "keypoint_confidence" in subset.columns:
+        subset = subset[subset["keypoint_confidence"] >= TORSO_RULER_CONF_MIN]
+    wide = subset.pivot_table(
+        index="frame_idx", columns="keypoint_name", values=["x_m", "y_m"]
+    ).dropna()
+    if wide.empty or len(wide.columns) < 8:
+        return pd.DataFrame({"frame_idx": [], "torso_length_px": []})
+    x, y = wide["x_m"], wide["y_m"]
+    dx = (x["kp_005"] + x["kp_006"] - x["kp_011"] - x["kp_012"]) / 2
+    dy = (y["kp_005"] + y["kp_006"] - y["kp_011"] - y["kp_012"]) / 2
+    return pd.DataFrame(
+        {"frame_idx": wide.index, "torso_length_px": np.hypot(dx, dy).to_numpy()}
+    )
+
+
 # ====================================================================
 # Metric 1: Torso Proximity
 # ====================================================================
@@ -85,7 +124,10 @@ def compute_torso_proximity(
         child_track_id: Track ID for the child.
 
     Returns:
-        DataFrame with frame_idx, timestamp_s, torso_distance_px columns.
+        DataFrame with frame_idx, timestamp_s, torso_distance_px, and each
+        person's torso length (parent_torso_px, child_torso_px; NaN when a
+        shoulder or hip is missing), used to express the distance in body
+        sizes.
     """
     parent = _torso_centroid(pose_df, parent_track_id)
     child = _torso_centroid(pose_df, child_track_id)
@@ -96,8 +138,28 @@ def compute_torso_proximity(
         (merged["cx_p"] - merged["cx_c"]) ** 2 + (merged["cy_p"] - merged["cy_c"]) ** 2
     )
 
-    return merged[["frame_idx", "timestamp_s_p", "torso_distance_px"]].rename(
-        columns={"timestamp_s_p": "timestamp_s"}
+    lengths = _torso_length(pose_df, parent_track_id).merge(
+        _torso_length(pose_df, child_track_id),
+        on="frame_idx",
+        how="outer",
+        suffixes=("_p", "_c"),
+    )
+    merged = merged.merge(lengths, on="frame_idx", how="left")
+
+    return merged[
+        [
+            "frame_idx",
+            "timestamp_s_p",
+            "torso_distance_px",
+            "torso_length_px_p",
+            "torso_length_px_c",
+        ]
+    ].rename(
+        columns={
+            "timestamp_s_p": "timestamp_s",
+            "torso_length_px_p": "parent_torso_px",
+            "torso_length_px_c": "child_torso_px",
+        }
     )
 
 
@@ -433,6 +495,10 @@ def compute_movement_xcorr_chance(
 SYNC_COLUMNS = ["segment_id", "window_start_s", "window_end_s", "sync_r"]
 SYNC_WINDOW_S = 20.0
 SYNC_CONF_MIN = 0.3
+# Chance level: shifts every 10 s (>= 20 s from zero and a full turn), at
+# most 10, and none when fewer than 3 fit.
+SYNC_SHIFT_STEP_S = 10.0
+SYNC_MIN_SHIFTS = 3
 
 
 def _keypoint_arrays(
@@ -468,13 +534,14 @@ def _body_energy(
     Speed is a central difference in time within one gap-free run, using only
     positions with confidence >= ``conf_min``: a speed is kept only when every
     position it is computed from is confident (or present). A frame with no
-    usable keypoint takes the run's mean energy.
+    usable keypoint takes the run's mean energy; a run with no usable
+    keypoint at all is all NaN (unmeasured, not motionless).
 
     Returns:
         Motion energy per frame, in pixels per second.
     """
     if len(t) < 2:
-        return np.zeros(len(t))
+        return np.full(len(t), np.nan)
     # Blank unreliable positions before differencing, so a low-confidence
     # glitch cannot leak into the speed of its confident neighbours.
     unreliable = ~(conf >= conf_min)
@@ -484,7 +551,9 @@ def _body_energy(
     speed[unreliable | ~np.isfinite(speed)] = np.nan
     with np.errstate(all="ignore"):
         energy = np.nanmean(speed, axis=1)
-    fill = float(np.nanmean(energy)) if np.isfinite(energy).any() else 0.0
+    if not np.isfinite(energy).any():
+        return np.full(len(t), np.nan)
+    fill = float(np.nanmean(energy))
     return np.where(np.isfinite(energy), energy, fill)
 
 
@@ -495,7 +564,11 @@ def _lag0_windows(
     child: list[np.ndarray],
     window_frames: int,
 ) -> pd.DataFrame:
-    """Pearson correlation at lag 0 in half-overlapping windows inside each run."""
+    """Pearson correlation at lag 0 in half-overlapping windows inside each run.
+
+    Windows where either person's energy is flat or unmeasured have no
+    defined correlation and are left out (not counted as zero synchrony).
+    """
     step = max(1, window_frames // 2)
     rows = []
     for run_id, ts, p, c in zip(run_ids, times, parent, child):
@@ -508,13 +581,20 @@ def _lag0_windows(
                 c[start : start + window_frames]
                 - c[start : start + window_frames].mean()
             )
-            denom = np.sqrt(pw @ pw) * np.sqrt(cw @ cw)
+            p_norm, c_norm = np.sqrt(pw @ pw), np.sqrt(cw @ cw)
+            # Flat (or unmeasured) energy in either person: undefined r.
+            # 1e-6 px/s is far below any real movement but above float noise.
+            if not (np.isfinite(p_norm) and np.isfinite(c_norm)):
+                continue
+            if p_norm < 1e-6 or c_norm < 1e-6:
+                continue
+            denom = p_norm * c_norm
             rows.append(
                 {
                     "segment_id": run_id,
                     "window_start_s": ts[start],
                     "window_end_s": ts[start + window_frames - 1],
-                    "sync_r": float(pw @ cw / denom) if denom > 1e-12 else 0.0,
+                    "sync_r": float(pw @ cw / denom),
                 }
             )
     return pd.DataFrame(rows, columns=SYNC_COLUMNS)
@@ -526,7 +606,7 @@ def compute_movement_sync(
     child_track_id: int = 1,
     window_s: float = SYNC_WINDOW_S,
     conf_min: float = SYNC_CONF_MIN,
-    shift_s: float = XCORR_CHANCE_SHIFT_S,
+    shift_step_s: float = SYNC_SHIFT_STEP_S,
     max_shifts: int = 10,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Whole-body movement synchrony and its chance level.
@@ -536,9 +616,13 @@ def compute_movement_sync(
     windows (50% overlap) placed inside gap-free runs of frames where both are
     tracked. The chance level repeats this with the child's energy shifted
     circularly across the concatenated runs, so the child is paired with the
-    parent's movement from another moment; it pools several shifts (multiples
-    of ``shift_s``, at most ``max_shifts``; half the usable data when shorter
-    than two shifts).
+    parent's movement from another moment. One rule for every block length:
+    shifts every ``shift_step_s`` seconds, at least 20 s from no shift and
+    from a full turn, thinned evenly to at most ``max_shifts``; with fewer
+    than ``SYNC_MIN_SHIFTS`` possible shifts there is no chance level (a
+    single shift is too arbitrary: on 1018 B grocery_part1 one 53 s shift gave
+    -0.21, while shifts of 20-80 s averaged -0.03). This is a time-shift
+    reference level, not a significance test.
 
     On sessions 1011v3-1020v3 this separated real from shifted data (mean
     difference +0.17, effect size 1.7), survived removing background motion
@@ -551,7 +635,7 @@ def compute_movement_sync(
         child_track_id: Track ID for the child.
         window_s: Window length in seconds.
         conf_min: Minimum keypoint confidence for a keypoint to count.
-        shift_s: Step between chance-level shifts of the child, in seconds.
+        shift_step_s: Step between chance-level shifts of the child, seconds.
         max_shifts: Most shifts pooled for the chance level.
 
     Returns:
@@ -596,37 +680,68 @@ def compute_movement_sync(
         return empty, empty.copy()
 
     real = _lag0_windows(run_ids, times, parent, child, window_frames)
+    if real.empty:
+        return real, empty.copy()
+    real_keys = real[["segment_id", "window_start_s"]]
     child_all = np.concatenate(child)
     bounds = np.cumsum([len(c) for c in child])[:-1]
     chance_tables = []
-    for shift in _chance_shifts(len(child_all), dt, shift_s, max_shifts):
+    for shift in _chance_shifts(len(child_all), dt, shift_step_s, max_shifts):
         shifted = np.split(np.roll(child_all, -shift), bounds)
         table = _lag0_windows(run_ids, times, parent, shifted, window_frames)
-        chance_tables.append(table.assign(shift_s=round(shift * dt, 6)))
+        # Same moments as the real windows, so real and reference compare
+        # like with like.
+        table = table.merge(real_keys, on=["segment_id", "window_start_s"])
+        # Keep a shift only if it covers every real window, so the reference
+        # and the real mean always average over the same moments.
+        if len(table) == len(real_keys):
+            chance_tables.append(table.assign(shift_s=round(shift * dt, 6)))
     if not chance_tables:
         return real, empty.copy()
     chance = pd.concat(chance_tables, ignore_index=True)
     return real, chance
 
 
-def _chance_shifts(n: int, dt: float, shift_s: float, max_shifts: int) -> list[int]:
+def _chance_shifts(n: int, dt: float, step_s: float, max_shifts: int) -> list[int]:
     """Circular shifts (in frames) for the chance level.
 
-    Multiples of ``shift_s`` that stay at least ``shift_s`` from a full turn,
-    evenly thinned to at most ``max_shifts``; half the data when it is
-    shorter than two shifts. Averaging several shifts steadies the chance
-    level, which a single shift leaves noisy in short blocks.
+    Every ``step_s`` from ``MIN_CHANCE_SHIFT_S`` up to ``MIN_CHANCE_SHIFT_S``
+    short of a full turn, thinned evenly to at most ``max_shifts``. Returns
+    no shifts when fewer than ``SYNC_MIN_SHIFTS`` fit, because one or two
+    shifts give an arbitrary chance level in short blocks.
     """
-    step = int(round(shift_s / dt))
-    if step <= 0 or n < 2 * step:
-        half = n // 2
-        # Under 40 s of data the shift would be < 20 s: no chance level.
-        return [half] if half * dt >= MIN_CHANCE_SHIFT_S - 1e-9 else []
-    shifts = list(range(step, n - step + 1, step))
+    lo = int(np.ceil(MIN_CHANCE_SHIFT_S / dt - 1e-9))
+    step = max(1, int(round(step_s / dt)))
+    shifts = list(range(lo, n - lo + 1, step))
+    if len(shifts) < SYNC_MIN_SHIFTS:
+        return []
     if len(shifts) > max_shifts:
         keep = np.linspace(0, len(shifts) - 1, max_shifts).round().astype(int)
         shifts = [shifts[i] for i in sorted(set(keep))]
-    return shifts
+    return shifts if len(shifts) >= SYNC_MIN_SHIFTS else []
+
+
+def chance_summary(chance: pd.DataFrame) -> dict:
+    """Reference level from shifted windows: each shift counts equally.
+
+    Args:
+        chance: Shifted windows with ``shift_s`` and ``sync_r``.
+
+    Returns:
+        ``sync_chance_mean`` (mean of per-shift means), ``sync_chance_sd``
+        (spread across shifts) and ``sync_chance_n_shifts``; empty when fewer
+        than ``SYNC_MIN_SHIFTS`` shifts have windows.
+    """
+    if chance.empty:
+        return {}
+    per_shift = chance.groupby("shift_s")["sync_r"].mean().dropna()
+    if len(per_shift) < SYNC_MIN_SHIFTS:
+        return {}
+    return {
+        "sync_chance_mean": float(per_shift.mean()),
+        "sync_chance_sd": float(per_shift.std()),
+        "sync_chance_n_shifts": int(len(per_shift)),
+    }
 
 
 # ====================================================================

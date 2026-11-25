@@ -24,16 +24,20 @@ from typing import Any
 
 import pandas as pd
 
-from video_analysis.pose_metrics import MIN_SYNC_WINDOWS, quality_verdict
+from video_analysis.pose_metrics import (  # noqa: F401 (METRICS_VERSION re-exported)
+    METRICS_VERSION,
+    MIN_SYNC_WINDOWS,
+    body_scaled_proximity,
+    quality_verdict,
+)
 
 SESSION_METRICS_CSV = "session_metrics.csv"
 ALL_SESSIONS_CSV = "all_sessions_metrics.csv"
 REPORT_HTML = "report.html"
 TASK_METRICS_CSV = "task_metrics.csv"
-# Bump when metric definitions change, so study tables never silently mix
-# sessions processed under different definitions. 2026-11-16: 5 fps even frame
-# timing, short-gap-only filling, whole-body synchrony, task table, verdict.
-METRICS_VERSION = "2026-11-16"
+# The version is defined in pose_metrics and stored with each block's metrics;
+# summaries written before it was stored carry UNSTAMPED_METRICS_VERSION.
+UNSTAMPED_METRICS_VERSION = "2026-11-16 or earlier"
 LEGACY_METRICS_VERSION = "before-2026-11-16"
 ALL_SESSIONS_TASK_CSV = "all_sessions_task_metrics.csv"
 
@@ -186,12 +190,15 @@ def collect_task_rows(session_dir: Path) -> pd.DataFrame:
 
         prox = _read_csv(camera_dir / "pose_metrics_proximity.csv")
         if not prox.empty and "block" in prox:
-            dist = prox.loc[prox["block"].isin(names), "torso_distance_px"]
+            task_prox = prox.loc[prox["block"].isin(names)]
+            dist = task_prox["torso_distance_px"]
             if len(dist):
                 row["proximity_mean"] = float(dist.mean())
                 row["proximity_median"] = float(dist.median())
                 row["proximity_std"] = float(dist.std())
                 row["proximity_n_frames"] = int(len(dist))
+                # One ruler per camera (all its frames), as in pose_metrics.
+                row.update(body_scaled_proximity(task_prox, ruler_frames=prox))
 
         sync = _read_csv(camera_dir / "pose_metrics_sync.csv")
         if not sync.empty and "block" in sync:
@@ -200,12 +207,21 @@ def collect_task_rows(session_dir: Path) -> pd.DataFrame:
                 row["sync_mean"] = float(windows.mean())
                 row["sync_std"] = float(windows.std())
                 row["sync_n_windows"] = int(len(windows))
+                # Chance weighted by each part's windows, only when every
+                # part that has windows also has a chance level; otherwise
+                # the subtraction would mix supports, so leave it missing.
+                row["sync_chance_mean"] = float("nan")
+                row["sync_minus_chance"] = float("nan")
                 if {"sync_chance_mean", "sync_n_windows"} <= set(parts.columns):
-                    chance = _weighted_mean(
-                        parts["sync_chance_mean"], parts["sync_n_windows"]
-                    )
-                    row["sync_chance_mean"] = chance
-                    row["sync_minus_chance"] = row["sync_mean"] - chance
+                    n_win = pd.to_numeric(parts["sync_n_windows"], errors="coerce")
+                    with_windows = parts[n_win.fillna(0) > 0]
+                    if with_windows["sync_chance_mean"].notna().all():
+                        chance = _weighted_mean(
+                            with_windows["sync_chance_mean"],
+                            with_windows["sync_n_windows"],
+                        )
+                        row["sync_chance_mean"] = chance
+                        row["sync_minus_chance"] = row["sync_mean"] - chance
 
         if "gaze_n_frames" in parts:
             weight = parts["gaze_n_frames"]
@@ -308,6 +324,17 @@ def _sync_chance(row: pd.Series) -> str:
     if chance is None or (isinstance(chance, float) and pd.isna(chance)):
         return ""
     return f' <span class="muted">(chance {float(chance):.2f})</span>'
+
+
+def _distance_cell(row: pd.Series) -> str:
+    """Body-scaled distance, falling back to pixels for older runs."""
+    scaled = row.get("proximity_scaled_median")
+    if not _is_missing(scaled):
+        return _fmt(scaled, 2)
+    pixels = row.get("proximity_median")
+    if _is_missing(pixels):
+        return "–"
+    return f'{_fmt(pixels)} <span class="muted">px</span>'
 
 
 def _coverage_cell(row: pd.Series) -> str:
@@ -518,7 +545,7 @@ def _task_table_html(tasks: pd.DataFrame) -> str:
         "Data check",
         "Usable time",
         "Both people tracked",
-        "Distance (median px)",
+        "Distance (median, body sizes)",
         "Movement synchrony",
     ] + [f"{label} (%)" for _, label in gaze_cols]
     head = "".join(f'<th scope="col">{label}</th>' for label in labels)
@@ -542,7 +569,7 @@ def _task_table_html(tasks: pd.DataFrame) -> str:
             _verdict_cell(row),
             _fmt_duration(row.get("valid_seconds_both")),
             _coverage_cell(row),
-            _fmt(row.get("proximity_median")),
+            _distance_cell(row),
             _sync_cell(row),
         ] + [f"{_fmt(row.get(c))}{_chance(row, c)}" for c, _ in gaze_cols]
         body.append(
@@ -682,13 +709,17 @@ person or an object.</p>
 found. <strong>Both people tracked</strong>: the same as a share of the task.
 Every other number uses only those frames.</li>
 <li><strong>Distance</strong>: distance between the parent's and the child's
-torso centers, in image pixels (compare within a camera, not across
-cameras).</li>
+torso centers, divided by the pair's typical torso length on this camera
+(torso-normalized; not a physical distance). This reduces the zoom difference
+between cameras, but each camera is a flat picture: it sees distance across
+the image, not toward or away from it, so the two cameras can still disagree.
+Compare tasks within one camera.</li>
 <li><strong>Movement synchrony</strong>: how closely the amount of whole-body
 movement of the two people rises and falls together, as a correlation in
 20-second windows (0 = unrelated, 1 = identical). <em>Chance</em> is the same
-measure with the child's movement taken from other moments. Only the part
-above chance reflects the interaction. It is not shown when there are fewer
+measure with the child's movement taken from other moments. A value above
+chance means more synchrony than that reference; it is not a significance
+test. It is not shown when there are fewer
 than {MIN_SYNC_WINDOWS} unbroken 20-second stretches.</li>
 {gaze_note}
 </ul>
@@ -696,6 +727,27 @@ than {MIN_SYNC_WINDOWS} unbroken 20-second stretches.</li>
 {"".join(media)}
 </body></html>
 """
+
+
+def _stamp_version(rows: pd.DataFrame) -> pd.DataFrame:
+    """Keep the version stored with each block's metrics (never restamp)."""
+    if rows.empty:
+        return rows.assign(metrics_version=pd.Series(dtype=str))
+    if "metrics_version" not in rows.columns:
+        rows["metrics_version"] = UNSTAMPED_METRICS_VERSION
+    rows["metrics_version"] = rows["metrics_version"].fillna(UNSTAMPED_METRICS_VERSION)
+    return rows
+
+
+def _joined_version(versions: pd.Series, camera_id: str, parts: list[str]) -> str:
+    """One version for a task, or "mixed: a; b" when its parts differ."""
+    found = sorted(
+        {
+            str(versions.get((camera_id, part), UNSTAMPED_METRICS_VERSION))
+            for part in parts
+        }
+    )
+    return found[0] if len(found) == 1 else "mixed: " + "; ".join(found)
 
 
 def write_session_outputs(session_dir: Path) -> pd.DataFrame:
@@ -708,10 +760,15 @@ def write_session_outputs(session_dir: Path) -> pd.DataFrame:
         The session table.
     """
     session_dir = Path(session_dir)
-    rows = collect_session_rows(session_dir)
-    rows = rows.assign(metrics_version=METRICS_VERSION)
+    rows = _stamp_version(collect_session_rows(session_dir))
     rows.to_csv(session_dir / SESSION_METRICS_CSV, index=False)
-    tasks = collect_task_rows(session_dir).assign(metrics_version=METRICS_VERSION)
+    tasks = collect_task_rows(session_dir)
+    if not tasks.empty:
+        versions = rows.groupby(["camera_id", "block"])["metrics_version"].first()
+        tasks["metrics_version"] = [
+            _joined_version(versions, cam, parts.split(";"))
+            for cam, parts in zip(tasks["camera_id"], tasks["parts"])
+        ]
     tasks.to_csv(session_dir / TASK_METRICS_CSV, index=False)
     (session_dir / REPORT_HTML).write_text(
         render_report_html(session_dir, rows, tasks), encoding="utf-8"
