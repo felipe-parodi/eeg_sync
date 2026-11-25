@@ -24,7 +24,11 @@ from typing import Any
 
 import pandas as pd
 
-from video_analysis.pose_metrics import MIN_SYNC_WINDOWS, quality_verdict
+from video_analysis.pose_metrics import (
+    MIN_SYNC_WINDOWS,
+    body_scaled_proximity,
+    quality_verdict,
+)
 
 SESSION_METRICS_CSV = "session_metrics.csv"
 ALL_SESSIONS_CSV = "all_sessions_metrics.csv"
@@ -186,12 +190,15 @@ def collect_task_rows(session_dir: Path) -> pd.DataFrame:
 
         prox = _read_csv(camera_dir / "pose_metrics_proximity.csv")
         if not prox.empty and "block" in prox:
-            dist = prox.loc[prox["block"].isin(names), "torso_distance_px"]
+            task_prox = prox.loc[prox["block"].isin(names)]
+            dist = task_prox["torso_distance_px"]
             if len(dist):
                 row["proximity_mean"] = float(dist.mean())
                 row["proximity_median"] = float(dist.median())
                 row["proximity_std"] = float(dist.std())
                 row["proximity_n_frames"] = int(len(dist))
+                # One ruler per camera (all its frames), as in pose_metrics.
+                row.update(body_scaled_proximity(task_prox, ruler_frames=prox))
 
         sync = _read_csv(camera_dir / "pose_metrics_sync.csv")
         if not sync.empty and "block" in sync:
@@ -308,6 +315,17 @@ def _sync_chance(row: pd.Series) -> str:
     if chance is None or (isinstance(chance, float) and pd.isna(chance)):
         return ""
     return f' <span class="muted">(chance {float(chance):.2f})</span>'
+
+
+def _distance_cell(row: pd.Series) -> str:
+    """Body-scaled distance, falling back to pixels for older runs."""
+    scaled = row.get("proximity_scaled_median")
+    if not _is_missing(scaled):
+        return _fmt(scaled, 2)
+    pixels = row.get("proximity_median")
+    if _is_missing(pixels):
+        return "–"
+    return f'{_fmt(pixels)} <span class="muted">px</span>'
 
 
 def _coverage_cell(row: pd.Series) -> str:
@@ -518,7 +536,7 @@ def _task_table_html(tasks: pd.DataFrame) -> str:
         "Data check",
         "Usable time",
         "Both people tracked",
-        "Distance (median px)",
+        "Distance (median, body sizes)",
         "Movement synchrony",
     ] + [f"{label} (%)" for _, label in gaze_cols]
     head = "".join(f'<th scope="col">{label}</th>' for label in labels)
@@ -542,7 +560,7 @@ def _task_table_html(tasks: pd.DataFrame) -> str:
             _verdict_cell(row),
             _fmt_duration(row.get("valid_seconds_both")),
             _coverage_cell(row),
-            _fmt(row.get("proximity_median")),
+            _distance_cell(row),
             _sync_cell(row),
         ] + [f"{_fmt(row.get(c))}{_chance(row, c)}" for c, _ in gaze_cols]
         body.append(
@@ -682,8 +700,10 @@ person or an object.</p>
 found. <strong>Both people tracked</strong>: the same as a share of the task.
 Every other number uses only those frames.</li>
 <li><strong>Distance</strong>: distance between the parent's and the child's
-torso centers, in image pixels (compare within a camera, not across
-cameras).</li>
+torso centers, in body sizes (divided by the pair's average torso length, so
+zoom and how far the camera stands do not matter). Each camera is a flat
+picture: it sees distance across the image but not toward or away from it, so
+the two cameras can still disagree. Compare tasks within one camera.</li>
 <li><strong>Movement synchrony</strong>: how closely the amount of whole-body
 movement of the two people rises and falls together, as a correlation in
 20-second windows (0 = unrelated, 1 = identical). <em>Chance</em> is the same

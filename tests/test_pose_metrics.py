@@ -256,3 +256,115 @@ def test_verdict_thresholds_match_lab_recommendation():
         )[0]
         == "usable"
     )
+
+
+def _upright_pose(
+    n_frames: int,
+    parent_x: float,
+    child_x: float,
+    parent_torso: float,
+    child_torso: float,
+) -> pd.DataFrame:
+    """Two people with shoulders ``torso`` px above their hips (no noise)."""
+    rows = []
+    for f in range(n_frames):
+        for tid, label, cx, torso in (
+            (0, "parent", parent_x, parent_torso),
+            (1, "child", child_x, child_torso),
+        ):
+            for kp, dx, y in (
+                ("kp_005", -10.0, 300.0 - torso),
+                ("kp_006", 10.0, 300.0 - torso),
+                ("kp_011", -8.0, 300.0),
+                ("kp_012", 8.0, 300.0),
+            ):
+                rows.append(
+                    {
+                        "frame_idx": f,
+                        "timestamp_s": f / 5.0,
+                        "track_id": tid,
+                        "track_label": label,
+                        "keypoint_name": kp,
+                        "x_m": cx + dx,
+                        "y_m": y,
+                        "z_m": 0.0,
+                        "keypoint_confidence": 0.9,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_proximity_frames_carry_torso_lengths():
+    from gaze_analysis.synchrony import compute_torso_proximity
+
+    pose = _upright_pose(10, 300.0, 500.0, parent_torso=80.0, child_torso=40.0)
+    prox = compute_torso_proximity(pose, 0, 1)
+
+    assert np.allclose(prox["parent_torso_px"], 80.0)
+    assert np.allclose(prox["child_torso_px"], 40.0)
+
+
+def test_block_stats_include_body_scaled_proximity():
+    """Distance 300 px with torsos 80 and 40 px: scale 60 px, scaled distance 5."""
+    pose = _upright_pose(50, 300.0, 600.0, parent_torso=80.0, child_torso=40.0)
+    blocks = [SessionBlock("grocery", 0.0, 10.0, "#999")]
+
+    stats = compute_per_block_metrics(pose, blocks, frame_rate=5.0)["block_stats"][0]
+
+    assert stats["body_scale_px"] == pytest.approx(60.0)
+    # Torso centroids sit half a torso above the hips, so they differ in height.
+    expected = np.hypot(300.0, 40.0 - 20.0) / 60.0
+    assert stats["proximity_scaled_median"] == pytest.approx(expected)
+    assert stats["proximity_scaled_mean"] == pytest.approx(expected)
+
+
+def test_scaled_proximity_is_independent_of_zoom():
+    """The same scene filmed twice as large gives the same scaled distance."""
+    near = _upright_pose(20, 300.0, 600.0, parent_torso=80.0, child_torso=40.0)
+    far = near.assign(x_m=near["x_m"] / 2, y_m=near["y_m"] / 2)
+    blocks = [SessionBlock("grocery", 0.0, 10.0, "#999")]
+
+    s_near = compute_per_block_metrics(near, blocks, frame_rate=5.0)["block_stats"][0]
+    s_far = compute_per_block_metrics(far, blocks, frame_rate=5.0)["block_stats"][0]
+
+    assert s_far["proximity_median"] == pytest.approx(s_near["proximity_median"] / 2)
+    assert s_far["proximity_scaled_median"] == pytest.approx(
+        s_near["proximity_scaled_median"]
+    )
+
+
+def test_plot_synchrony_draws_new_measure(tmp_path):
+    from video_analysis.pose_metrics import plot_synchrony
+
+    sync_df = pd.DataFrame(
+        {
+            "segment_id": 0,
+            "window_start_s": np.arange(14) * 10.0,
+            "window_end_s": np.arange(14) * 10.0 + 20.0,
+            "sync_r": np.linspace(0.1, 0.5, 14),
+            "block": ["grocery"] * 12 + ["storybook"] * 2,
+        }
+    )
+    stats = [
+        {
+            "block": "grocery",
+            "sync_mean": 0.3,
+            "sync_chance_mean": 0.0,
+            "sync_n_windows": 12,
+        },
+        {
+            "block": "storybook",
+            "sync_mean": 0.45,
+            "sync_chance_mean": 0.0,
+            "sync_n_windows": 2,
+        },
+    ]
+    blocks = [
+        SessionBlock("grocery", 0.0, 120.0, "#999"),
+        SessionBlock("storybook", 120.0, 200.0, "#999"),
+    ]
+
+    plot_synchrony(sync_df, stats, blocks, tmp_path / "pose_synchrony")
+
+    assert (tmp_path / "pose_synchrony.png").stat().st_size > 0
+    assert (tmp_path / "pose_synchrony.svg").exists()

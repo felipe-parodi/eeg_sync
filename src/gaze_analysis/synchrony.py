@@ -67,6 +67,39 @@ def _torso_centroid(pose_df: pd.DataFrame, track_id: int) -> pd.DataFrame:
     return grouped
 
 
+def _torso_length(pose_df: pd.DataFrame, track_id: int) -> pd.DataFrame:
+    """Per-frame torso length: mid-shoulder to mid-hip distance in pixels.
+
+    Used as a body-size ruler: the same person filmed from further away has a
+    proportionally shorter torso on screen, so dividing a distance by it
+    removes zoom and camera-distance differences. It does not remove viewing
+    angle effects (distance toward or away from the camera stays invisible).
+
+    Args:
+        pose_df: Pose DataFrame with keypoint_name, x_m, y_m columns.
+        track_id: Which track to measure.
+
+    Returns:
+        DataFrame with frame_idx and torso_length_px (frames missing any of the
+        four torso keypoints are left out).
+    """
+    subset = pose_df[
+        (pose_df["track_id"] == track_id)
+        & (pose_df["keypoint_name"].isin(_TORSO_KEYPOINTS))
+    ]
+    wide = subset.pivot_table(
+        index="frame_idx", columns="keypoint_name", values=["x_m", "y_m"]
+    ).dropna()
+    if wide.empty or len(wide.columns) < 8:
+        return pd.DataFrame({"frame_idx": [], "torso_length_px": []})
+    x, y = wide["x_m"], wide["y_m"]
+    dx = (x["kp_005"] + x["kp_006"] - x["kp_011"] - x["kp_012"]) / 2
+    dy = (y["kp_005"] + y["kp_006"] - y["kp_011"] - y["kp_012"]) / 2
+    return pd.DataFrame(
+        {"frame_idx": wide.index, "torso_length_px": np.hypot(dx, dy).to_numpy()}
+    )
+
+
 # ====================================================================
 # Metric 1: Torso Proximity
 # ====================================================================
@@ -85,7 +118,10 @@ def compute_torso_proximity(
         child_track_id: Track ID for the child.
 
     Returns:
-        DataFrame with frame_idx, timestamp_s, torso_distance_px columns.
+        DataFrame with frame_idx, timestamp_s, torso_distance_px, and each
+        person's torso length (parent_torso_px, child_torso_px; NaN when a
+        shoulder or hip is missing), used to express the distance in body
+        sizes.
     """
     parent = _torso_centroid(pose_df, parent_track_id)
     child = _torso_centroid(pose_df, child_track_id)
@@ -96,8 +132,28 @@ def compute_torso_proximity(
         (merged["cx_p"] - merged["cx_c"]) ** 2 + (merged["cy_p"] - merged["cy_c"]) ** 2
     )
 
-    return merged[["frame_idx", "timestamp_s_p", "torso_distance_px"]].rename(
-        columns={"timestamp_s_p": "timestamp_s"}
+    lengths = _torso_length(pose_df, parent_track_id).merge(
+        _torso_length(pose_df, child_track_id),
+        on="frame_idx",
+        how="outer",
+        suffixes=("_p", "_c"),
+    )
+    merged = merged.merge(lengths, on="frame_idx", how="left")
+
+    return merged[
+        [
+            "frame_idx",
+            "timestamp_s_p",
+            "torso_distance_px",
+            "torso_length_px_p",
+            "torso_length_px_c",
+        ]
+    ].rename(
+        columns={
+            "timestamp_s_p": "timestamp_s",
+            "torso_length_px_p": "parent_torso_px",
+            "torso_length_px_c": "child_torso_px",
+        }
     )
 
 

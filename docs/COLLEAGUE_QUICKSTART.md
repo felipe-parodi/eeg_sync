@@ -127,8 +127,16 @@ Key columns:
 
 - `coverage_both`, `valid_seconds_both`: share and seconds of the time with
   both people tracked.
-- `proximity_mean`, `proximity_median`: distance between the two torsos in
-  image pixels. Compare within a camera, not across cameras.
+- `proximity_scaled_median` (and `_mean`): distance between the two torsos
+  in body sizes (divided by the pair's average torso length). Use this one.
+  `proximity_mean`, `proximity_median` are the same in image pixels, which
+  depend on zoom and are not comparable across cameras.
+- Why the two cameras can still disagree: each camera is a flat picture. It
+  sees distance across the image, never toward or away from it. Two people
+  standing one behind the other, as seen by a camera, look close together even
+  when they are far apart. So pick one camera per dyad (the one with more
+  usable time), use it for every task and measure, and include camera as a
+  covariate.
 - `sync_mean` and `sync_chance_mean`: movement synchrony (how closely the
   amount of whole-body movement of the two rises and falls together, in
   20-second windows) and the same measure with the child's movement taken

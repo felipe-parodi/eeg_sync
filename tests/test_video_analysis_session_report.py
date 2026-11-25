@@ -418,3 +418,46 @@ def test_report_is_self_contained(tmp_path: Path) -> None:
     assert not re.search(r"""(?:src|href)\s*=\s*["']?(?:https?:)?//""", html)
     assert "@import" not in html and "<link" not in html
     assert "--color-accent" in html  # the portal's tokens, inlined
+
+
+def test_task_rows_pool_body_scaled_proximity(tmp_path: Path) -> None:
+    from video_analysis.session_report import collect_task_rows
+
+    session = tmp_path / "1019"
+    _write_split_session(session)
+    prox_path = session / "camera_a" / "pose_metrics_proximity.csv"
+    prox = pd.read_csv(prox_path)
+    # grocery part1 torsos 20/10 px, part2 60/30 px; storybook 50/30 px.
+    prox["parent_torso_px"] = [20.0] * 150 + [60.0] * 300 + [50.0] * 540
+    prox["child_torso_px"] = [10.0] * 150 + [30.0] * 300 + [30.0] * 540
+    prox.to_csv(prox_path, index=False)
+
+    tasks = collect_task_rows(session).set_index("task")
+
+    # One ruler per camera, from all of its frames (not per task: sitting in
+    # storybook shortens the torso on screen and would leak posture into the
+    # task contrast). Median parent torso 50, child 30 -> 40 px for both tasks.
+    g = tasks.loc["grocery"]
+    assert g["body_scale_px"] == 40.0
+    assert tasks.loc["storybook", "body_scale_px"] == 40.0
+    assert abs(g["proximity_scaled_median"] - 40.0 / 40.0) < 1e-9
+    assert abs(g["proximity_scaled_mean"] - 30.0 / 40.0) < 1e-9
+    # Task contrast in body sizes equals the contrast in pixels.
+    s = tasks.loc["storybook"]
+    ratio_px = g["proximity_median"] / s["proximity_median"]
+    ratio_scaled = g["proximity_scaled_median"] / s["proximity_scaled_median"]
+    assert abs(ratio_px - ratio_scaled) < 1e-9
+
+
+def test_task_rows_without_torso_columns_have_no_scaled_proximity(
+    tmp_path: Path,
+) -> None:
+    from video_analysis.session_report import collect_task_rows
+
+    session = tmp_path / "1019"
+    _write_split_session(session)  # older runs: no torso columns
+
+    tasks = collect_task_rows(session)
+
+    assert "proximity_scaled_median" not in tasks.columns
+    assert tasks["proximity_median"].notna().all()

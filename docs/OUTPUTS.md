@@ -199,7 +199,8 @@ that camera's own clock.
 | `frames_with_parent`, `frames_with_child`, `frames_with_both` | Frames in which each person (or both) was tracked. |
 | `coverage_both` | `frames_with_both / block_frames`. All dyad metrics use only those frames. |
 | `low_coverage` | `true` when `coverage_both` < 0.5: interpret the block's metrics with care. |
-| `proximity_mean/std/median/n_frames` | Torso distance (pixels). |
+| `proximity_mean/std/median/n_frames` | Torso distance (pixels). Pixels depend on zoom and camera distance: do not compare across cameras. |
+| `body_scale_px`, `proximity_scaled_mean/median` | The pair's body size (average of the parent's and child's median torso length, mid-shoulder to mid-hip, in pixels) and the torso distance divided by it, i.e. in body sizes. This removes zoom and camera-distance differences (on 1011-1020 the short camera read ~1.45x more pixels than the tall one; scaled, ~1.0x). It cannot remove viewing angle: a 2D camera does not see distance toward or away from itself, so the two cameras still disagree moment to moment (1018 grocery: r = 0.38). Use one camera per dyad and include camera as a covariate. Runs before 2026-11-25 lack these columns until pose metrics are re-run. |
 | `valid_seconds_both`, `n_segments`, `longest_segment_s` | Seconds with both people tracked, the number of unbroken stretches of such frames, and the longest one. |
 | `quality_verdict`, `quality_reasons` | Data check and recommended inclusion rule: `insufficient` (both people tracked < 2 min), `check` (coverage < 50% or fewer than 10 synchrony windows; synchrony is then not shown in the report), else `usable`. Basis (1011-1020): a 2 min sample ranks dyads' distance like the full task at r = 0.85; 10 synchrony windows give r ~ 0.87 (3 windows r = 0.66). Always also check the overlay clips. Thresholds are `MIN_VALID_SECONDS`, `LOW_COVERAGE_THRESHOLD`, `MIN_SYNC_WINDOWS` in `src/video_analysis/pose_metrics.py`. Also in `task_metrics.csv`, from pooled values. |
 | `sync_mean/std`, `sync_n_windows` | **Movement synchrony (the reported measure).** Each person's whole-body motion energy (mean speed of keypoints with confidence >= 0.3) is correlated between parent and child at lag 0 in 20 s windows (50% overlap) inside unbroken stretches where both are tracked. |
@@ -207,7 +208,7 @@ that camera's own clock.
 | `xcorr_mean/std`, `lag_mean_s/std_s`, `xcorr_n_windows` | *Superseded* (kept so older tables still line up). Movement synchrony in 5 s windows. Windows sit inside unbroken stretches where both people are tracked and never cross a gap; stretches shorter than 5 s give no window. |
 | `xcorr_chance_mean`, `xcorr_minus_chance` | *Superseded.* The same torso-speed score with the child's movement shifted 60 s (half the usable data when shorter), i.e. the level expected by chance, and the real score minus it. Synchrony is meaningful only when `xcorr_minus_chance` is clearly above 0. |
 
-Frame-level tables: `pose_metrics_proximity.csv`, `pose_metrics_sync.csv` (one row per 20 s window: `segment_id`, `window_start_s`, `window_end_s`, `sync_r`, `block`) and the superseded `pose_metrics_xcorr.csv`.
+Frame-level tables: `pose_metrics_proximity.csv` (with `parent_torso_px`, `child_torso_px` per frame), `pose_metrics_sync.csv` (one row per 20 s window: `segment_id`, `window_start_s`, `window_end_s`, `sync_r`, `block`) and the superseded `pose_metrics_xcorr.csv`.
 
 `video-gaze-metrics` writes `gaze_metrics_summary.json`: per block, `n_frames`
 and `<category>_pct` for every category (summing to 100). It also writes
@@ -277,7 +278,7 @@ table against these labels.
 | `overlay.mp4` / `overlay_<block>.mp4` | `video-visualize` (portal: first and last 30 s of each block) | Watch the pose tracking play back over the original frames. The fastest way to spot a swap or a missed detection. |
 | `viz_3d/*.png` (+ optional `skeleton.mp4`) | `video-visualize-3d` | Confirm 3D pose looks plausible (limb lengths constant, no jitter to infinity). |
 | `block_checks/<block>_sample_*.png` | `video-gaze-snapshots` | Confirm gaze heatmaps land in plausible places (e.g. on a toy during joint attention). |
-| `synchrony_dashboard.png` | `gaze-plot` | 4-panel summary across the whole session, shaded by block. |
+| `synchrony_dashboard.png` | `gaze-plot` | Summary across the whole session, shaded by block: distance, movement synchrony windows with chance (the earlier cross-correlation panels for runs without `pose_metrics_sync.csv`), gaze categories, gaze convergence. |
 
 ---
 

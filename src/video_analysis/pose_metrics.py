@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -159,6 +159,48 @@ def quality_verdict(stats: Dict[str, Any]) -> tuple[str, str]:
     return ("check" if reasons else "usable"), "; ".join(reasons)
 
 
+def body_scaled_proximity(
+    prox: pd.DataFrame, ruler_frames: Optional[pd.DataFrame] = None
+) -> Dict[str, float]:
+    """Torso distance expressed in body sizes, comparable across zoom levels.
+
+    The ruler is the average of the parent's and the child's median torso
+    length (medians, so brief bends and mis-detections do not move it).
+    Callers pass all of a camera's frames as ``ruler_frames``, so one camera
+    has one ruler: a per-task ruler would leak posture into task contrasts
+    (sitting in storybook shortens the torso on screen), whereas a single
+    ruler keeps the contrast between tasks the same as in pixels. Dividing by
+    it removes differences in zoom and in how far the camera stands from the
+    pair; it does not remove viewing-angle effects, because a 2D camera cannot
+    see distance toward or away from itself.
+
+    Args:
+        prox: Per-frame proximity rows to summarise, with torso_distance_px
+            and, from runs after 2026-11-25, parent_torso_px and
+            child_torso_px.
+        ruler_frames: Frames to measure the ruler on (default: ``prox``).
+
+    Returns:
+        ``body_scale_px``, ``proximity_scaled_mean`` and
+        ``proximity_scaled_median``, or an empty dict when torso lengths are
+        not available.
+    """
+    ruler = prox if ruler_frames is None else ruler_frames
+    if not {"parent_torso_px", "child_torso_px"} <= set(ruler.columns):
+        return {}
+    parent = ruler["parent_torso_px"].median()
+    child = ruler["child_torso_px"].median()
+    if pd.isna(parent) or pd.isna(child) or parent + child <= 0:
+        return {}
+    scale = float((parent + child) / 2)
+    dist = prox["torso_distance_px"]
+    return {
+        "body_scale_px": scale,
+        "proximity_scaled_mean": float(dist.mean()) / scale,
+        "proximity_scaled_median": float(dist.median()) / scale,
+    }
+
+
 def compute_per_block_metrics(
     pose_df: pd.DataFrame,
     blocks: List[SessionBlock],
@@ -257,6 +299,11 @@ def compute_per_block_metrics(
     proximity_df = (
         pd.concat(all_proximity, ignore_index=True) if all_proximity else pd.DataFrame()
     )
+    # Body-size distance: one ruler from all of this camera's frames.
+    for stats in block_stats:
+        if "proximity_n_frames" in stats:
+            frames = proximity_df[proximity_df["block"] == stats["block"]]
+            stats.update(body_scaled_proximity(frames, ruler_frames=proximity_df))
     xcorr_df = pd.concat(all_xcorr, ignore_index=True) if all_xcorr else pd.DataFrame()
 
     sync_df = pd.concat(all_sync, ignore_index=True) if all_sync else pd.DataFrame()
@@ -354,76 +401,115 @@ def plot_proximity(
 
 
 def plot_synchrony(
-    xcorr_df: pd.DataFrame,
+    sync_df: pd.DataFrame,
+    block_stats: List[Dict[str, Any]],
     blocks: List[SessionBlock],
     output_path: Path,
 ) -> None:
-    """Figure 2: Movement synchrony — bar charts of xcorr strength + lag per block.
+    """Figure 2: whole-body movement synchrony per block, against chance.
+
+    Left: each block's mean synchrony (bar, with its standard error) next to
+    its chance level (black line), with every 20 s window as a dot. Blocks
+    with fewer than ``MIN_SYNC_WINDOWS`` windows are drawn faded and labelled,
+    matching the report. Right: every window over session time, so gaps and
+    drifts are visible.
 
     Args:
-        xcorr_df: Per-window xcorr results with 'block' column.
-        blocks: Session block definitions.
+        sync_df: Per-window synchrony (``pose_metrics_sync.csv``): block,
+            window_start_s, window_end_s, sync_r.
+        block_stats: Per-block summaries with sync_mean, sync_chance_mean and
+            sync_n_windows.
+        blocks: Session block definitions (sets the order).
         output_path: Base path for output (without extension).
     """
-    block_names = [b.name for b in blocks if b.name in xcorr_df["block"].unique()]
-    if not block_names:
+    if sync_df.empty:
         return
+    present = set(sync_df["block"].unique())
+    shown = [b for b in blocks if b.name in present]
+    if not shown:
+        return
+    stats_by_block = {s["block"]: s for s in block_stats}
+    rng = np.random.default_rng(0)
 
-    fig, (ax_xcorr, ax_lag) = plt.subplots(1, 2, figsize=(8, 4))
-
-    x = np.arange(len(block_names))
-    colors = [BLOCK_COLORS.get(name, "#999") for name in block_names]
-
-    # Left: mean peak xcorr per block
-    means = []
-    stds = []
-    for name in block_names:
-        block_data = xcorr_df[xcorr_df["block"] == name]["peak_xcorr"]
-        means.append(float(block_data.mean()))
-        stds.append(float(block_data.std()))
-
-    ax_xcorr.bar(
-        x,
-        means,
-        yerr=stds,
-        color=colors,
-        alpha=0.7,
-        capsize=5,
-        edgecolor="black",
-        linewidth=0.5,
+    fig, (ax_bar, ax_time) = plt.subplots(
+        1, 2, figsize=(11, 4.2), gridspec_kw={"width_ratios": [1, 1.6]}
     )
-    ax_xcorr.set_xticks(x)
-    ax_xcorr.set_xticklabels([n.capitalize() for n in block_names])
-    ax_xcorr.set_ylabel("Peak cross-correlation")
-    ax_xcorr.set_title("Movement synchrony")
-    ax_xcorr.set_ylim(0, 1)
-
-    # Right: mean lag per block. No error bars: per-window peak-lag scatter is
-    # dominated by noise when synchrony is weak (the cross-correlation peak
-    # wanders across the +/-2 s search range), so its standard deviation swamps
-    # the mean and is not informative. Show the block-mean lag only.
-    lag_means = []
-    for name in block_names:
-        block_data = xcorr_df[xcorr_df["block"] == name]["peak_lag_s"]
-        lag_means.append(float(block_data.mean()))
-
-    bar_colors = ["#e57373" if m > 0 else "#64B5F6" for m in lag_means]
-    ax_lag.bar(
-        x,
-        lag_means,
-        color=bar_colors,
-        alpha=0.7,
-        edgecolor="black",
-        linewidth=0.5,
+    for i, block in enumerate(shown):
+        color = BLOCK_COLORS.get(block.name, block.color or "#999")
+        r = sync_df.loc[sync_df["block"] == block.name, "sync_r"].to_numpy()
+        enough = len(r) >= MIN_SYNC_WINDOWS
+        alpha = 0.75 if enough else 0.25
+        mean = float(np.mean(r))
+        sem = float(np.std(r, ddof=1) / np.sqrt(len(r))) if len(r) > 1 else 0.0
+        ax_bar.bar(
+            i,
+            mean,
+            yerr=sem,
+            color=color,
+            alpha=alpha,
+            capsize=5,
+            edgecolor="black",
+            linewidth=0.5,
+            width=0.6,
+        )
+        ax_bar.scatter(
+            i + rng.uniform(-0.18, 0.18, len(r)),
+            r,
+            s=9,
+            color="black",
+            alpha=0.35 if enough else 0.15,
+            zorder=3,
+            linewidths=0,
+        )
+        chance = stats_by_block.get(block.name, {}).get("sync_chance_mean")
+        if chance is not None and not pd.isna(chance):
+            ax_bar.hlines(
+                chance, i - 0.36, i + 0.36, color="black", linewidth=2.2, zorder=4
+            )
+        label = f"n={len(r)}" if enough else f"n={len(r)}\ntoo few"
+        ax_bar.text(
+            i,
+            1.02,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            transform=ax_bar.get_xaxis_transform(),
+        )
+        windows = sync_df[sync_df["block"] == block.name]
+        mid_min = (windows["window_start_s"] + windows["window_end_s"]) / 2 / 60
+        ax_time.scatter(
+            mid_min,
+            windows["sync_r"],
+            s=14,
+            color=color,
+            alpha=alpha,
+            label=block.name.replace("_", " "),
+            linewidths=0,
+        )
+    ax_bar.axhline(0, color="black", linewidth=0.5)
+    ax_bar.set_xticks(range(len(shown)))
+    ax_bar.set_xticklabels(
+        [b.name.replace("_", " ").capitalize() for b in shown],
+        rotation=20 if len(shown) > 3 else 0,
     )
-    ax_lag.set_xticks(x)
-    ax_lag.set_xticklabels([n.capitalize() for n in block_names])
-    ax_lag.set_ylabel("Mean lag (s)")
-    ax_lag.set_title("Lead-follow (+ = child follows)")
-    ax_lag.axhline(0, color="black", linewidth=0.5, linestyle="--")
-
+    ax_bar.set_ylabel("Movement synchrony (r)")
+    ax_bar.set_ylim(-1, 1)
+    ax_bar.set_title("Per block: bar = mean, line = chance", pad=26, fontsize=11)
+    ax_time.axhline(0, color="black", linewidth=0.5)
+    ax_time.set_ylim(-1, 1)
+    ax_time.set_xlabel("Time in video (min)")
+    ax_time.set_ylabel("Synchrony per 20 s window (r)")
+    ax_time.set_title("Every window over time", pad=26, fontsize=11)
+    ax_time.legend(fontsize=8, frameon=False, loc="lower right", ncol=2)
+    for ax in (ax_bar, ax_time):
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
     fig.suptitle(
-        "Parent-Child Movement Synchrony", fontsize=14, fontweight="bold", y=1.02
+        "Parent-child movement synchrony (whole-body movement, 20 s windows)",
+        fontsize=13,
+        fontweight="bold",
+        y=1.03,
     )
     fig.tight_layout()
     fig.savefig(str(output_path) + ".png", dpi=300, bbox_inches="tight")
@@ -522,8 +608,13 @@ def main() -> None:
     if not results["proximity_df"].empty:
         plot_proximity(results["proximity_df"], blocks, camera_dir / "pose_proximity")
 
-    if not results["xcorr_df"].empty:
-        plot_synchrony(results["xcorr_df"], blocks, camera_dir / "pose_synchrony")
+    if not results["sync_df"].empty:
+        plot_synchrony(
+            results["sync_df"],
+            results["block_stats"],
+            blocks,
+            camera_dir / "pose_synchrony",
+        )
 
 
 if __name__ == "__main__":
