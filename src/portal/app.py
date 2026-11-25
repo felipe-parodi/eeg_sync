@@ -1117,6 +1117,45 @@ def job_state_chip(state: str) -> tuple[str, str]:
     return JOB_STATE_CHIPS.get(state, ("unknown", state or "Unknown"))
 
 
+FINISHED_STATES = frozenset({"complete", "failed"})
+
+
+def _format_when(moment: datetime) -> str:
+    """Plain date and time, e.g. ``21 Nov 2026, 18:07``."""
+    return f"{moment.day} {moment:%b %Y, %H:%M}"
+
+
+def job_times(job_dir: Path, state: str) -> dict[str, str]:
+    """When a job was submitted and when it finished (or last changed).
+
+    The submission time comes from the job ID (``YYYYMMDD_HHMMSS_...``); the
+    second time is the last change to ``status.json`` (notes such as
+    "numbers recalculated" live in another file, so they do not move it).
+
+    Args:
+        job_dir: Job folder.
+        state: Job state.
+
+    Returns:
+        ``submitted``, ``updated`` (formatted, empty when unknown) and
+        ``updated_label`` ("Finished" or "Last update").
+    """
+    try:
+        submitted = _format_when(
+            datetime.strptime("_".join(job_dir.name.split("_")[:2]), "%Y%m%d_%H%M%S")
+        )
+    except ValueError:
+        submitted = ""
+    try:
+        updated = _format_when(
+            datetime.fromtimestamp((job_dir / "status.json").stat().st_mtime)
+        )
+    except OSError:
+        updated = ""
+    label = "Finished" if state in FINISHED_STATES else "Last update"
+    return {"submitted": submitted, "updated": updated, "updated_label": label}
+
+
 def _job_rows() -> list[dict[str, str]]:
     """Return one display row per job folder, active jobs first.
 
@@ -1139,6 +1178,7 @@ def _job_rows() -> list[dict[str, str]]:
                 "message": str(status.get("message", "")),
                 "chip_kind": kind,
                 "chip_label": label,
+                **job_times(status_path.parent, state),
             }
         )
     # Stable sort keeps the newest-first order inside each group.
@@ -2001,6 +2041,7 @@ def job_status_view(job_id: str, job_dir: Path) -> dict[str, Any]:
         message = "Working on both videos at the same time."
     view: dict[str, Any] = {
         "job_id": job_id,
+        **job_times(JOB_ROOT / job_id, state),
         "state": state,
         "chip_kind": kind,
         "chip_label": label,

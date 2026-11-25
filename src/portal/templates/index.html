@@ -13,7 +13,7 @@
   <div class="card card--flush">
     {% if jobs %}<ul class="job-list">
       {% for job in jobs %}<li class="job-item{% if job.chip_kind in ('running', 'waiting') %} job-item--active{% endif %}">
-        <span class="job-item__id">{{ job.job_id }}</span>
+        <span class="job-item__id">{{ job.job_id }}{% if job.submitted %}<span class="job-item__when">Submitted {{ job.submitted }}{% if job.updated %} · {{ job.updated_label }} {{ job.updated }}{% endif %}</span>{% endif %}</span>
         <span>{{ chip(job.chip_kind, job.chip_label) }}</span>
         <span class="job-item__message">{{ job.message }}</span>
         <a class="job-item__link" href="/jobs/{{ job.job_id }}">{% if job.chip_kind == 'waiting' %}Continue{% else %}Open{% endif %}<span class="visually-hidden"> job {{ job.job_id }}</span></a>

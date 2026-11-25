@@ -494,3 +494,38 @@ def test_session_verdict_uses_task_table_when_present(portal_env: Path) -> None:
     rows = {row["session_id"]: row for row in portal_app.session_rows()}
 
     assert rows["1019v4"]["verdict_label"] == "Check"
+
+
+def test_job_times_from_id_and_status(tmp_path: Path) -> None:
+    job = tmp_path / "20261121_180741_1018v4_11d48406"
+    write_status(job, {"state": "complete", "message": "Done."})
+    from datetime import datetime
+
+    stamp = datetime(2026, 11, 21, 19, 2, 5).timestamp()  # local time
+    os.utime(job / "status.json", (stamp, stamp))
+
+    times = portal_app.job_times(job, "complete")
+
+    assert times["submitted"] == "21 Nov 2026, 18:07"
+    assert times["updated_label"] == "Finished"
+    assert times["updated"] == "21 Nov 2026, 19:02"
+
+
+def test_job_times_tolerate_unusual_ids(tmp_path: Path) -> None:
+    job = tmp_path / "a-done"
+    write_status(job, {"state": "running", "message": "x"})
+
+    times = portal_app.job_times(job, "running")
+
+    assert times["submitted"] == ""
+    assert times["updated_label"] == "Last update"
+
+
+def test_home_and_job_page_show_dates(client: TestClient, portal_env: Path) -> None:
+    job_id = "20261121_180741_1018v4_11d48406"
+    write_status(
+        portal_env / "portal_jobs" / job_id, {"state": "complete", "message": "Done."}
+    )
+
+    assert "21 Nov 2026, 18:07" in client.get("/").text
+    assert "21 Nov 2026, 18:07" in client.get(f"/jobs/{job_id}").text
