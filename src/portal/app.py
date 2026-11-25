@@ -148,8 +148,13 @@ def portal_is_idle(now: float | None = None) -> bool:
     """True when no job is uploading, queued or running.
 
     Jobs waiting for parent labels do not count: a restart keeps them.
-    Uploads untouched for ``STALE_UPLOAD_S`` count as abandoned.
+    Uploads untouched for ``STALE_UPLOAD_S`` count as abandoned. Recalculating
+    finished sessions' numbers counts as busy.
     """
+    from portal import refresh
+
+    if refresh.is_refreshing():
+        return False
     now = time.time() if now is None else now
     for job_dir in _job_dirs():
         state = str(read_status(job_dir).get("state", ""))
@@ -234,6 +239,34 @@ async def _restart_when_idle_loop() -> None:
             os._exit(RESTART_EXIT_CODE)
 
 
+def start_metrics_refresh() -> threading.Thread:
+    """Recalculate outdated finished sessions in the background.
+
+    Runs once per start: finished jobs made with older metric definitions get
+    their numbers (not their tracking) recalculated, one at a time under the
+    job lock, so a new upload simply waits its turn.
+
+    Returns:
+        The background thread.
+    """
+    from portal import refresh
+
+    def run() -> None:
+        summary = refresh.refresh_outdated_jobs(
+            JOB_ROOT, OUTPUT_ROOT, REPO_ROOT, lock=JOB_RUN_LOCK
+        )
+        if summary["refreshed"] or summary["failed"]:
+            print(
+                f"Recalculated numbers for {summary['refreshed']} finished "
+                f"session(s); {summary['failed']} could not be recalculated.",
+                flush=True,
+            )
+
+    thread = threading.Thread(target=run, name="metrics-refresh", daemon=True)
+    thread.start()
+    return thread
+
+
 @asynccontextmanager
 async def portal_lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Validate configuration, tidy jobs, and watch for restart requests."""
@@ -244,6 +277,7 @@ async def portal_lifespan(_: FastAPI) -> AsyncIterator[None]:
             f"Marked {summary['interrupted']} job(s) interrupted by the restart.",
             flush=True,
         )
+    start_metrics_refresh()
     watcher = asyncio.create_task(_restart_when_idle_loop())
     try:
         yield
