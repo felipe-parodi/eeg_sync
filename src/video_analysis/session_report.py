@@ -24,7 +24,8 @@ from typing import Any
 
 import pandas as pd
 
-from video_analysis.pose_metrics import (
+from video_analysis.pose_metrics import (  # noqa: F401 (METRICS_VERSION re-exported)
+    METRICS_VERSION,
     MIN_SYNC_WINDOWS,
     body_scaled_proximity,
     quality_verdict,
@@ -34,12 +35,9 @@ SESSION_METRICS_CSV = "session_metrics.csv"
 ALL_SESSIONS_CSV = "all_sessions_metrics.csv"
 REPORT_HTML = "report.html"
 TASK_METRICS_CSV = "task_metrics.csv"
-# Bump when metric definitions change, so study tables never silently mix
-# sessions processed under different definitions. 2026-11-16: 5 fps even frame
-# timing, short-gap-only filling, whole-body synchrony, task table, verdict.
-# 2026-11-25: torso-normalized distance, one chance-shift rule for all block
-# lengths (>= 3 shifts), flat windows left out, verdict fails closed.
-METRICS_VERSION = "2026-11-25"
+# The version is defined in pose_metrics and stored with each block's metrics;
+# summaries written before it was stored carry UNSTAMPED_METRICS_VERSION.
+UNSTAMPED_METRICS_VERSION = "2026-11-16 or earlier"
 LEGACY_METRICS_VERSION = "before-2026-11-16"
 ALL_SESSIONS_TASK_CSV = "all_sessions_task_metrics.csv"
 
@@ -719,8 +717,9 @@ Compare tasks within one camera.</li>
 <li><strong>Movement synchrony</strong>: how closely the amount of whole-body
 movement of the two people rises and falls together, as a correlation in
 20-second windows (0 = unrelated, 1 = identical). <em>Chance</em> is the same
-measure with the child's movement taken from other moments. Only the part
-above chance reflects the interaction. It is not shown when there are fewer
+measure with the child's movement taken from other moments. A value above
+chance means more synchrony than that reference; it is not a significance
+test. It is not shown when there are fewer
 than {MIN_SYNC_WINDOWS} unbroken 20-second stretches.</li>
 {gaze_note}
 </ul>
@@ -728,6 +727,27 @@ than {MIN_SYNC_WINDOWS} unbroken 20-second stretches.</li>
 {"".join(media)}
 </body></html>
 """
+
+
+def _stamp_version(rows: pd.DataFrame) -> pd.DataFrame:
+    """Keep the version stored with each block's metrics (never restamp)."""
+    if rows.empty:
+        return rows.assign(metrics_version=pd.Series(dtype=str))
+    if "metrics_version" not in rows.columns:
+        rows["metrics_version"] = UNSTAMPED_METRICS_VERSION
+    rows["metrics_version"] = rows["metrics_version"].fillna(UNSTAMPED_METRICS_VERSION)
+    return rows
+
+
+def _joined_version(versions: pd.Series, camera_id: str, parts: list[str]) -> str:
+    """One version for a task, or "mixed: a; b" when its parts differ."""
+    found = sorted(
+        {
+            str(versions.get((camera_id, part), UNSTAMPED_METRICS_VERSION))
+            for part in parts
+        }
+    )
+    return found[0] if len(found) == 1 else "mixed: " + "; ".join(found)
 
 
 def write_session_outputs(session_dir: Path) -> pd.DataFrame:
@@ -740,10 +760,15 @@ def write_session_outputs(session_dir: Path) -> pd.DataFrame:
         The session table.
     """
     session_dir = Path(session_dir)
-    rows = collect_session_rows(session_dir)
-    rows = rows.assign(metrics_version=METRICS_VERSION)
+    rows = _stamp_version(collect_session_rows(session_dir))
     rows.to_csv(session_dir / SESSION_METRICS_CSV, index=False)
-    tasks = collect_task_rows(session_dir).assign(metrics_version=METRICS_VERSION)
+    tasks = collect_task_rows(session_dir)
+    if not tasks.empty:
+        versions = rows.groupby(["camera_id", "block"])["metrics_version"].first()
+        tasks["metrics_version"] = [
+            _joined_version(versions, cam, parts.split(";"))
+            for cam, parts in zip(tasks["camera_id"], tasks["parts"])
+        ]
     tasks.to_csv(session_dir / TASK_METRICS_CSV, index=False)
     (session_dir / REPORT_HTML).write_text(
         render_report_html(session_dir, rows, tasks), encoding="utf-8"

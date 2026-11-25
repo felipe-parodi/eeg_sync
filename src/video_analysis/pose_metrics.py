@@ -17,6 +17,8 @@ import pandas as pd
 
 from gaze_analysis.config import SessionBlock, load_session_config
 from gaze_analysis.synchrony import (
+    XCORR_COLUMNS,
+    chance_summary,
     compute_movement_sync,
     compute_movement_xcorr,
     compute_movement_xcorr_chance,
@@ -64,6 +66,15 @@ MIN_VALID_SECONDS = 120.0
 # Movement synchrony needs at least this many 20 s windows (about 2 minutes of
 # unbroken tracking); with fewer it is not reported.
 MIN_SYNC_WINDOWS = 10
+# Torso ruler needs at least this many confident frames per person (10 s).
+MIN_RULER_FRAMES = 50
+# Bump when metric definitions change; stored with every block's metrics so
+# tables never silently mix definitions. 2026-11-16: 5 fps even frame timing,
+# short-gap-only filling, whole-body synchrony, task table, verdict.
+# 2026-11-25: torso-normalized distance, one chance-shift rule for all block
+# lengths (>= 3 shifts, at the real windows), flat windows left out, verdict
+# fails closed.
+METRICS_VERSION = "2026-11-25"
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +213,14 @@ def body_scaled_proximity(
     ruler = prox if ruler_frames is None else ruler_frames
     if not {"parent_torso_px", "child_torso_px"} <= set(ruler.columns):
         return {}
+    support = int(
+        min(
+            ruler["parent_torso_px"].notna().sum(),
+            ruler["child_torso_px"].notna().sum(),
+        )
+    )
+    if support < MIN_RULER_FRAMES:
+        return {}
     parent = ruler["parent_torso_px"].median()
     child = ruler["child_torso_px"].median()
     if not (np.isfinite(parent) and np.isfinite(child)) or parent <= 0 or child <= 0:
@@ -210,6 +229,7 @@ def body_scaled_proximity(
     dist = prox["torso_distance_px"]
     return {
         "body_scale_px": scale,
+        "body_scale_n_frames": support,
         "proximity_scaled_mean": float(dist.mean()) / scale,
         "proximity_scaled_median": float(dist.median()) / scale,
     }
@@ -302,12 +322,14 @@ def compute_per_block_metrics(
             stats["sync_mean"] = float(sync["sync_r"].mean())
             stats["sync_std"] = float(sync["sync_r"].std())
             stats["sync_n_windows"] = len(sync)
-            if not sync_chance.empty:
-                stats["sync_chance_mean"] = float(sync_chance["sync_r"].mean())
+            reference = chance_summary(sync_chance)
+            if reference:
+                stats.update(reference)
                 stats["sync_minus_chance"] = (
                     stats["sync_mean"] - stats["sync_chance_mean"]
                 )
         stats["quality_verdict"], stats["quality_reasons"] = quality_verdict(stats)
+        stats["metrics_version"] = METRICS_VERSION
         block_stats.append(stats)
 
     proximity_df = (
@@ -536,6 +558,14 @@ def plot_synchrony(
     print(f"[pose-metrics] saved {output_path}.png/.svg")
 
 
+PROXIMITY_TABLE_COLUMNS = [
+    "frame_idx",
+    "timestamp_s",
+    "torso_distance_px",
+    "parent_torso_px",
+    "child_torso_px",
+    "block",
+]
 SYNC_TABLE_COLUMNS = ["segment_id", "window_start_s", "window_end_s", "sync_r", "block"]
 
 
@@ -620,16 +650,19 @@ def main() -> None:
         frame_rate=config.frame_rate,
     )
 
-    # Save CSVs
-    if not results["proximity_df"].empty:
-        prox_path = camera_dir / "pose_metrics_proximity.csv"
-        results["proximity_df"].to_csv(prox_path, index=False)
-        print(f"[pose-metrics] wrote {prox_path} ({len(results['proximity_df'])} rows)")
+    # Save CSVs (always, header-only when empty, so reruns leave nothing stale)
+    prox_path = camera_dir / "pose_metrics_proximity.csv"
+    prox_out = results["proximity_df"]
+    if prox_out.empty:
+        prox_out = pd.DataFrame(columns=PROXIMITY_TABLE_COLUMNS)
+    prox_out.to_csv(prox_path, index=False)
+    print(f"[pose-metrics] wrote {prox_path} ({len(prox_out)} rows)")
 
-    if not results["xcorr_df"].empty:
-        xcorr_path = camera_dir / "pose_metrics_xcorr.csv"
-        results["xcorr_df"].to_csv(xcorr_path, index=False)
-        print(f"[pose-metrics] wrote {xcorr_path} ({len(results['xcorr_df'])} rows)")
+    xcorr_path = camera_dir / "pose_metrics_xcorr.csv"
+    xcorr_out = results["xcorr_df"]
+    if xcorr_out.empty:
+        xcorr_out = pd.DataFrame(columns=[*XCORR_COLUMNS, "block"])
+    xcorr_out.to_csv(xcorr_path, index=False)
 
     # Save summary JSON
     summary_path = camera_dir / "pose_metrics_summary.json"
@@ -655,6 +688,9 @@ def main() -> None:
     # Generate plots
     if not results["proximity_df"].empty:
         plot_proximity(results["proximity_df"], blocks, camera_dir / "pose_proximity")
+    else:
+        for suffix in (".png", ".svg"):
+            (camera_dir / f"pose_proximity{suffix}").unlink(missing_ok=True)
 
     save_sync_outputs(camera_dir, results["sync_df"], results["block_stats"], blocks)
 

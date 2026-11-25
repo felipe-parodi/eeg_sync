@@ -307,7 +307,7 @@ def test_proximity_frames_carry_torso_lengths():
 def test_block_stats_include_body_scaled_proximity():
     """Distance 300 px with torsos 80 and 40 px: scale 60 px, scaled distance 5."""
     pose = _upright_pose(50, 300.0, 600.0, parent_torso=80.0, child_torso=40.0)
-    blocks = [SessionBlock("grocery", 0.0, 10.0, "#999")]
+    blocks = [SessionBlock("grocery", 0.0, 30.0, "#999")]
 
     stats = compute_per_block_metrics(pose, blocks, frame_rate=5.0)["block_stats"][0]
 
@@ -320,7 +320,7 @@ def test_block_stats_include_body_scaled_proximity():
 
 def test_scaled_proximity_is_independent_of_zoom():
     """The same scene filmed twice as large gives the same scaled distance."""
-    near = _upright_pose(20, 300.0, 600.0, parent_torso=80.0, child_torso=40.0)
+    near = _upright_pose(60, 300.0, 600.0, parent_torso=80.0, child_torso=40.0)
     far = near.assign(x_m=near["x_m"] / 2, y_m=near["y_m"] / 2)
     blocks = [SessionBlock("grocery", 0.0, 10.0, "#999")]
 
@@ -383,15 +383,15 @@ def test_quality_verdict_fails_closed_on_missing_support():
 
 def test_ruler_ignores_low_confidence_torso_joints():
     """A mis-detected hip (confidence 0.1) on half the frames must not move the ruler."""
-    pose = _upright_pose(20, 300.0, 600.0, parent_torso=80.0, child_torso=40.0)
+    pose = _upright_pose(120, 300.0, 600.0, parent_torso=80.0, child_torso=40.0)
     bad = (
         (pose["track_id"] == 0)
         & (pose["keypoint_name"] == "kp_011")
-        & (pose["frame_idx"] < 10)
+        & (pose["frame_idx"] < 60)
     )
     pose.loc[bad, "y_m"] += 200.0
     pose.loc[bad, "keypoint_confidence"] = 0.1
-    blocks = [SessionBlock("grocery", 0.0, 10.0, "#999")]
+    blocks = [SessionBlock("grocery", 0.0, 30.0, "#999")]
 
     stats = compute_per_block_metrics(pose, blocks, frame_rate=5.0)["block_stats"][0]
 
@@ -413,3 +413,32 @@ def test_save_sync_outputs_replaces_stale_files_when_no_windows(tmp_path):
     assert {"window_start_s", "window_end_s", "sync_r", "block"} <= set(written.columns)
     assert not (tmp_path / "pose_synchrony.png").exists()
     assert not (tmp_path / "pose_synchrony.svg").exists()
+
+
+def test_block_stats_record_chance_shifts_and_version():
+    from video_analysis.pose_metrics import METRICS_VERSION
+
+    rng = np.random.default_rng(3)
+    walk = np.cumsum(rng.normal(0, 4, 1500))
+    pose = _upright_pose(1500, 300.0, 600.0, parent_torso=80.0, child_torso=40.0)
+    pose["x_m"] = pose["x_m"] + walk[pose["frame_idx"].to_numpy()]
+    blocks = [SessionBlock("grocery", 0.0, 300.0, "#999")]
+
+    stats = compute_per_block_metrics(pose, blocks, frame_rate=5.0)["block_stats"][0]
+
+    assert stats["metrics_version"] == METRICS_VERSION
+    assert stats["sync_chance_n_shifts"] >= 3
+    assert "sync_chance_sd" in stats
+
+
+def test_ruler_needs_enough_confident_frames():
+    """Fewer than MIN_RULER_FRAMES confident torsos: no normalized distance."""
+    from video_analysis.pose_metrics import MIN_RULER_FRAMES
+
+    pose = _upright_pose(MIN_RULER_FRAMES - 1, 300.0, 600.0, 80.0, 40.0)
+    blocks = [SessionBlock("grocery", 0.0, 100.0, "#999")]
+
+    stats = compute_per_block_metrics(pose, blocks, frame_rate=5.0)["block_stats"][0]
+
+    assert "proximity_median" in stats
+    assert "proximity_scaled_median" not in stats

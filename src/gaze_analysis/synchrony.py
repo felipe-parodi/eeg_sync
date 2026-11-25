@@ -680,13 +680,21 @@ def compute_movement_sync(
         return empty, empty.copy()
 
     real = _lag0_windows(run_ids, times, parent, child, window_frames)
+    if real.empty:
+        return real, empty.copy()
+    real_keys = real[["segment_id", "window_start_s"]]
     child_all = np.concatenate(child)
     bounds = np.cumsum([len(c) for c in child])[:-1]
     chance_tables = []
     for shift in _chance_shifts(len(child_all), dt, shift_step_s, max_shifts):
         shifted = np.split(np.roll(child_all, -shift), bounds)
         table = _lag0_windows(run_ids, times, parent, shifted, window_frames)
-        chance_tables.append(table.assign(shift_s=round(shift * dt, 6)))
+        # Same moments as the real windows, so real and reference compare
+        # like with like (a window undefined in either is left out of both
+        # only through this shift's mean).
+        table = table.merge(real_keys, on=["segment_id", "window_start_s"])
+        if not table.empty:
+            chance_tables.append(table.assign(shift_s=round(shift * dt, 6)))
     if not chance_tables:
         return real, empty.copy()
     chance = pd.concat(chance_tables, ignore_index=True)
@@ -709,7 +717,30 @@ def _chance_shifts(n: int, dt: float, step_s: float, max_shifts: int) -> list[in
     if len(shifts) > max_shifts:
         keep = np.linspace(0, len(shifts) - 1, max_shifts).round().astype(int)
         shifts = [shifts[i] for i in sorted(set(keep))]
-    return shifts
+    return shifts if len(shifts) >= SYNC_MIN_SHIFTS else []
+
+
+def chance_summary(chance: pd.DataFrame) -> dict:
+    """Reference level from shifted windows: each shift counts equally.
+
+    Args:
+        chance: Shifted windows with ``shift_s`` and ``sync_r``.
+
+    Returns:
+        ``sync_chance_mean`` (mean of per-shift means), ``sync_chance_sd``
+        (spread across shifts) and ``sync_chance_n_shifts``; empty when fewer
+        than ``SYNC_MIN_SHIFTS`` shifts have windows.
+    """
+    if chance.empty:
+        return {}
+    per_shift = chance.groupby("shift_s")["sync_r"].mean().dropna()
+    if len(per_shift) < SYNC_MIN_SHIFTS:
+        return {}
+    return {
+        "sync_chance_mean": float(per_shift.mean()),
+        "sync_chance_sd": float(per_shift.std()),
+        "sync_chance_n_shifts": int(len(per_shift)),
+    }
 
 
 # ====================================================================

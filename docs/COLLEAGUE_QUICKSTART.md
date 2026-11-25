@@ -146,8 +146,8 @@ Key columns:
   amount of whole-body movement of the two rises and falls together, in
   20-second windows) and the same measure with the child's movement taken
   from other moments (averaged over several time shifts; empty when the task
-  is too short for at least 3). Only `sync_minus_chance` above zero reflects
-  the interaction. With split tasks, also look at how the windows are spread
+  is too short for at least 3). Positive `sync_minus_chance` means more
+  synchrony than that time-shift reference; it is not a significance test. With split tasks, also look at how the windows are spread
   across the pieces in `session_metrics.csv`.
 - `gaze_<category>_pct` and `gaze_<category>_chance_pct`: share of frames in
   each gaze category and its chance level. A category means something only

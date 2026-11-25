@@ -721,3 +721,26 @@ def test_body_sync_no_chance_level_for_very_short_data() -> None:
 
     assert not real.empty
     assert chance.empty
+
+
+def test_body_sync_chance_windows_match_real_windows() -> None:
+    """Every shift is evaluated at exactly the real windows' positions."""
+    from gaze_analysis.synchrony import compute_movement_sync
+
+    ts = np.round(np.arange(0, 200, 0.2), 6)
+    child = _random_walk(len(ts), 15)
+    child[200:400] = child[200]  # child still for 40 s: flat real windows there
+    real, chance = compute_movement_sync(
+        _make_body_pose(ts, _random_walk(len(ts), 16), child), 0, 1
+    )
+
+    real_keys = set(zip(real["segment_id"], real["window_start_s"]))
+    for _, table in chance.groupby("shift_s"):
+        assert set(zip(table["segment_id"], table["window_start_s"])) <= real_keys
+
+
+def test_chance_shifts_never_fewer_than_three_after_thinning() -> None:
+    from gaze_analysis.synchrony import _chance_shifts
+
+    assert _chance_shifts(1000, 0.2, 10.0, max_shifts=2) == []
+    assert len(_chance_shifts(1000, 0.2, 10.0, max_shifts=3)) == 3

@@ -301,6 +301,12 @@ def test_study_tables_mark_metrics_version(tmp_path: Path) -> None:
     from video_analysis.session_report import METRICS_VERSION
 
     _write_split_session(tmp_path / "1019v4")
+    summary = tmp_path / "1019v4" / "camera_a" / "pose_metrics_summary.json"
+    stamped = [
+        {**b, "metrics_version": METRICS_VERSION}
+        for b in json.loads(summary.read_text(encoding="utf-8"))
+    ]
+    summary.write_text(json.dumps(stamped), encoding="utf-8")
     write_session_outputs(tmp_path / "1019v4")
     old = tmp_path / "1012v3"
     old.mkdir()
@@ -484,3 +490,20 @@ def test_task_chance_is_missing_when_a_part_with_windows_has_none(
     assert abs(g["sync_mean"] - 0.18) < 1e-9  # raw mean keeps all windows
     assert pd.isna(g["sync_chance_mean"])
     assert pd.isna(g["sync_minus_chance"])
+
+
+def test_tables_carry_the_version_the_metrics_were_computed_with(
+    tmp_path: Path,
+) -> None:
+    """Regenerating a report must not restamp older metrics as current."""
+    from video_analysis.session_report import write_session_outputs
+
+    session = tmp_path / "1019"
+    _write_split_session(session)  # summaries without a version: older run
+
+    write_session_outputs(session)
+
+    rows = pd.read_csv(session / "session_metrics.csv")
+    tasks = pd.read_csv(session / "task_metrics.csv")
+    assert (rows["metrics_version"] == "2026-11-16 or earlier").all()
+    assert (tasks["metrics_version"] == "2026-11-16 or earlier").all()
